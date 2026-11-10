@@ -431,7 +431,8 @@ impl App {
         {
             let mut addons = self.addons.lock().unwrap();
             let addon = addons.get_mut(id).ok_or("removed")?;
-            addon.paths = items.iter().flat_map(|i| [(path_of(i), id_of(i)), (id_of(i), id_of(i))]).collect();
+            // Added to, not replaced: rex keeps every old title until it takes the snapshot.
+            addon.paths.extend(index_of(&items, &addon.deleted));
             addon.probes.retain(|key, _| items.iter().any(|i| id_of(i) == *key));
             for (at, item) in items.iter_mut().enumerate() {
                 if let Some(own) = item.get("media_info").filter(|m| m.is_object()).cloned() {
@@ -462,6 +463,10 @@ impl App {
             return Ok((0, 0));
         }
         self.snapshot(id, &items, force)?;
+        if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
+            addon.paths = index_of(&items, &addon.deleted);
+            write_index(self, addon);
+        }
         Ok((items.len() - held, held))
     }
 
@@ -816,6 +821,11 @@ fn path_of(item: &Map<String, Json>) -> String {
     item["path"].as_str().unwrap_or_default().to_string()
 }
 
+/// What `/bytes` reads items by: each one's path, and its id.
+fn index_of(items: &[Map<String, Json>], deleted: &BTreeSet<String>) -> HashMap<String, String> {
+    items.iter().filter(|i| !deleted.contains(&id_of(i))).flat_map(|i| [(path_of(i), id_of(i)), (id_of(i), id_of(i))]).collect()
+}
+
 fn log_rejected(id: &str, answer: &Json) {
     for rejected in answer["rejected"].as_array().into_iter().flatten() {
         warn(id, &format!("rex rejected {}: {}", rejected["id"], rejected["reason"]));
@@ -1064,6 +1074,31 @@ mod sync_tests {
         assert_eq!(seen.len(), 2, "{seen:?}");
         assert_eq!((seen[0]["items"][0]["id"].as_str(), seen[0].get("force")), (Some("a1"), None));
         assert_eq!((seen[1]["items"][0]["id"].as_str(), &seen[1]["force"]), (Some("a2"), &json!(true)));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn a_refused_snapshot_keeps_the_old_titles_readable() {
+        let (rex, _) = stub_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-keep-index-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+        let source = "export default { items() { return [{id: 'a', path: 'films/a.mp4'}]; }, open() {} };";
+        app.install(&json!({"id": "keep", "name": "Keep", "version": "1.0.0"}), source, None).unwrap();
+        let old = HashMap::from([("films/old.mp4".to_string(), "old".to_string()), ("old".to_string(), "old".to_string())]);
+        app.addons.lock().unwrap().get_mut("keep").unwrap().paths = old;
+
+        // rex refuses and keeps "old": it must still be readable at /bytes.
+        assert!(app.start_sync("keep", false));
+        assert_eq!(wait_idle(&app, "keep")["error_kind"], "would_remove");
+        let paths = app.addons.lock().unwrap()["keep"].paths.clone();
+        assert_eq!((paths.get("films/old.mp4"), paths.get("films/a.mp4")), (Some(&"old".to_string()), Some(&"a".to_string())));
+
+        // Once rex takes it, "old" is gone, from the index on disk too.
+        assert!(app.start_sync("keep", true));
+        assert_eq!(wait_idle(&app, "keep")["state"], "idle");
+        assert!(!app.addons.lock().unwrap()["keep"].paths.contains_key("films/old.mp4"));
+        assert!(read_json(&dir(&app, "keep").join("index.json")).unwrap().get("films/old.mp4").is_none());
         let _ = std::fs::remove_dir_all(&data);
     }
 

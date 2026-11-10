@@ -15,6 +15,8 @@ pub struct Field {
     pub default: Json,
     pub required: bool,
     pub label: String,
+    /// A `list` answered redacted entry by entry (`"secret": true`).
+    pub secret: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +97,7 @@ impl Manifest {
                 default,
                 required: entry.get("required").and_then(Json::as_bool).unwrap_or(false),
                 label: entry.get("label").and_then(Json::as_str).unwrap_or(key).into(),
+                secret: entry.get("secret").and_then(Json::as_bool).unwrap_or(false),
             });
         }
         if raw.get("config").is_some_and(|c| !c.is_null() && !c.is_array()) {
@@ -139,6 +142,11 @@ impl Manifest {
                 effective[&field.key] = json!(MASK);
             }
         }
+        for field in self.config.iter().filter(|field| field.kind == "list" && field.secret) {
+            if let Some(list) = effective[&field.key].as_array() {
+                effective[&field.key] = list.iter().map(|entry| json!(redact(entry.as_str().unwrap_or("")))).collect();
+            }
+        }
         effective
     }
 
@@ -153,6 +161,16 @@ impl Manifest {
                 next.remove(key);
             } else if field.kind == "secret" && value.as_str() == Some(MASK) {
                 continue;
+            } else if field.kind == "list" && field.secret && fits("list", value) {
+                // An entry sent back as it was answered keeps the saved one it stands for.
+                let effective = self.effective(saved);
+                let mut unused: Vec<Option<&str>> = effective[key].as_array().into_iter().flatten().map(Json::as_str).collect();
+                let entries = value.as_array().unwrap().iter().map(|entry| {
+                    let entry = entry.as_str().unwrap();
+                    let kept = unused.iter_mut().find(|s| s.is_some_and(|s| redact(s) == entry)).and_then(Option::take);
+                    json!(kept.unwrap_or(entry))
+                });
+                next.insert(key.clone(), entries.collect());
             } else if fits(&field.kind, value) {
                 next.insert(key.clone(), value.clone());
             } else {
@@ -165,6 +183,16 @@ impl Manifest {
             }
         }
         Ok(next)
+    }
+}
+
+/// A secret list's entry as answered: an http(s) link keeps its scheme and host.
+fn redact(entry: &str) -> String {
+    match url::Url::parse(entry) {
+        Ok(link) if matches!(link.scheme(), "http" | "https") && link.host_str().is_some() => {
+            format!("{}://{}/{MASK}", link.scheme(), link.host_str().unwrap())
+        }
+        _ => MASK.to_string(),
     }
 }
 
@@ -237,6 +265,26 @@ mod tests {
             let error = m.apply(&saved, &bad).unwrap_err();
             assert!(error.contains(says), "{bad}: {error}");
         }
+    }
+
+    #[test]
+    fn secret_lists_are_redacted_entry_by_entry() {
+        let m = Manifest::parse(&json!({"id": "s", "name": "S", "version": "1", "config": [
+            {"key": "addons", "label": "Addons", "type": "list", "secret": true},
+            {"key": "plain", "label": "Plain", "type": "list"}
+        ]}))
+        .unwrap();
+        let typed = ["https://a.example/TOKEN1/manifest.json", "https://a.example/TOKEN2/manifest.json", "not a link", "http://b.example:8080/k"];
+        let saved = m.apply(&Map::new(), &json!({"addons": typed, "plain": ["https://a.example/open"]})).unwrap();
+        let shown = m.masked(&saved);
+        assert_eq!(shown["addons"], json!(["https://a.example/********", "https://a.example/********", "********", "http://b.example/********"]));
+        assert_eq!(shown["plain"], json!(["https://a.example/open"]));
+        // Sent back as shown, with one removed, one moved and one added: the saved links stay.
+        let again = m.apply(&saved, &json!({"addons": ["http://b.example/********", "https://a.example/********", "https://a.example/********", "https://c.example/new"]})).unwrap();
+        assert_eq!(again["addons"], json!(["http://b.example:8080/k", typed[0], typed[1], "https://c.example/new"]));
+        // A redacted entry nothing saved stands for is taken as typed.
+        let third = m.apply(&saved, &json!({"addons": ["https://z.example/********"]})).unwrap();
+        assert_eq!(third["addons"], json!(["https://z.example/********"]));
     }
 
     #[test]

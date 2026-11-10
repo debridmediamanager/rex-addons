@@ -64,7 +64,9 @@ JSON in and out. It answers only this device: the socket's own peer address must
 ### `GET /api/addons/{id}`
 
 The status fields above, plus `manifest` (as installed) and `config`: every setting with its
-saved value or default, a set `secret` answered as `"********"`.
+saved value or default, a set `secret` answered as `"********"`. A `list` the manifest marks
+`"secret": true` (the stremio addon's `addons`, whose links carry account tokens) is answered
+entry by entry: an http(s) link as `<scheme>://<host>/********`, anything else as `"********"`.
 
 ### `POST /api/addons`
 
@@ -85,7 +87,10 @@ still removed and the answer carries `rex_error`. A bundled addon removed stays 
 ### `PUT /api/addons/{id}/config`
 
 A JSON object of settings. Each key given replaces its value, `null` puts back the default, a
-`secret` sent as `"********"` keeps what's saved, and keys not given are kept. A key the manifest
+`secret` sent as `"********"` keeps what's saved, and keys not given are kept. In a secret list,
+an entry sent back as it was answered keeps the saved entry it stands for (the first one not yet
+kept, so two links on one host both stay, in the order sent); any other entry is taken as typed.
+So the app can remove, reorder and add entries without ever seeing the saved ones. A key the manifest
 doesn't list, or a value of the wrong type, is `400`. Answers `{"config": ...}` as `GET` shows it
 and starts a sync, which may remove more than half of the addon's titles (new settings can).
 

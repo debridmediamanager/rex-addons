@@ -1,11 +1,11 @@
 {
   "id": "stremio",
   "name": "Stremio addons",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Your Stremio addons' film and series catalogs, played from the streams your stream addons give. Nothing is downloaded.",
   "hosts": ["*"],
   "config": [
-    {"key": "addons", "label": "Addon links (each addon's manifest.json link)", "type": "list", "required": true},
+    {"key": "addons", "label": "Addon links (each addon's manifest.json link)", "type": "list", "required": true, "secret": true},
     {"key": "catalogs", "label": "Catalogs to take, as type/id (movie/top, series/top); empty takes every one", "type": "list", "default": []},
     {"key": "limit", "label": "Titles per catalog (episodes, for a series catalog)", "type": "number", "default": 50},
     {"key": "max_resolution", "label": "Highest resolution: 2160, 1080 or 720 (0 for any)", "type": "number", "default": 0},

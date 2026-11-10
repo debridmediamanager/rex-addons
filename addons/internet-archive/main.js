@@ -98,7 +98,7 @@ export default {
     if (!Array.isArray(docs)) throw new Error("archive.org search answered no list");
 
     const items = [];
-    const probeUntil = Date.now() + PROBE_BUDGET_MS;
+    let probeUntil = Date.now() + PROBE_BUDGET_MS;
     for (const doc of docs) {
       const identifier = doc.identifier;
       let chosen;
@@ -134,6 +134,8 @@ export default {
           storage.set(`p:${identifier}`, probe);
         } catch (error) {
           console.warn(`${identifier}: ${error.message}`);
+          // Without ffprobe on this host, none will work: leave them all to rex-addons.
+          if (/not available/.test(error.message)) probeUntil = 0;
         }
       }
       if (probe) item.media_info = probe;

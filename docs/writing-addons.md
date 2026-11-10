@@ -101,7 +101,7 @@ Limits, per call:
 |---|---|
 | Memory | 64 MB |
 | JavaScript time | 30 s for `items()`, 10 s for `open()`. Time spent waiting on `fetch` or `ffprobe` doesn't count |
-| Whole call | 20 minutes for `items()`, 90 s for `open()` |
+| Whole call | 20 minutes for `items()`, 90 s for `open()`. A `fetch` or body read still waiting then fails |
 | A fetched body | 16 MB |
 | `storage` | 16 MB in all, written to disk when the call ends |
 

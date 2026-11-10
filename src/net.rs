@@ -1,7 +1,7 @@
 //! Who may call the host, which hosts an addon may reach, and the HTTP client both use.
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const USER_AGENT: &str = concat!("rex-addons/", env!("CARGO_PKG_VERSION"));
 
@@ -121,6 +121,19 @@ pub fn request(
     headers: &[(String, String)],
     body: Option<&str>,
 ) -> Result<(ureq::Response, String), String> {
+    request_until(agent, hosts, method, url, headers, body, None)
+}
+
+/// `request`, with every hop and the response's body bounded by `deadline` in all, not per read.
+pub fn request_until(
+    agent: &ureq::Agent,
+    hosts: &Hosts,
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+    deadline: Option<Instant>,
+) -> Result<(ureq::Response, String), String> {
     let mut url = url::Url::parse(url).map_err(|e| format!("not a link: {e}"))?;
     let mut method = method.to_string();
     let mut body = body;
@@ -133,6 +146,13 @@ pub fn request(
             return Err(format!("{host} is not in the addon's hosts"));
         }
         let mut req = agent.request(&method, url.as_str());
+        if let Some(deadline) = deadline {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(format!("{host}: out of time"));
+            }
+            req = req.timeout(left);
+        }
         for (name, value) in headers {
             req = req.set(name, value);
         }

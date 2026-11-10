@@ -181,7 +181,7 @@ pub fn call(env: &Env, method: &str, args: &[Json], limits: Limits) -> Result<Js
     let context = Context::full(&runtime).map_err(|e| e.to_string())?;
     let result = context.with(|ctx| -> Result<Json, String> {
         let caught = |error: rquickjs::Error| describe(&ctx, error);
-        install(&ctx, env, waited.clone()).map_err(caught)?;
+        install(&ctx, env, waited.clone(), start + limits.wall, limits.wall).map_err(caught)?;
         let module = Module::declare(ctx.clone(), "main.js", env.source).map_err(caught)?;
         let (module, loaded) = module.eval().map_err(caught)?;
         loaded.finish::<()>().map_err(caught)?;
@@ -250,7 +250,16 @@ fn throw(ctx: &Ctx, message: &str) -> rquickjs::Error {
     Exception::throw_type(ctx, message)
 }
 
-fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>) -> rquickjs::Result<()> {
+/// What a fetch or body read that failed at the call's deadline says, rather than ureq's timeout.
+fn out_of_time(deadline: Instant, wall: Duration, what: &str, error: String) -> String {
+    if Instant::now() >= deadline {
+        format!("{what}: no time left, a call may take {} s in all", wall.as_secs())
+    } else {
+        format!("{what}: {error}")
+    }
+}
+
+fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline: Instant, wall: Duration) -> rquickjs::Result<()> {
     let host = Object::new(ctx.clone())?;
     let addon = env.addon.to_string();
     host.set(
@@ -286,9 +295,10 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>) -> rquick
                 })
                 .unwrap_or_default();
             let started = Instant::now();
-            let sent = net::request(&agent, &hosts, &method, &url, &headers, init["body"].as_str());
+            // The response's body is bounded by the same deadline.
+            let sent = net::request_until(&agent, &hosts, &method, &url, &headers, init["body"].as_str(), Some(deadline));
             fetch_waited.set(fetch_waited.get() + started.elapsed());
-            let (response, final_url) = sent.map_err(|error| throw(&ctx, &format!("fetch: {error}")))?;
+            let (response, final_url) = sent.map_err(|error| throw(&ctx, &out_of_time(deadline, wall, "fetch", error)))?;
             let mut names = response.headers_names();
             names.dedup();
             let headers: Map<String, Json> = names
@@ -323,7 +333,7 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>) -> rquick
             let mut bytes = Vec::new();
             let read = response.into_reader().take(MAX_BODY + 1).read_to_end(&mut bytes);
             waited.set(waited.get() + started.elapsed());
-            read.map_err(|error| throw(&ctx, &format!("reading the body: {error}")))?;
+            read.map_err(|error| throw(&ctx, &out_of_time(deadline, wall, "reading the body", error.to_string())))?;
             if bytes.len() as u64 > MAX_BODY {
                 return Err(throw(&ctx, &format!("the body is over {} MB", MAX_BODY >> 20)));
             }
@@ -483,5 +493,60 @@ mod tests {
         };
         let error = call(&env, "items", &[], QUICK).unwrap_err();
         assert!(error.starts_with("ffprobe: 127.0.0.1 is not in the addon's hosts"), "{error}");
+    }
+
+    /// This machine's network address: the sandbox never fetches loopback.
+    fn lan_ip() -> Option<std::net::IpAddr> {
+        let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+        socket.connect("192.0.2.1:9").ok()?;
+        let ip = socket.local_addr().ok()?.ip();
+        (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+    }
+
+    /// A server that sends `/stall` nothing and `/drip` a byte every 100 ms, each for 15 s.
+    fn slow_server() -> Option<(String, String)> {
+        use std::io::Write;
+        let lan = lan_ip()?;
+        let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+        let base = format!("http://{lan}:{}", listener.local_addr().unwrap().port());
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut request = [0u8; 1024];
+                    let read = stream.read(&mut request).unwrap_or(0);
+                    if request[..read].starts_with(b"GET /drip") {
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\n");
+                        for _ in 0..150 {
+                            if stream.write_all(b"x").is_err() {
+                                return;
+                            }
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
+                    } else {
+                        std::thread::sleep(Duration::from_secs(15));
+                    }
+                });
+            }
+        });
+        Some((base, lan.to_string()))
+    }
+
+    #[test]
+    fn a_slow_server_cannot_outlast_the_call() {
+        let Some((base, lan)) = slow_server() else {
+            eprintln!("skipped: no network address");
+            return;
+        };
+        let limits = Limits { wall: Duration::from_secs(2), ..QUICK };
+        for (what, source) in [
+            ("fetch", format!("export default {{ async items() {{ await fetch('{base}/stall'); }}, open() {{}} }};")),
+            ("body", format!("export default {{ async items() {{ try {{ return await (await fetch('{base}/drip')).text(); }} catch (e) {{ return e.message; }} }}, open() {{}} }};")),
+        ] {
+            let started = Instant::now();
+            let got = run(&source, &[&lan], limits);
+            assert!(started.elapsed() < Duration::from_secs(5), "{what}: took {:?}", started.elapsed());
+            let (Ok(Json::String(message)) | Err(message)) = got else { panic!("{what}: {got:?}") };
+            assert!(message.contains("2 s"), "{what}: {message}");
+        }
     }
 }

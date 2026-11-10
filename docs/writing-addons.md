@@ -2,8 +2,8 @@
 
 An addon is a folder with two files: `manifest.json`, which says what it is, and `main.js`, which
 says what it has and where each title plays from. rex-addons does the rest: it registers the
-addon with rex, checks each title once with ffprobe, sends rex the list, serves the bytes and
-keeps it all up to date.
+addon with rex, sends rex the list, serves the bytes and keeps it all up to date. People install
+addons from a git repository, so sharing yours means putting it in one ([below](#a-repository-of-addons)).
 
 You write plain JavaScript (an ES module). There's no npm and no build step.
 
@@ -27,7 +27,7 @@ You write plain JavaScript (an ES module). There's no npm and no build step.
 |---|---|
 | `id` | Lowercase letters, digits and `-`. It's the addon's name in rex too (`addon-my-films`), so never change it |
 | `name`, `description` | What people see in the app |
-| `version` | Numbers and dots. A bundled addon updates when its version is higher |
+| `version` | Numbers and dots. Raise it with every change: people see an update when the version in your repository is higher than theirs |
 | `hosts` | The websites `fetch()` may reach, and that `open()` links may point at: `example.com` exactly, `*.example.com` for anything under it, or `*` for any public website. Addresses on the device or the home network are never reachable through `*` |
 | `config` | The settings the app shows. Each has a `key`, a `label`, a `type` (`text`, `secret`, `bool`, `number` or `list`, a list of text), and optionally a `default` and `required: true`. A `secret` is shown masked |
 | `refresh_minutes` | How often `items()` runs. Default 360, at least 5 |
@@ -60,9 +60,14 @@ Each title is a rex feed item. The fields that matter most:
 | `display` | `title`, `summary`, `date` (`YYYY-MM-DD` or `YYYY`), `thumb` (a poster URL), `art`. Shown for what Plex doesn't know. For an episode, also `show: {title, summary, poster, art}` |
 | `name` | The release name, shown as is for an unplaced episode's show |
 
+| `media_info` | What's in the file: ffprobe's output, as `ffprobe()` returns it. rex shows nothing it hasn't been told this about |
+
 The rest (`release`, `subtitles`, `collections`, `channel` for live TV, music `track`s and so on)
 is in rex's [feed API](https://github.com/debridmediamanager/rex/blob/main/docs/feed-api.md#an-item).
-Leave out `media_info`: rex-addons probes every new title itself and remembers it by `id`.
+
+Probe each title yourself with `ffprobe()` and keep the answer in `storage`: a file doesn't
+change, so once is enough. A title that arrives without `media_info` is probed by rex-addons
+through your `open()` instead, and that probe is remembered by the title's `id`.
 
 ### open(id, ctx)
 
@@ -77,11 +82,12 @@ called for every seek.
 
 ## What your code can use
 
-Plain JavaScript, plus three things:
+Plain JavaScript, plus four things:
 
 | Global | What it does |
 |---|---|
 | `fetch(url, {method, headers, body})` | Returns `{status, ok, headers, url, text(), json()}`. `headers` is a plain object with lowercase names, `url` is where redirects ended. Only `hosts` are reachable, and every redirect is checked again. `body` is text. The body is read only when you call `text()` or `json()`, so a `Range: bytes=0-0` check costs nothing |
+| `ffprobe(url, {headers})` | ffprobe's JSON of a video (`format`, `streams`, `chapters`), for `media_info`. rex-addons reads the link itself, for ffprobe, so the same `hosts` rule applies as for `fetch`; an HLS playlist works too. It fails with a clear message when rex-addons runs without ffprobe. Up to 2 minutes, which don't count as JavaScript time |
 | `console.log`, `console.warn`, `console.error` | Into rex-addons' log, tagged `[addon <id>]` |
 | `storage.get(key)`, `storage.set(key, value)`, `storage.delete(key)` | Your addon's own saved values, any JSON. They survive restarts and updates |
 
@@ -94,15 +100,16 @@ Limits, per call:
 | | |
 |---|---|
 | Memory | 64 MB |
-| JavaScript time | 30 s for `items()`, 10 s for `open()`. Time spent waiting on `fetch` doesn't count |
+| JavaScript time | 30 s for `items()`, 10 s for `open()`. Time spent waiting on `fetch` or `ffprobe` doesn't count |
 | Whole call | 20 minutes for `items()`, 90 s for `open()` |
 | A fetched body | 16 MB |
-| `storage` | 8 MB in all |
+| `storage` | 16 MB in all, written to disk when the call ends |
 
 ## A complete example
 
 Two public domain films from the Internet Archive. One has an IMDb id, so Plex names it; the
-other is named by `display`. The manifest is the one above.
+other is named by `display`. Each is probed once and the probe kept. The manifest is the one
+above. The [internet-archive addon](../addons/internet-archive/main.js) is the same idea, grown up.
 
 ```js
 const FILMS = [
@@ -120,35 +127,70 @@ export default {
     if (!answer.ok) throw new Error(`archive.org answered ${answer.status}`);
     console.log(`archive.org has ${(await answer.json()).result}`);
 
-    return FILMS.filter((film) => ctx.config.pawnshop || film.id !== "the-pawnshop").map((film) => ({
-      id: film.id,
-      path: `my-films/${film.id}/${film.file}`,
-      ...(film.imdb ? { kind: "movie", ids: { imdb: film.imdb } } : {}),
-      display: { thumb: `https://archive.org/services/img/${film.item}`, ...film.display },
-    }));
+    const items = [];
+    for (const film of FILMS.filter((one) => ctx.config.pawnshop || one.id !== "the-pawnshop")) {
+      let probe = storage.get(`probe:${film.id}`);
+      if (!probe) {
+        probe = await ffprobe(link(film));
+        storage.set(`probe:${film.id}`, probe);
+      }
+      items.push({
+        id: film.id,
+        path: `my-films/${film.id}/${film.file}`,
+        ...(film.imdb ? { kind: "movie", ids: { imdb: film.imdb } } : {}),
+        display: { thumb: `https://archive.org/services/img/${film.item}`, ...film.display },
+        media_info: probe,
+      });
+    }
+    return items;
   },
 
   async open(id) {
     const film = FILMS.find((one) => one.id === id);
     if (!film) throw new Error(`no film ${id}`);
-    storage.set("last played", id);
-    return { url: `https://archive.org/download/${film.item}/${film.file}` };
+    return { url: link(film) };
   },
 };
+
+function link(film) {
+  return `https://archive.org/download/${film.item}/${film.file}`;
+}
 ```
+
+## A repository of addons
+
+A repository is any public git repository people can reach over HTTPS: GitHub, GitLab, Codeberg
+or a server of your own. Every folder in it holding a `manifest.json` and a `main.js` is an
+addon, up to three folders down; folders whose names start with `.` are skipped. This one is
+laid out like that:
+
+```
+repository.json                      optional: {"name": "...", "description": "..."}
+addons/internet-archive/manifest.json
+addons/internet-archive/main.js
+addons/stremio/manifest.json
+addons/stremio/main.js
+```
+
+Without `repository.json` the repository is named after its address. People add it by that
+address (`https://codeberg.org/you/my-addons`, or `...#branch` for another branch), pick your
+addons from its list and install them. rex-addons fetches only the newest commit, and only what
+it needs: at most 2,000 files and 64 MB, never a symbolic link or submodule. To ship a change,
+raise the addon's `version` and push; people see the update when they refresh the repository.
 
 ## Trying it
 
-Serve the folder and install it by its link:
+While you work on an addon, skip git: start rex-addons with `--bundled` naming a folder that holds
+your addon's folder. It's installed on start, and installed again on a start after you raise its
+`version`:
 
 ```bash
-cd my-films && python3 -m http.server 8000 &
-curl -X POST http://127.0.0.1:32410/api/addons -d '{"url": "http://127.0.0.1:8000/manifest.json"}'
+rex-addons --data ~/rex-addons-dev --ffprobe "$(command -v ffprobe)" --bundled ~/my-addons
 curl http://127.0.0.1:32410/api/status
+curl -X POST http://127.0.0.1:32410/api/addons/my-films/sync
 ```
 
-`main.js` is fetched from beside `manifest.json`, so any web host that serves both works for
-sharing an addon. Installing checks that `main.js` loads and exports `items` and `open`;
-installing again from the same link updates it and keeps its settings and storage. A sync runs
-right away. The log shows what your addon printed and why a sync failed, and
-`curl http://127.0.0.1:32400/rex/feed/addon-my-films/items` shows what rex holds.
+Installing checks that `main.js` loads and exports `items` and `open`, and a sync runs right
+away. The log shows what your addon printed and why a sync failed, and
+`curl http://127.0.0.1:32400/rex/feed/addon-my-films/items` shows what rex holds. Once it works,
+push it to your repository and add that in the app.

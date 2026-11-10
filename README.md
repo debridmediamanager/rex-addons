@@ -49,7 +49,8 @@ been told the format of, so every title is checked once with ffprobe.
 
 - Each addon is its own source in rex (`addon-<id>`). Removing an addon removes its titles from rex.
 - Removing a repository keeps the addons you installed from it; they just get no more updates.
-- Deleting a title in a Plex app hides it for good; the addon won't bring it back.
+- Deleting a title in a Plex app hides it; the addon won't bring it back unless you restore its
+  deleted titles in the app.
 - If a sync would take away more than half of an addon's titles, rex keeps them all and the addon
   shows an error. That guards against a website having a bad day. If you meant it, sync with force.
   Changing an addon's settings does that for you.

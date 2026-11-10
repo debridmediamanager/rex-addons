@@ -108,6 +108,7 @@ fn detail(app: &App, id: &str) -> Answer {
     let addon = addons.get(id).ok_or((404, "no such addon".to_string()))?;
     answer["manifest"] = addon.manifest.raw.clone();
     answer["config"] = Json::Object(addon.manifest.masked(&addon.config));
+    answer["deleted"] = json!(addon.deleted.len());
     Ok((200, answer))
 }
 
@@ -157,6 +158,10 @@ fn api(app: &Arc<App>, method: &Method, path: &str, body: &str) -> Answer {
                     Ok((202, json!({"syncing": true})))
                 }
             }
+        }
+        (Method::Post, ["addons", id, "restore"]) => {
+            app.restore(id).map_err(|e| (404, e))?;
+            detail(app, id)
         }
         (Method::Post, ["addons", id, "enabled"]) => {
             let enabled = parse(body)?["enabled"].as_bool().ok_or((400, "give enabled: true or false".to_string()))?;
@@ -436,6 +441,21 @@ mod tests {
         assert_eq!(response.status(), 204);
         assert!(app.addons.lock().unwrap()["demo"].deleted.contains("a"));
         assert_eq!(status(agent().delete(&format!("http://{addr}/bytes/demo/films/a%20film.mp4")).call()).status(), 404);
+    }
+
+    #[test]
+    fn deleted_titles_are_counted_and_restored() {
+        let (app, addr) = start("127.0.0.1:0", json!([]), "export default { items() { return []; }, open() {} };");
+        assert_eq!(status(agent().delete(&format!("http://{addr}/bytes/demo/films/a%20film.mp4")).call()).status(), 204);
+        let read = |r: ureq::Response| -> Json { serde_json::from_str(&r.into_string().unwrap()).unwrap() };
+        assert_eq!(read(status(agent().get(&format!("http://{addr}/api/addons/demo")).call()))["deleted"], 1);
+        let restored = status(agent().post(&format!("http://{addr}/api/addons/demo/restore")).call());
+        assert_eq!(restored.status(), 200);
+        assert_eq!(read(restored)["deleted"], 0);
+        assert!(app.addons.lock().unwrap()["demo"].deleted.is_empty());
+        let saved = crate::addons::read_json(&app.data.join("addons/demo/state.json")).unwrap();
+        assert_eq!(saved["deleted"], json!([]));
+        assert_eq!(status(agent().post(&format!("http://{addr}/api/addons/nope/restore")).call()).status(), 404);
     }
 
     #[test]

@@ -598,6 +598,21 @@ impl App {
         Ok(Json::Object(masked))
     }
 
+    /// Every title a person deleted in a Plex app is pushed again, from the next sync on.
+    pub fn restore(self: &Arc<Self>, id: &str) -> Result<(), String> {
+        let mut addons = self.addons.lock().unwrap();
+        let addon = addons.get_mut(id).ok_or("no such addon")?;
+        let restored = std::mem::take(&mut addon.deleted).len();
+        save_state(self, addon);
+        let enabled = addon.enabled;
+        drop(addons);
+        log(id, &format!("{restored} deleted titles restored"));
+        if enabled {
+            self.start_sync(id, false);
+        }
+        Ok(())
+    }
+
     pub fn set_enabled(self: &Arc<Self>, id: &str, enabled: bool) -> Result<(), String> {
         let mut addons = self.addons.lock().unwrap();
         let addon = addons.get_mut(id).ok_or("no such addon")?;

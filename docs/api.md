@@ -63,7 +63,8 @@ JSON in and out. It answers only this device: the socket's own peer address must
 
 ### `GET /api/addons/{id}`
 
-The status fields above, plus `manifest` (as installed) and `config`: every setting with its
+The status fields above, plus `manifest` (as installed), `deleted` (how many of its titles a
+person deleted in a Plex app, which it no longer pushes) and `config`: every setting with its
 saved value or default, a set `secret` answered as `"********"`. A `list` the manifest marks
 `"secret": true` (the stremio addon's `addons`, whose links carry account tokens) is answered
 entry by entry: an http(s) link as `<scheme>://<host>/********`, anything else as `"********"`.
@@ -100,6 +101,12 @@ Starts a sync now: `202 {"syncing": true}`, also when one is already running. `4
 is disabled. Body `{"force": true}` lets this sync remove more than half of the addon's titles,
 for when rex refused one that was right (`error_kind` is `would_remove`). Force is for that one
 attempt: if it fails for another reason, the automatic retries are not forced.
+
+### `POST /api/addons/{id}/restore`
+
+Brings back every title deleted in a Plex app: empties the addon's deleted list, saves it, and
+starts a sync (when the addon is enabled; a disabled one gets them on its next sync). Answers the
+addon as `GET` does, with `deleted` at `0`; `404` for an addon it doesn't know.
 
 ### `POST /api/addons/{id}/enabled`
 

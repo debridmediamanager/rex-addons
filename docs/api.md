@@ -28,6 +28,16 @@ one line each, tagged `[host]`, `[<addon id>]` or `[addon <id>]` for what the ad
 JSON in and out. It answers only this device: the socket's own peer address must be loopback
 (headers are never read for that); anything else gets `403`. Errors are `{"error": "..."}`.
 
+- **Token.** When the environment variable `REX_ADDONS_TOKEN` is set (never a flag: other
+  programs can read a process's flags), every `/api/` request must carry
+  `Authorization: Bearer <token>`, else `401`. An app starting rex-addons picks a random token and
+  keeps it to itself. Without it the API is open to every program on this device, and the start
+  logs a `WARN` saying so; that is meant for a desktop.
+- **Host.** A request whose `Host` header names anything but `127.0.0.1:<port>`,
+  `localhost:<port>`, `[::1]:<port>` or the `--listen` address is `403`, token or not: that is a
+  web page reaching this device through DNS rebinding.
+- `/bytes/` and `/relay/` take neither: rex and ffprobe read them.
+
 ### `GET /api/status`
 
 ```json

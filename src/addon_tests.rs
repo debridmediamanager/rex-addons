@@ -222,7 +222,7 @@ fn ffprobe_reads_through_the_relay() {
     let data = root.join("data");
     let app = crate::app::App::new(data, "http://127.0.0.1:9".into(), listen, Some("ffprobe".into()), None);
     let served = app.clone();
-    std::thread::spawn(move || crate::server::serve(served, server));
+    std::thread::spawn(move || crate::server::serve(served, server, None));
 
     let lan = base.trim_start_matches("http://").split(':').next().unwrap().to_string();
     let source = "export default { async items(ctx) {

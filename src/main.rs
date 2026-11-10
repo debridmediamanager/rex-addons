@@ -22,7 +22,9 @@ const USAGE: &str = "rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:
   --data     where installed addons, their settings and storage are kept (default ./rex-addons-data)
   --ffprobe  the ffprobe that checks each item once; without it rex holds every item unshown
   --bundled  addons installed on the first start and updated when a newer version is bundled
-  --default-repo  an addon repository added once, the first time it is given; repeatable";
+  --default-repo  an addon repository added once, the first time it is given; repeatable
+
+  REX_ADDONS_TOKEN  when set, every /api/ request must carry Authorization: Bearer <it>";
 
 fn main() {
     let mut listen: SocketAddr = "127.0.0.1:32410".parse().unwrap();
@@ -75,6 +77,11 @@ fn main() {
     if app.prober.bin.is_none() {
         app::warn("host", "no --ffprobe: rex holds every item it is sent until it is probed, so nothing shows in Plex");
     }
+    // An environment variable, never a flag: other programs on the device can read flags.
+    let token = std::env::var("REX_ADDONS_TOKEN").ok().filter(|t| !t.is_empty());
+    if token.is_none() {
+        app::warn("host", "no REX_ADDONS_TOKEN: the management API is open to every program on this device");
+    }
     let scheduler = app.clone();
     std::thread::spawn(move || loop {
         let due = scheduler.due();
@@ -86,5 +93,5 @@ fn main() {
         }
         std::thread::sleep(Duration::from_secs(10));
     });
-    server::serve(app, server);
+    server::serve(app, server, token);
 }

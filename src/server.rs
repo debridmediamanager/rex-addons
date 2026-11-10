@@ -22,17 +22,33 @@ fn error(status: u16, message: &str) -> Response<Cursor<Vec<u8>>> {
     json_response(status, json!({"error": message}))
 }
 
-pub fn serve(app: Arc<App>, server: tiny_http::Server) {
+/// `token`, when given, is what every `/api/` request must carry as `Authorization: Bearer`.
+pub fn serve(app: Arc<App>, server: tiny_http::Server, token: Option<String>) {
+    let token: Option<Arc<str>> = token.map(Arc::from);
     for request in server.incoming_requests() {
-        let app = app.clone();
-        let spawned = std::thread::Builder::new().stack_size(4 << 20).spawn(move || handle(&app, request));
+        let (app, token) = (app.clone(), token.clone());
+        let spawned = std::thread::Builder::new().stack_size(4 << 20).spawn(move || handle(&app, request, token.as_deref()));
         if let Err(e) = spawned {
             app::warn("host", &format!("cannot start a request thread: {e}"));
         }
     }
 }
 
-fn handle(app: &Arc<App>, mut request: Request) {
+/// Equal in a time that does not depend on where they first differ.
+fn same(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+/// A `Host` header naming anything but this host is a web page that got here through DNS
+/// rebinding; no header (an HTTP/1.0 client) is this device's own program.
+fn host_is_ours(request: &Request, listen: std::net::SocketAddr) -> bool {
+    let Some(host) = request.headers().iter().find(|h| h.field.equiv("Host")) else { return true };
+    let port = listen.port();
+    let host = host.value.as_str().to_ascii_lowercase();
+    [format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}"), listen.to_string()].contains(&host)
+}
+
+fn handle(app: &Arc<App>, mut request: Request, token: Option<&str>) {
     let peer = request.remote_addr().map(|addr| addr.ip());
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or_default().to_string();
@@ -55,6 +71,17 @@ fn handle(app: &Arc<App>, mut request: Request) {
     }
     if let Some(rest) = url.strip_prefix("/relay/") {
         return relay(app, request, rest);
+    }
+    if !host_is_ours(&request, app.listen) {
+        let _ = request.respond(error(403, "the management API answers only requests addressed to this host"));
+        return;
+    }
+    if let Some(token) = token {
+        let given = request.headers().iter().find(|h| h.field.equiv("Authorization")).map(|h| h.value.as_str().to_string());
+        if !given.and_then(|v| v.strip_prefix("Bearer ").map(str::to_string)).is_some_and(|v| same(v.as_bytes(), token.as_bytes())) {
+            let _ = request.respond(error(401, "give the API token as Authorization: Bearer <token>"));
+            return;
+        }
     }
     let mut body = String::new();
     if request.as_reader().take(1 << 20).read_to_string(&mut body).is_err() {
@@ -265,6 +292,10 @@ mod tests {
     }
 
     fn start(listen: &str, hosts: Json, source: &str) -> (Arc<App>, SocketAddr) {
+        start_with(listen, hosts, source, None)
+    }
+
+    fn start_with(listen: &str, hosts: Json, source: &str, token: Option<&str>) -> (Arc<App>, SocketAddr) {
         static N: AtomicUsize = AtomicUsize::new(0);
         let server = tiny_http::Server::http(listen).unwrap();
         let addr = server.server_addr().to_ip().unwrap();
@@ -275,7 +306,8 @@ mod tests {
         app.install(&manifest, source, None).unwrap();
         app.addons.lock().unwrap().get_mut("demo").unwrap().paths.insert("films/a film.mp4".into(), "a".into());
         let served = app.clone();
-        std::thread::spawn(move || serve(served, server));
+        let token = token.map(str::to_string);
+        std::thread::spawn(move || serve(served, server, token));
         (app, addr)
     }
 
@@ -307,6 +339,32 @@ mod tests {
         // rex on the home network may still read bytes.
         let bytes = status(agent().get(&format!("http://{lan}:{port}/bytes/demo/nothing")).call());
         assert_eq!(bytes.status(), 404);
+    }
+
+    #[test]
+    fn management_api_needs_the_token_and_a_host_of_its_own() {
+        let (_, addr) = start_with("127.0.0.1:0", json!([]), "export default { items() { return []; }, open() {} };", Some("s3cret"));
+        let api = format!("http://{addr}/api/status");
+        assert_eq!(status(agent().get(&api).call()).status(), 401);
+        assert_eq!(status(agent().get(&api).set("Authorization", "Bearer wrong!").call()).status(), 401);
+        assert_eq!(status(agent().get(&api).set("Authorization", "s3cret").call()).status(), 401);
+        // A text/plain POST from a web page carries no Authorization header.
+        assert_eq!(status(agent().post(&format!("http://{addr}/api/addons/demo/sync")).set("Content-Type", "text/plain").send_string("{}")).status(), 401);
+        assert_eq!(status(agent().get(&api).set("Authorization", "Bearer s3cret").call()).status(), 200);
+        let port = addr.port();
+        for host in [format!("localhost:{port}"), format!("LOCALHOST:{port}"), format!("[::1]:{port}")] {
+            assert_eq!(status(agent().get(&api).set("Authorization", "Bearer s3cret").set("Host", &host).call()).status(), 200, "{host}");
+        }
+        // DNS rebinding: a page on evil.example resolved to 127.0.0.1, token or not.
+        for host in [format!("evil.example:{port}"), "localhost:1".to_string(), "localhost".to_string()] {
+            assert_eq!(status(agent().get(&api).set("Authorization", "Bearer s3cret").set("Host", &host).call()).status(), 403, "{host}");
+        }
+        // rex and ffprobe read bytes with neither.
+        assert_eq!(status(agent().get(&format!("http://{addr}/bytes/demo/nothing")).set("Host", "evil.example").call()).status(), 404);
+        // Without a token the API stays open to this device, but never to another Host.
+        let (_, open) = start("127.0.0.1:0", json!([]), "export default { items() { return []; }, open() {} };");
+        assert_eq!(status(agent().get(&format!("http://{open}/api/status")).call()).status(), 200);
+        assert_eq!(status(agent().get(&format!("http://{open}/api/status")).set("Host", "evil.example").call()).status(), 403);
     }
 
     #[test]

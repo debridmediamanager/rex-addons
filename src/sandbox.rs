@@ -28,6 +28,8 @@ pub const OPEN: Limits = Limits { memory: 64 << 20, cpu: Duration::from_secs(10)
 
 /// A fetched body is read up to this; more is an error the addon sees.
 const MAX_BODY: u64 = 16 << 20;
+/// Fetched responses whose body was not read yet, at most: each holds a connection open.
+const UNREAD: usize = 32;
 /// An addon's storage, all keys together, as JSON.
 const MAX_STORAGE: usize = 8 << 20;
 
@@ -270,6 +272,12 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>) -> rquick
                 .collect();
             let status = response.status();
             let mut bodies = fetch_bodies.borrow_mut();
+            // Each unread body holds a connection: past UNREAD, the oldest is closed.
+            if bodies.iter().filter(|body| body.is_some()).count() >= UNREAD {
+                if let Some(oldest) = bodies.iter_mut().find(|body| body.is_some()) {
+                    *oldest = None;
+                }
+            }
             bodies.push(Some(response));
             Ok(serde_json::json!({"status": status, "headers": headers, "url": final_url, "handle": bodies.len() - 1}).to_string())
         })?,
@@ -279,7 +287,7 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>) -> rquick
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: usize| -> rquickjs::Result<String> {
             let response = bodies.borrow_mut().get_mut(handle).and_then(Option::take);
             let Some(response) = response else {
-                return Err(throw(&ctx, "the body was already read"));
+                return Err(throw(&ctx, &format!("the body was already read, or closed after {UNREAD} newer unread ones")));
             };
             let started = Instant::now();
             let mut bytes = Vec::new();

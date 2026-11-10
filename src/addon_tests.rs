@@ -1,4 +1,4 @@
-//! The stremio addon against real addons' recorded answers (tests/fixtures/stremio.json), served
+//! The stremio addon, and fetch itself, against real addons' recorded answers (tests/fixtures/stremio.json), served
 //! from this machine's network address: the sandbox never fetches loopback, so the test's
 //! manifest names that address as its one host.
 use std::collections::HashSet;
@@ -133,4 +133,25 @@ fn stremio_catalogs_become_items_and_streams_are_pinned() {
     assert_eq!(film["url"], format!("{}/hdr/eclipsia-0.mp4", fx.base));
     assert_eq!(film["headers"]["Referer"], "https://videodownloader.site/");
     assert!(film["headers"].get("Accept-Encoding").is_none());
+}
+
+#[test]
+fn unread_fetches_are_closed_past_the_cap() {
+    let Some(fx) = serve() else {
+        eprintln!("SKIP: no network address to serve the fixtures from");
+        return;
+    };
+    let source = format!(
+        "export default {{ async items() {{
+           const answers = [];
+           for (let i = 0; i < 40; i++) answers.push(await fetch('{}/cinemeta/manifest.json'));
+           let first;
+           try {{ await answers[0].text(); first = 'read'; }} catch (error) {{ first = error.message; }}
+           return [first, (await answers[39].json()).name];
+         }}, open() {{}} }};",
+        fx.base
+    );
+    let env = Env { addon: "t", source: &source, hosts: &fx.hosts, storage: fx.storage.clone() };
+    let got = sandbox::call(&env, "items", &[], sandbox::ITEMS).unwrap();
+    assert_eq!(got, json!(["the body was already read, or closed after 32 newer unread ones", "Cinemeta"]));
 }

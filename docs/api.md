@@ -44,8 +44,9 @@ JSON in and out. It answers only this device: the socket's own peer address must
 {"version": "0.1.0", "rex": {"url": "http://127.0.0.1:32400", "reachable": true},
  "addons": [{"id": "internet-archive", "name": "Internet Archive", "version": "1.1.0",
              "description": "...", "enabled": true, "repo": "github-com-debridmediamanager-rex-addons",
+             "hosts": ["archive.org", "*.archive.org"],
              "state": "idle", "items": 100, "held": 0, "last_sync": 1794326938, "error": null,
-             "update_available": false}]}
+             "update_available": false, "update_hosts": null}]}
 ```
 
 | Field | Meaning |
@@ -55,7 +56,9 @@ JSON in and out. It answers only this device: the socket's own peer address must
 | `held` | Titles sent without a probe, which rex holds unshown (no ffprobe, or one that failed; retried next sync) |
 | `last_sync` | Unix seconds of the last sync that worked, or `null` |
 | `repo` | The id of the repository it was installed from, or `null` for a bundled one. It stays when that repository is removed |
+| `hosts` | The hosts its installed manifest lets it reach |
 | `update_available` | Its repository offers a higher `version` |
+| `update_hosts` | When `update_available`, the hosts that version would reach, so the app can ask before an update widens them; `null` otherwise |
 
 ### `GET /api/addons/{id}`
 
@@ -105,7 +108,8 @@ Every repository added, as a list:
   "name": "rex-addons", "description": "...", "commit": "1dd7a645...", "last_fetch": 1794330057, "error": null,
   "addons": [{"id": "internet-archive", "name": "Internet Archive", "version": "1.1.0", "description": "...",
               "hosts": ["archive.org", "*.archive.org"],
-              "installed_version": "1.0.0", "update_available": true}]}]
+              "installed_version": "1.0.0", "installed_hosts": ["archive.org"], "installed_repo": null,
+              "update_available": true}]}]
 ```
 
 | Field | Meaning |
@@ -115,6 +119,8 @@ Every repository added, as a list:
 | `commit`, `last_fetch` | What the last fetch that worked got, and when (Unix seconds); `null` before one |
 | `error` | Why the last fetch failed, or `no addons in it`; `null` when it worked. A failed fetch keeps what the one before got |
 | `addons[].installed_version` | The version installed of that addon id, from wherever, or `null` |
+| `addons[].installed_hosts` | The hosts the installed one reaches, or `null` when none is installed. Compare with `hosts` before installing: an update may widen them |
+| `addons[].installed_repo` | The repository the installed one came from, or `null` when none is installed or it is bundled. Installing from another repository than this is `409`; installing over a bundled one moves it to this repository, which the app should confirm |
 | `addons[].update_available` | Installing it now would update it: it's installed from this repository (or bundled) and this version is higher |
 
 ### `POST /api/repos`

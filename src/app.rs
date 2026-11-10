@@ -72,7 +72,7 @@ impl Addon {
         let m = &self.manifest;
         json!({
             "id": m.id, "name": m.name, "version": m.version, "description": m.description,
-            "enabled": self.enabled, "repo": self.repo,
+            "enabled": self.enabled, "repo": self.repo, "hosts": m.hosts.0,
             "state": if self.syncing { "syncing" } else if self.error.is_some() { "error" } else { "idle" },
             "items": self.items, "held": self.held, "last_sync": self.last_sync, "error": self.error,
         })
@@ -95,6 +95,9 @@ pub struct Repos {
     pub list: Vec<Repo>,
     pub defaults: BTreeSet<String>,
 }
+
+/// An installed addon as a repository's listing compares it: version, repository, hosts.
+type Installed = (String, Option<String>, Vec<String>);
 
 fn dir(app: &App, id: &str) -> PathBuf {
     app.data.join("addons").join(id)
@@ -615,31 +618,34 @@ impl App {
         Ok(Repo { id, url: url.trim().to_string(), name, description, commit: Some(commit), last_fetch: Some(now()), error, addons })
     }
 
-    /// The installed addons: id to (version, repository).
-    fn installed(&self) -> HashMap<String, (String, Option<String>)> {
-        self.addons.lock().unwrap().values().map(|a| (a.manifest.id.clone(), (a.manifest.version.clone(), a.repo.clone()))).collect()
+    /// The installed addons: id to (version, repository, hosts).
+    fn installed(&self) -> HashMap<String, Installed> {
+        self.addons.lock().unwrap().values().map(|a| (a.manifest.id.clone(), (a.manifest.version.clone(), a.repo.clone(), a.manifest.hosts.0.clone()))).collect()
     }
 
     /// A repository's addons as the API lists them: each with what is installed of it.
-    fn repo_addons(repo: &Repo, installed: &HashMap<String, (String, Option<String>)>) -> Vec<Json> {
+    fn repo_addons(repo: &Repo, installed: &HashMap<String, Installed>) -> Vec<Json> {
         repo.addons
             .iter()
             .map(|addon| {
                 let here = installed.get(&addon.id);
                 // An update is this repository's, or adopts a bundled one; one installed from
                 // another repository is that one's to update.
-                let ours = here.is_some_and(|(_, from)| from.as_deref().is_none_or(|from| from == repo.id));
+                let ours = here.is_some_and(|(_, from, _)| from.as_deref().is_none_or(|from| from == repo.id));
+                // What installing it would change, for the app to ask about first.
                 json!({
                     "id": addon.id, "name": addon.name, "version": addon.version, "description": addon.description,
                     "hosts": addon.hosts,
-                    "installed_version": here.map(|(version, _)| version),
-                    "update_available": ours && here.is_some_and(|(version, _)| newer(&addon.version, version)),
+                    "installed_version": here.map(|(version, _, _)| version),
+                    "installed_hosts": here.map(|(_, _, hosts)| hosts),
+                    "installed_repo": here.and_then(|(_, from, _)| from.as_ref()),
+                    "update_available": ours && here.is_some_and(|(version, _, _)| newer(&addon.version, version)),
                 })
             })
             .collect()
     }
 
-    fn repo_json(repo: &Repo, installed: &HashMap<String, (String, Option<String>)>) -> Json {
+    fn repo_json(repo: &Repo, installed: &HashMap<String, Installed>) -> Json {
         let mut value = repo.to_json();
         value["addons"] = json!(Self::repo_addons(repo, installed));
         value
@@ -770,19 +776,20 @@ impl App {
 
     /// An addon as the API shows it: its state, and whether its repository has a newer version.
     pub fn status(&self, id: &str) -> Option<Json> {
-        let versions: HashMap<(String, String), String> = self
+        let offers: HashMap<(String, String), (String, Vec<String>)> = self
             .repos
             .lock()
             .unwrap()
             .list
             .iter()
-            .flat_map(|r| r.addons.iter().map(move |a| ((r.id.clone(), a.id.clone()), a.version.clone())))
+            .flat_map(|r| r.addons.iter().map(move |a| ((r.id.clone(), a.id.clone()), (a.version.clone(), a.hosts.clone()))))
             .collect();
         let addons = self.addons.lock().unwrap();
         let addon = addons.get(id)?;
         let mut status = addon.status();
-        let offered = addon.repo.as_ref().and_then(|r| versions.get(&(r.clone(), id.to_string())));
-        status["update_available"] = json!(offered.is_some_and(|v| newer(v, &addon.manifest.version)));
+        let update = addon.repo.as_ref().and_then(|r| offers.get(&(r.clone(), id.to_string()))).filter(|(v, _)| newer(v, &addon.manifest.version));
+        status["update_available"] = json!(update.is_some());
+        status["update_hosts"] = json!(update.map(|(_, hosts)| hosts));
         Some(status)
     }
 
@@ -1124,6 +1131,41 @@ mod sync_tests {
         assert!(!app.repo_dir("one").exists());
         assert_eq!(app.status("films").unwrap()["repo"], "one");
         assert_eq!(app.status("films").unwrap()["update_available"], false);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn updates_and_adoptions_show_what_they_change() {
+        let (rex, _) = stub_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-consent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+        let offer = |repo: &str, version: &str, hosts: Json| {
+            let dir = app.repo_dir(repo).join("addons/films");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("manifest.json"), json!({"id": "films", "name": "films", "version": version, "hosts": hosts}).to_string()).unwrap();
+            std::fs::write(dir.join("main.js"), "export default { items() { return []; }, open() {} };").unwrap();
+            add_local_repo(&app, repo);
+        };
+        // Bundled with one host; a repository offers it with every host.
+        let main = "export default { items() { return []; }, open() {} };";
+        app.install(&json!({"id": "films", "name": "films", "version": "1.0.0", "hosts": ["a.example"]}), main, None).unwrap();
+        offer("one", "1.1.0", json!(["*"]));
+        let listed = &app.repo_addons_json("one").unwrap()[0];
+        assert_eq!((&listed["installed_hosts"], &listed["installed_repo"], &listed["hosts"]), (&json!(["a.example"]), &Json::Null, &json!(["*"])));
+        let status = app.status("films").unwrap();
+        assert_eq!((&status["hosts"], &status["update_hosts"]), (&json!(["a.example"]), &Json::Null));
+
+        app.install_from_repo("one", "films").unwrap();
+        offer("one", "1.2.0", json!(["*", "b.example"]));
+        let status = app.status("films").unwrap();
+        assert_eq!((&status["hosts"], &status["update_hosts"]), (&json!(["*"]), &json!(["*", "b.example"])));
+        assert_eq!(app.list_repos()[0]["addons"][0]["installed_repo"], "one");
+        // Another repository's listing names where it is installed from.
+        offer("two", "9.0.0", json!([]));
+        assert_eq!(app.repo_addons_json("two").unwrap()[0]["installed_repo"], "one");
+        let nothing = app.repo_addons_json("two").unwrap();
+        assert_eq!(nothing[0]["installed_hosts"], json!(["*"]));
         let _ = std::fs::remove_dir_all(&data);
     }
 

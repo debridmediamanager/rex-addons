@@ -4,6 +4,7 @@
 # path returns bytes, and removing the addon removes its source from rex.
 #
 #   REX_BIN=/path/to/rex tests/e2e.sh
+#   REX_BIN=/path/to/rex REX_ADDONS_BIN=/path/to/rex-addons tests/e2e.sh   # no cargo needed
 #
 # rex runs unclaimed on scratch ports with no state, no GDM, no plex.tv and no rex-direct; it
 # serves Plex clients only with --token, which this script sets. Needs ffprobe and python3.
@@ -24,10 +25,18 @@ cleanup() {
 }
 trap cleanup EXIT
 json() { python3 -c "import json,sys; d=json.load(sys.stdin); print($1)"; }
-fail() { echo "FAIL: $*" >&2; echo "--- host log" >&2; tail -40 "$work/host.log" >&2; echo "--- rex log" >&2; tail -40 "$work/rex.log" >&2; exit 1; }
+fail() {
+    echo "FAIL: $*" >&2
+    for log in host rex; do echo "--- $log log" >&2; tail -40 "$work/$log.log" >&2 || true; done
+    exit 1
+}
 
-cargo build --release --quiet
-bin=${CARGO_TARGET_DIR:-target}/release/rex-addons
+# REX_ADDONS_BIN runs a binary built elsewhere (a host without cargo); otherwise this tree is built.
+bin=${REX_ADDONS_BIN:-}
+if [ -z "$bin" ]; then
+    cargo build --release --quiet
+    bin=${CARGO_TARGET_DIR:-target}/release/rex-addons
+fi
 token="e2e-$RANDOM$RANDOM"
 rex="http://127.0.0.1:$rex_port"
 api="http://127.0.0.1:$host_port/api"

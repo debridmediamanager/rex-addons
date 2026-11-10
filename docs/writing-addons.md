@@ -91,9 +91,10 @@ Plain JavaScript, plus these:
 | `console.log`, `console.warn`, `console.error` | Into rex-addons' log, tagged `[addon <id>]` |
 | `storage.get(key)`, `storage.set(key, value)`, `storage.delete(key)` | Your addon's own saved values, any JSON. They survive restarts and updates |
 | `atob(text)`, `btoa(text)` | Base64, as in browsers: text whose characters are bytes (0 to 255) |
+| `new URL(link, base)`, `URLSearchParams` | Links, as in browsers but smaller: `new URL(link, base)` resolves a relative link, a URL has `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin` and `searchParams`, and `URLSearchParams` has `get`, `getAll`, `has`, `set`, `append`, `delete`, `toString` and `entries`. Changing `searchParams` changes the URL |
 | `await sleep(ms)` | Waits, for backing off when a website answers 429. The wait doesn't count as JavaScript time, and a sleep past the end of the call fails at once |
 
-There's nothing else: no timers (`setTimeout`, use `sleep`), no `require` or `import`, no `URL`, no
+There's nothing else: no timers (`setTimeout`, use `sleep`), no `require` or `import`, no
 `TextEncoder`, no file access. Each call starts fresh, so keep anything you want to remember
 across calls in `storage`.
 

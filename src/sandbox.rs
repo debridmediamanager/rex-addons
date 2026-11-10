@@ -145,12 +145,73 @@ const PRELUDE: &str = r#"
   async function ffprobe(url, init = {}) {
     return JSON.parse(host.ffprobe(String(url), JSON.stringify({ headers: init.headers })));
   }
+  // URL and URLSearchParams, small: the url crate parses and resolves, each URL keeps its parts
+  // and each URLSearchParams its list of pairs, and a URL's params write back to its search.
+  const parts = new WeakMap(), lists = new WeakMap(), paramsOf = new WeakMap(), owners = new WeakMap();
+  const parse = (link, base = null, field = null, value = null) => JSON.parse(host.url(link, base, field, value));
+  const decode = (text) => { text = text.replace(/\+/g, " "); try { return decodeURIComponent(text); } catch { return text; } };
+  const encode = (text) => encodeURIComponent(text).replace(/[!'()~]/g, (c) => "%" + c.charCodeAt(0).toString(16).toUpperCase()).replace(/%20/g, "+");
+  const pairs = (query) => query.replace(/^\?/, "").split("&").filter(Boolean).map((pair) => {
+    const at = pair.indexOf("=");
+    return at < 0 ? [decode(pair), ""] : [decode(pair.slice(0, at)), decode(pair.slice(at + 1))];
+  });
+  const changed = (params) => {
+    const url = owners.get(params);
+    if (url) parts.set(url, parse(url.href, null, "search", params.toString()));
+  };
+  class URLSearchParams {
+    constructor(init = "") {
+      lists.set(this, typeof init === "object" && init !== null
+        ? (Symbol.iterator in init ? [...init] : Object.entries(init)).map(([name, value]) => [String(name), String(value)])
+        : pairs(String(init)));
+    }
+    get(name) { return lists.get(this).find(([n]) => n === String(name))?.[1] ?? null; }
+    getAll(name) { return lists.get(this).filter(([n]) => n === String(name)).map(([, v]) => v); }
+    has(name) { return lists.get(this).some(([n]) => n === String(name)); }
+    append(name, value) { lists.get(this).push([String(name), String(value)]); changed(this); }
+    delete(name) { lists.set(this, lists.get(this).filter(([n]) => n !== String(name))); changed(this); }
+    set(name, value) {
+      name = String(name);
+      const list = lists.get(this), at = list.findIndex(([n]) => n === name);
+      if (at < 0) list.push([name, String(value)]);
+      else { list[at] = [name, String(value)]; lists.set(this, list.filter(([n], i) => n !== name || i === at)); }
+      changed(this);
+    }
+    toString() { return lists.get(this).map(([n, v]) => `${encode(n)}=${encode(v)}`).join("&"); }
+    entries() { return lists.get(this).map(([n, v]) => [n, v])[Symbol.iterator](); }
+    keys() { return lists.get(this).map(([n]) => n)[Symbol.iterator](); }
+    values() { return lists.get(this).map(([, v]) => v)[Symbol.iterator](); }
+    [Symbol.iterator]() { return this.entries(); }
+  }
+  class URL {
+    constructor(link, base) { parts.set(this, parse(String(link), base === undefined ? null : String(base))); }
+    get searchParams() {
+      if (!paramsOf.has(this)) {
+        const params = new URLSearchParams(this.search);
+        paramsOf.set(this, params);
+        owners.set(params, this);
+      }
+      return paramsOf.get(this);
+    }
+    toString() { return this.href; }
+    toJSON() { return this.href; }
+  }
+  for (const name of ["href", "origin", "protocol", "username", "password", "host", "hostname", "port", "pathname", "search", "hash"]) {
+    Object.defineProperty(URL.prototype, name, {
+      get() { return parts.get(this)[name]; },
+      set: name === "origin" ? undefined : function (value) {
+        parts.set(this, parse(this.href, null, name, String(value)));
+        if (paramsOf.has(this)) lists.set(paramsOf.get(this), pairs(this.search));
+      },
+      configurable: true,
+    });
+  }
   const storage = Object.freeze({
     get: (key) => { const value = host.storageGet(String(key)); return value === undefined ? undefined : JSON.parse(value); },
     set: (key, value) => { value === undefined ? host.storageDelete(String(key)) : host.storageSet(String(key), JSON.stringify(value)); },
     delete: (key) => { host.storageDelete(String(key)); },
   });
-  for (const [name, value] of Object.entries({ console, fetch, ffprobe, storage, sleep })) {
+  for (const [name, value] of Object.entries({ console, fetch, ffprobe, storage, sleep, URL, URLSearchParams })) {
     Object.defineProperty(globalThis, name, { value, writable: false, configurable: false, enumerable: false });
   }
 })();
@@ -344,6 +405,44 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
         }})?,
     )?;
 
+    host.set(
+        "url",
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'js>, link: String, base: Option<String>, field: Option<String>, value: Option<String>| -> rquickjs::Result<String> {
+                use url::quirks;
+                let invalid = |link: &str| throw(&ctx, &format!("Invalid URL: {link}"));
+                let mut url = match &base {
+                    Some(base) => url::Url::parse(base).and_then(|base| base.join(&link)),
+                    None => url::Url::parse(&link),
+                }
+                .map_err(|_| invalid(&link))?;
+                // A setter: as in browsers, a value that doesn't fit leaves the URL as it was.
+                if let (Some(field), Some(value)) = (field, value) {
+                    let _ = match field.as_str() {
+                        "href" => quirks::set_href(&mut url, &value).map_err(|_| invalid(&value))?,
+                        "protocol" => quirks::set_protocol(&mut url, &value).unwrap_or(()),
+                        "username" => quirks::set_username(&mut url, &value).unwrap_or(()),
+                        "password" => quirks::set_password(&mut url, &value).unwrap_or(()),
+                        "host" => quirks::set_host(&mut url, &value).unwrap_or(()),
+                        "hostname" => quirks::set_hostname(&mut url, &value).unwrap_or(()),
+                        "port" => quirks::set_port(&mut url, &value).unwrap_or(()),
+                        "pathname" => quirks::set_pathname(&mut url, &value),
+                        "search" => quirks::set_search(&mut url, &value),
+                        "hash" => quirks::set_hash(&mut url, &value),
+                        _ => (),
+                    };
+                }
+                Ok(serde_json::json!({
+                    "href": quirks::href(&url), "origin": quirks::origin(&url), "protocol": quirks::protocol(&url),
+                    "username": quirks::username(&url), "password": quirks::password(&url), "host": quirks::host(&url),
+                    "hostname": quirks::hostname(&url), "port": quirks::port(&url), "pathname": quirks::pathname(&url),
+                    "search": quirks::search(&url), "hash": quirks::hash(&url),
+                })
+                .to_string())
+            },
+        )?,
+    )?;
     let sleep_waited = waited.clone();
     host.set(
         "sleep",
@@ -425,13 +524,13 @@ mod tests {
     fn only_the_host_globals_beyond_ecmascript() {
         let got = run(
             "export default { items() { return ['setTimeout', 'setInterval', 'require', 'process', 'XMLHttpRequest', 'WebSocket', '__rex', 'os', 'std', 'print',
-               'queueMicrotask', 'performance', 'DOMException', 'URL', 'TextEncoder']
+               'queueMicrotask', 'performance', 'DOMException', 'TextEncoder', 'TextDecoder']
                .filter((name) => typeof globalThis[name] !== 'undefined')
-               .concat([typeof fetch, typeof console.log, typeof storage.get, typeof ffprobe, typeof sleep, typeof atob, typeof btoa]); }, open() {} };",
+               .concat([typeof fetch, typeof console.log, typeof storage.get, typeof ffprobe, typeof sleep, typeof atob, typeof btoa, typeof URL, typeof URLSearchParams]); }, open() {} };",
             &[],
             QUICK,
         );
-        assert_eq!(got.unwrap(), serde_json::json!(["function", "function", "function", "function", "function", "function", "function"]));
+        assert_eq!(got.unwrap(), serde_json::json!(["function", "function", "function", "function", "function", "function", "function", "function", "function"]));
     }
 
     #[test]
@@ -448,6 +547,44 @@ mod tests {
         assert_eq!(
             got.unwrap(),
             serde_json::json!(["", "aGVsbG8=", "//4A", "hello", "hello", "hello", true, "InvalidCharacterError", "InvalidCharacterError", "InvalidCharacterError", "InvalidCharacterError"])
+        );
+    }
+
+    #[test]
+    fn url_resolves_links_and_edits_queries() {
+        let got = run(
+            r#"export default { items() {
+               const thrown = (f) => { try { f(); return 'no error'; } catch (e) { return e.name; } };
+               const u = new URL('../b/c.mp4?x=1#t', 'https://user:pw@Example.com:8443/a/d/index.html');
+               const got = [u.href, u.protocol, u.host, u.hostname, u.port, u.pathname, u.search, u.hash, u.origin, u.username,
+                 new URL('//cdn.example/x', 'https://a.example/y').href, new URL('/root', new URL('https://a.example/y/z')).href,
+                 new URL('?page=2', 'https://a.example/list?page=1').href, new URL('https://a.example:443/').port,
+                 thrown(() => new URL('not a link')), thrown(() => new URL('/relative'))];
+               const v = new URL('https://api.example/search?q=a+b&q=c%26d&empty');
+               const p = v.searchParams;
+               got.push(p.get('q'), p.getAll('q'), p.has('empty'), p.get('empty'), p.get('none'));
+               p.set('q', 'x y'); p.append('key', "it's~"); p.delete('empty');
+               got.push(v.href, [...p], [...p.keys()], p.toString());
+               v.search = '?z=1';
+               v.pathname = '/other';
+               got.push(p.get('z'), String(v), JSON.stringify({ v }), new URLSearchParams({ a: 1, b: 'two words' }).toString(),
+                 new URLSearchParams([['x', 'é']]).toString());
+               return got;
+             }, open() {} };"#,
+            &[],
+            QUICK,
+        );
+        assert_eq!(
+            got.unwrap(),
+            serde_json::json!([
+                "https://user:pw@example.com:8443/a/b/c.mp4?x=1#t", "https:", "example.com:8443", "example.com", "8443", "/a/b/c.mp4",
+                "?x=1", "#t", "https://example.com:8443", "user",
+                "https://cdn.example/x", "https://a.example/root", "https://a.example/list?page=2", "",
+                "TypeError", "TypeError",
+                "a b", ["a b", "c&d"], true, "", null,
+                "https://api.example/search?q=x+y&key=it%27s%7E", [["q", "x y"], ["key", "it's~"]], ["q", "key"], "q=x+y&key=it%27s%7E",
+                "1", "https://api.example/other?z=1", "{\"v\":\"https://api.example/other?z=1\"}", "a=1&b=two+words", "x=%C3%A9"
+            ])
         );
     }
 

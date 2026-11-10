@@ -91,6 +91,12 @@ fn main() {
                 scheduler.start_sync(&id, false);
             }
         }
+        for id in scheduler.due_repos() {
+            let app = scheduler.clone();
+            std::thread::spawn(move || {
+                let _ = app.refresh_repo(&id);
+            });
+        }
         std::thread::sleep(Duration::from_secs(10));
     });
     server::serve(app, server, token);

@@ -155,6 +155,10 @@ never written.
 Fetches it again and answers it as `GET /api/repos` lists it, with `error` set when that failed.
 Installed addons are not updated by it: `update_available` says which have a newer version.
 
+rex-addons also does this by itself, in the background: a repository whose last fetch that
+worked is a day old is fetched again, and one whose fetches keep failing is tried once an hour.
+That only refreshes the listing; nothing is ever installed or updated without a `POST /api/addons`.
+
 ### `GET /api/repos/{id}/addons`
 
 Its addons, as in `GET /api/repos`.

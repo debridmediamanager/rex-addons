@@ -19,7 +19,7 @@ Codeberg or your own server.
 2. Pick the addons you want from its list and install them. Their settings show up right after.
 3. Titles appear in your Plex apps as each one is checked.
 
-Refresh a repository to see its updates; an addon with a newer version says so, and installing
+Repositories are checked for updates once a day (or refresh one yourself); an addon with a newer version says so, and installing
 it again updates it with your settings kept.
 
 ## Addons in this repository

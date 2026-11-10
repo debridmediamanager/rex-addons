@@ -22,6 +22,10 @@ const CHUNK: usize = 200;
 /// Probed items go to rex in batches this big, so they show before the whole sync is done.
 const READY_BATCH: usize = 20;
 const PROBE_WORKERS: usize = 4;
+/// A repository is fetched again a day after its last fetch that worked...
+const REPO_REFRESH: u64 = 24 * 3600;
+/// ...and, while fetches fail, no more often than this.
+const REPO_RETRY: u64 = 3600;
 
 pub fn log(tag: &str, message: &str) {
     println!("[{tag}] {message}");
@@ -99,6 +103,8 @@ pub struct App {
 pub struct Repos {
     pub list: Vec<Repo>,
     pub defaults: BTreeSet<String>,
+    /// When each repository's last fetch started (Unix seconds), worked or not.
+    pub attempted: HashMap<String, u64>,
 }
 
 /// An installed addon as a repository's listing compares it: version, repository, hosts.
@@ -119,6 +125,7 @@ impl App {
         let repos = Repos {
             list: saved["repos"].as_array().into_iter().flatten().filter_map(Repo::from_json).collect(),
             defaults: serde_json::from_value(saved["defaults"].clone()).unwrap_or_default(),
+            attempted: HashMap::new(),
         };
         let app = Arc::new(App {
             prober: Arc::new(Prober::new(ffprobe, listen)),
@@ -782,6 +789,9 @@ impl App {
         }
         self.save_repos(&repos);
         let unfetched: Vec<String> = repos.list.iter().filter(|r| r.commit.is_none()).map(|r| r.id.clone()).collect();
+        for id in &unfetched {
+            repos.attempted.insert(id.clone(), now());
+        }
         drop(repos);
         for id in unfetched {
             let app = self.clone();
@@ -789,6 +799,24 @@ impl App {
                 let _ = app.refresh_repo(&id);
             });
         }
+    }
+
+    /// Repositories whose last good fetch is REPO_REFRESH old, each claimed for one fetch: one
+    /// that keeps failing comes back every REPO_RETRY. Only fetched; nothing is installed.
+    pub fn due_repos(&self) -> Vec<String> {
+        let mut repos = self.repos.lock().unwrap();
+        let now = now();
+        let due: Vec<String> = repos
+            .list
+            .iter()
+            .filter(|r| now >= r.last_fetch.unwrap_or(0) + REPO_REFRESH)
+            .filter(|r| repos.attempted.get(&r.id).is_none_or(|at| now >= at + REPO_RETRY))
+            .map(|r| r.id.clone())
+            .collect();
+        for id in &due {
+            repos.attempted.insert(id.clone(), now);
+        }
+        due
     }
 
     /// `POST /api/addons`: installs a repository's addon, or updates it, keeping its settings
@@ -1303,6 +1331,23 @@ mod sync_tests {
         assert_eq!(app.repo_addons_json("two").unwrap()[0]["installed_repo"], "one");
         let nothing = app.repo_addons_json("two").unwrap();
         assert_eq!(nothing[0]["installed_hosts"], json!(["*"]));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn repositories_refresh_daily_and_retry_hourly() {
+        let data = std::env::temp_dir().join(format!("rex-addons-repo-due-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), "http://127.0.0.1:9".into(), "127.0.0.1:9".parse().unwrap(), None, None);
+        for (id, fetched) in [("fresh", now() - 3600), ("stale", now() - 25 * 3600)] {
+            add_local_repo(&app, id);
+            app.repos.lock().unwrap().list.iter_mut().find(|r| r.id == id).unwrap().last_fetch = Some(fetched);
+        }
+        assert_eq!(app.due_repos(), ["stale"]);
+        // Claimed: its fetch runs (and fails, say), so it is not due again for an hour.
+        assert!(app.due_repos().is_empty());
+        app.repos.lock().unwrap().attempted.insert("stale".into(), now() - 3601);
+        assert_eq!(app.due_repos(), ["stale"]);
         let _ = std::fs::remove_dir_all(&data);
     }
 

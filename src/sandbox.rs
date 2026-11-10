@@ -196,6 +196,8 @@ const PRELUDE: &str = r#"
     toString() { return this.href; }
     toJSON() { return this.href; }
   }
+  const hash = (algorithm, text) => host.hash(String(algorithm), "", String(text), false);
+  const hmac = (algorithm, key, text) => host.hash(String(algorithm), String(key), String(text), true);
   for (const name of ["href", "origin", "protocol", "username", "password", "host", "hostname", "port", "pathname", "search", "hash"]) {
     Object.defineProperty(URL.prototype, name, {
       get() { return parts.get(this)[name]; },
@@ -211,7 +213,7 @@ const PRELUDE: &str = r#"
     set: (key, value) => { value === undefined ? host.storageDelete(String(key)) : host.storageSet(String(key), JSON.stringify(value)); },
     delete: (key) => { host.storageDelete(String(key)); },
   });
-  for (const [name, value] of Object.entries({ console, fetch, ffprobe, storage, sleep, URL, URLSearchParams })) {
+  for (const [name, value] of Object.entries({ console, fetch, ffprobe, storage, sleep, URL, URLSearchParams, hash, hmac })) {
     Object.defineProperty(globalThis, name, { value, writable: false, configurable: false, enumerable: false });
   }
 })();
@@ -443,6 +445,23 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
             },
         )?,
     )?;
+    host.set(
+        "hash",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, algorithm: String, key: String, text: String, keyed: bool| -> rquickjs::Result<String> {
+            use ring::{digest, hmac};
+            // ring has no md5, so neither do addons.
+            let (plain, keyed_with) = match algorithm.to_ascii_lowercase().replace('-', "").as_str() {
+                "sha1" => (&digest::SHA1_FOR_LEGACY_USE_ONLY, hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY),
+                "sha256" => (&digest::SHA256, hmac::HMAC_SHA256),
+                "sha512" => (&digest::SHA512, hmac::HMAC_SHA512),
+                _ => return Err(throw(&ctx, &format!("{}: {algorithm} is not sha1, sha256 or sha512", if keyed { "hmac" } else { "hash" }))),
+            };
+            Ok(match keyed {
+                true => crate::git::hex(hmac::sign(&hmac::Key::new(keyed_with, key.as_bytes()), text.as_bytes()).as_ref()),
+                false => crate::git::hex(digest::digest(plain, text.as_bytes()).as_ref()),
+            })
+        })?,
+    )?;
     let sleep_waited = waited.clone();
     host.set(
         "sleep",
@@ -526,11 +545,11 @@ mod tests {
             "export default { items() { return ['setTimeout', 'setInterval', 'require', 'process', 'XMLHttpRequest', 'WebSocket', '__rex', 'os', 'std', 'print',
                'queueMicrotask', 'performance', 'DOMException', 'TextEncoder', 'TextDecoder']
                .filter((name) => typeof globalThis[name] !== 'undefined')
-               .concat([typeof fetch, typeof console.log, typeof storage.get, typeof ffprobe, typeof sleep, typeof atob, typeof btoa, typeof URL, typeof URLSearchParams]); }, open() {} };",
+               .concat([typeof fetch, typeof console.log, typeof storage.get, typeof ffprobe, typeof sleep, typeof atob, typeof btoa, typeof URL, typeof URLSearchParams, typeof hash, typeof hmac]); }, open() {} };",
             &[],
             QUICK,
         );
-        assert_eq!(got.unwrap(), serde_json::json!(["function", "function", "function", "function", "function", "function", "function", "function", "function"]));
+        assert_eq!(got.unwrap(), serde_json::json!(["function", "function", "function", "function", "function", "function", "function", "function", "function", "function", "function"]));
     }
 
     #[test]
@@ -584,6 +603,33 @@ mod tests {
                 "a b", ["a b", "c&d"], true, "", null,
                 "https://api.example/search?q=x+y&key=it%27s%7E", [["q", "x y"], ["key", "it's~"]], ["q", "key"], "q=x+y&key=it%27s%7E",
                 "1", "https://api.example/other?z=1", "{\"v\":\"https://api.example/other?z=1\"}", "a=1&b=two+words", "x=%C3%A9"
+            ])
+        );
+    }
+
+    #[test]
+    fn hash_and_hmac_in_hex() {
+        let got = run(
+            "export default { items() {
+               const fox = 'The quick brown fox jumps over the lazy dog';
+               const thrown = (f) => { try { f(); return 'no error'; } catch (e) { return e.message; } };
+               return [hash('sha1', 'abc'), hash('sha256', 'abc'), hash('SHA-512', 'abc'), hash('sha256', '\\u00e9'),
+                 hmac('sha1', 'key', fox), hmac('sha256', 'key', fox), hmac('sha512', 'key', fox), thrown(() => hash('md5', 'abc'))];
+             }, open() {} };",
+            &[],
+            QUICK,
+        );
+        assert_eq!(
+            got.unwrap(),
+            serde_json::json!([
+                "a9993e364706816aba3e25717850c26c9cd0d89d",
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+                "4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c",
+                "de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9",
+                "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
+                "b42af09057bac1e2d41708e48a902e09b5ff7f12ab428a4fe86653c73dd248fb82f948a549f7b791a5b41915ee4d1ec3935357e4e2317250d0372afa2ebeeb3a",
+                "hash: md5 is not sha1, sha256 or sha512"
             ])
         );
     }

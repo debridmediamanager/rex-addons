@@ -92,6 +92,7 @@ Plain JavaScript, plus these:
 | `storage.get(key)`, `storage.set(key, value)`, `storage.delete(key)` | Your addon's own saved values, any JSON. They survive restarts and updates |
 | `atob(text)`, `btoa(text)` | Base64, as in browsers: text whose characters are bytes (0 to 255) |
 | `new URL(link, base)`, `URLSearchParams` | Links, as in browsers but smaller: `new URL(link, base)` resolves a relative link, a URL has `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin` and `searchParams`, and `URLSearchParams` has `get`, `getAll`, `has`, `set`, `append`, `delete`, `toString` and `entries`. Changing `searchParams` changes the URL |
+| `hash(algorithm, text)`, `hmac(algorithm, key, text)` | A digest of the text (as UTF-8) in lowercase hex, for signing an API request. `algorithm` is `sha1`, `sha256` or `sha512`; there's no `md5` |
 | `await sleep(ms)` | Waits, for backing off when a website answers 429. The wait doesn't count as JavaScript time, and a sleep past the end of the call fails at once |
 
 There's nothing else: no timers (`setTimeout`, use `sleep`), no `require` or `import`, no

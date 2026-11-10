@@ -22,8 +22,8 @@ const AGENT: &str = concat!("git/2.0 (rex-addons/", env!("CARGO_PKG_VERSION"), "
 
 pub type Oid = [u8; 20];
 
-pub fn hex(oid: &Oid) -> String {
-    oid.iter().map(|b| format!("{b:02x}")).collect()
+pub fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn unhex(text: &str) -> Option<Oid> {

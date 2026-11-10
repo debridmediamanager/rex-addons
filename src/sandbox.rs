@@ -433,7 +433,7 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
                 .map_err(|_| invalid(&link))?;
                 // A setter: as in browsers, a value that doesn't fit leaves the URL as it was.
                 if let (Some(field), Some(value)) = (field, value) {
-                    let _ = match field.as_str() {
+                    match field.as_str() {
                         "href" => quirks::set_href(&mut url, &value).map_err(|_| invalid(&value))?,
                         "protocol" => quirks::set_protocol(&mut url, &value).unwrap_or(()),
                         "username" => quirks::set_username(&mut url, &value).unwrap_or(()),

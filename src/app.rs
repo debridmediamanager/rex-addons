@@ -2,7 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value as Json};
@@ -67,6 +67,8 @@ pub struct Addon {
     pub again: bool,
     pub attempted: Option<Instant>,
     pub opened: HashMap<String, (Opened, Instant)>,
+    /// The `open()` running for each item: callers for the same item wait for it and share it.
+    pub opening: HashMap<String, Arc<OnceLock<Result<Opened, String>>>>,
 }
 
 impl Addon {
@@ -289,20 +291,35 @@ impl App {
         format!("http://{}/bytes/{id}", net::reachable(self.listen))
     }
 
-    /// What an item plays from now: the addon's `open()`, reused for OPEN_TTL.
+    /// What an item plays from now: the addon's `open()`, reused for OPEN_TTL. Concurrent
+    /// first reads of one item (a player opens several) share a single call, and its error.
     pub fn open(&self, id: &str, item: &str) -> Result<Opened, String> {
-        let (manifest, source, config, storage) = {
-            let addons = self.addons.lock().unwrap();
-            let addon = addons.get(id).ok_or("no such addon")?;
+        let (slot, manifest, source, config, storage) = {
+            let mut addons = self.addons.lock().unwrap();
+            let addon = addons.get_mut(id).ok_or("no such addon")?;
             if let Some((opened, at)) = addon.opened.get(item) {
                 if at.elapsed() < OPEN_TTL {
                     return Ok(opened.clone());
                 }
             }
-            (addon.manifest.clone(), addon.source.clone(), addon.config.clone(), addon.storage.clone())
+            let slot = addon.opening.entry(item.to_string()).or_default().clone();
+            (slot, addon.manifest.clone(), addon.source.clone(), addon.config.clone(), addon.storage.clone())
         };
-        let env = Env { addon: id, source: &source, hosts: &manifest.hosts, storage, prober: self.prober.clone() };
-        let ctx = json!({"config": manifest.effective(&config)});
+        let result = slot.get_or_init(|| self.call_open(id, item, &manifest, &source, &config, storage)).clone();
+        if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
+            if addon.opening.get(item).is_some_and(|s| Arc::ptr_eq(s, &slot)) {
+                addon.opening.remove(item);
+                if let Ok(opened) = &result {
+                    addon.opened.insert(item.to_string(), (opened.clone(), Instant::now()));
+                }
+            }
+        }
+        result
+    }
+
+    fn call_open(&self, id: &str, item: &str, manifest: &Manifest, source: &str, config: &Map<String, Json>, storage: Arc<Storage>) -> Result<Opened, String> {
+        let env = Env { addon: id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone() };
+        let ctx = json!({"config": manifest.effective(config)});
         let answer = sandbox::call(&env, "open", &[json!(item), ctx], sandbox::OPEN)?;
         let url = answer["url"].as_str().ok_or("open() returned no url")?;
         let parsed = url::Url::parse(url).map_err(|e| format!("open() returned {url}: {e}"))?;
@@ -313,11 +330,7 @@ impl App {
             .as_object()
             .map(|h| h.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
             .unwrap_or_default();
-        let opened = Opened { url: url.to_string(), headers };
-        if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
-            addon.opened.insert(item.to_string(), (opened.clone(), Instant::now()));
-        }
-        Ok(opened)
+        Ok(Opened { url: url.to_string(), headers })
     }
 
     pub fn forget_open(&self, id: &str, item: &str) {
@@ -928,6 +941,7 @@ fn load(path: &Path) -> Result<Addon, String> {
         again: false,
         attempted: None,
         opened: HashMap::new(),
+        opening: HashMap::new(),
     })
 }
 
@@ -1074,6 +1088,39 @@ mod sync_tests {
         assert_eq!(seen.len(), 2, "{seen:?}");
         assert_eq!((seen[0]["items"][0]["id"].as_str(), seen[0].get("force")), (Some("a1"), None));
         assert_eq!((seen[1]["items"][0]["id"].as_str(), &seen[1]["force"]), (Some("a2"), &json!(true)));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn concurrent_first_reads_share_one_open() {
+        let data = std::env::temp_dir().join(format!("rex-addons-open-once-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), "http://127.0.0.1:9".into(), "127.0.0.1:9".parse().unwrap(), None, None);
+        // Each call counts itself in storage, then takes a while, as a scraper does.
+        let source = "export default { items() { return []; }, open(id) {
+            const n = (storage.get('calls') || 0) + 1; storage.set('calls', n);
+            const end = Date.now() + 300; while (Date.now() < end);
+            if (id === 'bad') throw new Error('no stream ' + n);
+            return { url: 'https://cdn.example.com/' + n }; } };";
+        app.install(&json!({"id": "slow", "name": "Slow", "version": "1.0.0", "hosts": ["cdn.example.com"]}), source, None).unwrap();
+        for item in ["good", "bad"] {
+            let answers: Vec<Result<String, String>> = std::thread::scope(|scope| {
+                let readers: Vec<_> = (0..4)
+                    .map(|n| {
+                        let app = &app;
+                        scope.spawn(move || {
+                            std::thread::sleep(Duration::from_millis(20 * n));
+                            app.open("slow", item).map(|o| o.url)
+                        })
+                    })
+                    .collect();
+                readers.into_iter().map(|r| r.join().unwrap()).collect()
+            });
+            let first = answers[0].clone();
+            assert!(answers.iter().all(|a| *a == first), "{item}: {answers:?}");
+        }
+        // One call for the four good reads, one for the four bad ones.
+        assert_eq!(read_json(&dir(&app, "slow").join("storage.json")).unwrap()["calls"], json!(2));
         let _ = std::fs::remove_dir_all(&data);
     }
 

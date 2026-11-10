@@ -82,7 +82,7 @@ called for every seek.
 
 ## What your code can use
 
-Plain JavaScript, plus four things:
+Plain JavaScript, plus these:
 
 | Global | What it does |
 |---|---|
@@ -90,8 +90,9 @@ Plain JavaScript, plus four things:
 | `ffprobe(url, {headers})` | ffprobe's JSON of a video (`format`, `streams`, `chapters`), for `media_info`. rex-addons reads the link itself, for ffprobe, so the same `hosts` rule applies as for `fetch`; an HLS playlist works too. It fails with a clear message when rex-addons runs without ffprobe. Up to 2 minutes, which don't count as JavaScript time |
 | `console.log`, `console.warn`, `console.error` | Into rex-addons' log, tagged `[addon <id>]` |
 | `storage.get(key)`, `storage.set(key, value)`, `storage.delete(key)` | Your addon's own saved values, any JSON. They survive restarts and updates |
+| `await sleep(ms)` | Waits, for backing off when a website answers 429. The wait doesn't count as JavaScript time, and a sleep past the end of the call fails at once |
 
-There's nothing else: no timers (`setTimeout`), no `require` or `import`, no `URL`, no
+There's nothing else: no timers (`setTimeout`, use `sleep`), no `require` or `import`, no `URL`, no
 `TextEncoder`, no file access. Each call starts fresh, so keep anything you want to remember
 across calls in `storage`.
 
@@ -100,7 +101,7 @@ Limits, per call:
 | | |
 |---|---|
 | Memory | 64 MB |
-| JavaScript time | 30 s for `items()`, 10 s for `open()`. Time spent waiting on `fetch` or `ffprobe` doesn't count |
+| JavaScript time | 30 s for `items()`, 10 s for `open()`. Time spent waiting on `fetch`, `ffprobe` or `sleep` doesn't count |
 | Whole call | 20 minutes for `items()`, 90 s for `open()`. A `fetch` or body read still waiting then fails |
 | A fetched body | 16 MB |
 | `storage` | 16 MB in all, written to disk when the call ends |

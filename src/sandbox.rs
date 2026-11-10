@@ -139,6 +139,9 @@ const PRELUDE: &str = r#"
       json: async () => JSON.parse(read()),
     });
   }
+  async function sleep(ms) {
+    host.sleep(Number(ms));
+  }
   async function ffprobe(url, init = {}) {
     return JSON.parse(host.ffprobe(String(url), JSON.stringify({ headers: init.headers })));
   }
@@ -147,7 +150,7 @@ const PRELUDE: &str = r#"
     set: (key, value) => { value === undefined ? host.storageDelete(String(key)) : host.storageSet(String(key), JSON.stringify(value)); },
     delete: (key) => { host.storageDelete(String(key)); },
   });
-  for (const [name, value] of Object.entries({ console, fetch, ffprobe, storage })) {
+  for (const [name, value] of Object.entries({ console, fetch, ffprobe, storage, sleep })) {
     Object.defineProperty(globalThis, name, { value, writable: false, configurable: false, enumerable: false });
   }
 })();
@@ -341,6 +344,19 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
         }})?,
     )?;
 
+    let sleep_waited = waited.clone();
+    host.set(
+        "sleep",
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, ms: f64| -> rquickjs::Result<()> {
+            let wanted = Duration::try_from_secs_f64(ms.max(0.0) / 1000.0).unwrap_or(Duration::MAX);
+            if wanted > deadline.saturating_duration_since(Instant::now()) {
+                return Err(throw(&ctx, &format!("sleep({ms}) would outlast the call: a call may take {} s in all", wall.as_secs())));
+            }
+            std::thread::sleep(wanted);
+            sleep_waited.set(sleep_waited.get() + wanted);
+            Ok(())
+        })?,
+    )?;
     let storage = env.storage.clone();
     host.set(
         "storageGet",
@@ -411,11 +427,11 @@ mod tests {
             "export default { items() { return ['setTimeout', 'setInterval', 'require', 'process', 'XMLHttpRequest', 'WebSocket', '__rex', 'os', 'std', 'print',
                'queueMicrotask', 'atob', 'btoa', 'performance', 'DOMException', 'URL', 'TextEncoder']
                .filter((name) => typeof globalThis[name] !== 'undefined')
-               .concat([typeof fetch, typeof console.log, typeof storage.get, typeof ffprobe]); }, open() {} };",
+               .concat([typeof fetch, typeof console.log, typeof storage.get, typeof ffprobe, typeof sleep]); }, open() {} };",
             &[],
             QUICK,
         );
-        assert_eq!(got.unwrap(), serde_json::json!(["function", "function", "function", "function"]));
+        assert_eq!(got.unwrap(), serde_json::json!(["function", "function", "function", "function", "function"]));
     }
 
     #[test]
@@ -430,6 +446,19 @@ mod tests {
         let error = run("export default { items() { for (;;) {} }, open() {} };", &[], QUICK).unwrap_err();
         assert!(error.contains("longer than 1 s"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn sleep_is_waited_time_within_the_call() {
+        // 1.2 s asleep, with 1 s of JavaScript time allowed.
+        let started = Instant::now();
+        let got = run("export default { async items() { await sleep(600); await sleep('600'); return 'woke'; }, open() {} };", &[], QUICK);
+        assert_eq!(got.unwrap(), serde_json::json!("woke"));
+        assert!(started.elapsed() >= Duration::from_millis(1200));
+        let started = Instant::now();
+        let error = run("export default { async items() { await sleep(60000); }, open() {} };", &[], QUICK).unwrap_err();
+        assert!(error.starts_with("sleep(60000) would outlast the call: a call may take 10 s in all"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

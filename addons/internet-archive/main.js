@@ -57,6 +57,14 @@ async function fileOf(identifier) {
   return chosen;
 }
 
+function link(identifier, file) {
+  return `https://archive.org/download/${encodeURIComponent(identifier)}/${file.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+// Probing a film reads a little of it from archive.org, a second or two each. Past this budget a
+// sync stops probing, and rex-addons probes the rest itself, several at once.
+const PROBE_BUDGET_MS = 10 * 60 * 1000;
+
 function text(html) {
   const plain = String(Array.isArray(html) ? html.join("\n") : html ?? "")
     .replace(/<br\s*\/?>|<\/p>/gi, "\n")
@@ -90,6 +98,7 @@ export default {
     if (!Array.isArray(docs)) throw new Error("archive.org search answered no list");
 
     const items = [];
+    const probeUntil = Date.now() + PROBE_BUDGET_MS;
     for (const doc of docs) {
       const identifier = doc.identifier;
       let chosen;
@@ -117,8 +126,25 @@ export default {
       // archive.org names an IMDb title for a few films: Plex then names and pictures them.
       const imdb = String(doc.imdb ?? "").match(/tt\d{5,}/);
       if (imdb) Object.assign(item, { kind: "movie", ids: { imdb: imdb[0] } });
+      // rex shows a film once it knows what is in it. A file never changes, so each is probed once.
+      let probe = storage.get(`p:${identifier}`);
+      if (!probe && Date.now() < probeUntil) {
+        try {
+          probe = await ffprobe(link(identifier, chosen.file));
+          storage.set(`p:${identifier}`, probe);
+        } catch (error) {
+          console.warn(`${identifier}: ${error.message}`);
+        }
+      }
+      if (probe) item.media_info = probe;
       items.push(item);
     }
+    // Forget films the list no longer holds, so storage does not grow forever.
+    const listed = new Set(docs.map((doc) => doc.identifier));
+    for (const old of storage.get("listed") ?? []) {
+      if (!listed.has(old)) ["f", "p"].forEach((kind) => storage.delete(`${kind}:${old}`));
+    }
+    storage.set("listed", [...listed]);
     console.log(`${items.length} of ${docs.length} films have one playable video`);
     return items;
   },
@@ -127,7 +153,6 @@ export default {
     const identifier = id.replace(/^ia-/, "");
     const chosen = await fileOf(identifier);
     if (!chosen.file) throw new Error(`${identifier}: ${chosen.skip}`);
-    const file = chosen.file.split("/").map(encodeURIComponent).join("/");
-    return { url: `https://archive.org/download/${encodeURIComponent(identifier)}/${file}` };
+    return { url: link(identifier, chosen.file) };
   },
 };

@@ -1,0 +1,11 @@
+{
+  "id": "internet-archive",
+  "name": "Internet Archive",
+  "version": "1.0.0",
+  "description": "Public domain feature films from archive.org: classics, silents, noir and B-movies, streamed straight from the Internet Archive.",
+  "hosts": ["archive.org", "*.archive.org"],
+  "config": [
+    {"key": "count", "label": "How many films", "type": "number", "default": 100}
+  ],
+  "refresh_minutes": 1440
+}

@@ -2,7 +2,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -10,6 +9,8 @@ use serde_json::{json, Map, Value as Json};
 
 use crate::addons::{newer, read_json, write_atomic, Manifest};
 use crate::net;
+use crate::probe::{self, Prober};
+use crate::repos::{self, Repo};
 use crate::sandbox::{self, Env, Storage};
 
 /// How long an `open()` answer is reused for the byte reads of one item.
@@ -46,6 +47,8 @@ pub struct Addon {
     pub config: Map<String, Json>,
     pub storage: Arc<Storage>,
     pub enabled: bool,
+    /// The repository it was installed from; None for a bundled one.
+    pub repo: Option<String>,
     pub last_sync: Option<u64>,
     pub items: usize,
     pub held: usize,
@@ -69,7 +72,7 @@ impl Addon {
         let m = &self.manifest;
         json!({
             "id": m.id, "name": m.name, "version": m.version, "description": m.description,
-            "enabled": self.enabled,
+            "enabled": self.enabled, "repo": self.repo,
             "state": if self.syncing { "syncing" } else if self.error.is_some() { "error" } else { "idle" },
             "items": self.items, "held": self.held, "last_sync": self.last_sync, "error": self.error,
         })
@@ -80,8 +83,17 @@ pub struct App {
     pub data: PathBuf,
     pub rex: String,
     pub listen: SocketAddr,
-    pub ffprobe: Option<String>,
+    pub prober: Arc<Prober>,
     pub addons: Mutex<BTreeMap<String, Addon>>,
+    pub repos: Mutex<Repos>,
+}
+
+/// The repositories added, and every `--default-repo` ever added, so one a person removed
+/// is never added again.
+#[derive(Default)]
+pub struct Repos {
+    pub list: Vec<Repo>,
+    pub defaults: BTreeSet<String>,
 }
 
 fn dir(app: &App, id: &str) -> PathBuf {
@@ -95,7 +107,19 @@ pub fn source_name(id: &str) -> String {
 impl App {
     pub fn new(data: PathBuf, rex: String, listen: SocketAddr, ffprobe: Option<String>, bundled: Option<&Path>) -> Arc<App> {
         std::fs::create_dir_all(data.join("addons")).expect("cannot create the data directory");
-        let app = Arc::new(App { data, rex: rex.trim_end_matches('/').to_string(), listen, ffprobe, addons: Mutex::default() });
+        let saved = read_json(&data.join("repos.json")).unwrap_or(Json::Null);
+        let repos = Repos {
+            list: saved["repos"].as_array().into_iter().flatten().filter_map(Repo::from_json).collect(),
+            defaults: serde_json::from_value(saved["defaults"].clone()).unwrap_or_default(),
+        };
+        let app = Arc::new(App {
+            prober: Arc::new(Prober::new(ffprobe, listen)),
+            data,
+            rex: rex.trim_end_matches('/').to_string(),
+            listen,
+            addons: Mutex::default(),
+            repos: Mutex::new(repos),
+        });
         let entries = std::fs::read_dir(app.data.join("addons")).into_iter().flatten().flatten();
         for entry in entries {
             match load(&entry.path()) {
@@ -147,7 +171,7 @@ impl App {
             }
             let installed = self.addons.lock().unwrap().get(&manifest.id).map(|a| a.manifest.version.clone());
             if installed.as_ref().is_none_or(|version| newer(&manifest.version, version)) {
-                match self.install(&raw, &source) {
+                match self.install(&raw, &source, None) {
                     Ok(id) => log("host", &format!("installed bundled {id} {}", manifest.version)),
                     Err(error) => warn("host", &format!("bundled {}: {error}", manifest.id)),
                 }
@@ -156,10 +180,11 @@ impl App {
     }
 
     /// Writes an addon's files and loads it; an installed one keeps its settings and storage.
-    pub fn install(&self, raw: &Json, source: &str) -> Result<String, String> {
+    /// `repo` is where it came from; None (bundled) keeps what an installed one came from.
+    pub fn install(&self, raw: &Json, source: &str, repo: Option<&str>) -> Result<String, String> {
         let manifest = Manifest::parse(raw)?;
         let storage = Arc::new(Storage::open(PathBuf::from("/dev/null")));
-        let env = Env { addon: &manifest.id, source, hosts: &manifest.hosts, storage };
+        let env = Env { addon: &manifest.id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone() };
         sandbox::call(&env, "", &[], sandbox::OPEN).map_err(|error| format!("main.js: {error}"))?;
         let path = dir(self, &manifest.id);
         std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
@@ -173,31 +198,20 @@ impl App {
                 addon.source = Arc::new(source.to_string());
                 addon.opened.clear();
                 addon.last_sync = None;
+                if repo.is_some() {
+                    addon.repo = repo.map(str::to_string);
+                }
+                save_state(self, addon);
             }
             None => {
-                let addon = load(&path)?;
+                let mut addon = load(&path)?;
+                addon.repo = repo.map(str::to_string);
                 save_state(self, &addon);
                 addons.insert(id.clone(), addon);
             }
         }
         drop(addons);
         self.set_removed(&id, false);
-        Ok(id)
-    }
-
-    pub fn install_url(&self, url: &str) -> Result<String, String> {
-        let manifest_url = url::Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
-        if !matches!(manifest_url.scheme(), "http" | "https") {
-            return Err("the link must be http or https".into());
-        }
-        let agent = net::plain_agent(Duration::from_secs(30));
-        let get = |url: &str| -> Result<String, String> {
-            agent.get(url).call().map_err(|e| format!("{url}: {e}"))?.into_string().map_err(|e| format!("{url}: {e}"))
-        };
-        let raw: Json = serde_json::from_str(&get(manifest_url.as_str())?).map_err(|e| format!("manifest.json: {e}"))?;
-        let main = manifest_url.join("main.js").map_err(|e| e.to_string())?;
-        let id = self.install(&raw, &get(main.as_str())?)?;
-        log(&id, &format!("installed from {}", manifest_url.as_str()));
         Ok(id)
     }
 
@@ -281,7 +295,7 @@ impl App {
             }
             (addon.manifest.clone(), addon.source.clone(), addon.config.clone(), addon.storage.clone())
         };
-        let env = Env { addon: id, source: &source, hosts: &manifest.hosts, storage };
+        let env = Env { addon: id, source: &source, hosts: &manifest.hosts, storage, prober: self.prober.clone() };
         let ctx = json!({"config": manifest.effective(&config)});
         let answer = sandbox::call(&env, "open", &[json!(item), ctx], sandbox::OPEN)?;
         let url = answer["url"].as_str().ok_or("open() returned no url")?;
@@ -393,7 +407,7 @@ impl App {
         if let Some(label) = manifest.missing(&config) {
             return Err(format!("set {label} first"));
         }
-        let env = Env { addon: id, source: &source, hosts: &manifest.hosts, storage };
+        let env = Env { addon: id, source: &source, hosts: &manifest.hosts, storage, prober: self.prober.clone() };
         let returned = sandbox::call(&env, "items", &[json!({"config": manifest.effective(&config)})], sandbox::ITEMS)?;
         let mut items = checked_items(id, returned, &deleted)?;
         let name = source_name(id);
@@ -402,7 +416,8 @@ impl App {
             return Err(format!("rex refused the registration ({status}): {}", answer["error"]));
         }
 
-        // Probes already taken go with their items; the rest are probed below.
+        // An item the addon probed itself keeps its probe; one this host probed before takes
+        // that; the rest are probed below.
         let mut todo = Vec::new();
         {
             let mut addons = self.addons.lock().unwrap();
@@ -410,7 +425,9 @@ impl App {
             addon.paths = items.iter().flat_map(|i| [(path_of(i), id_of(i)), (id_of(i), id_of(i))]).collect();
             addon.probes.retain(|key, _| items.iter().any(|i| id_of(i) == *key));
             for (at, item) in items.iter_mut().enumerate() {
-                if item.get("media_info").is_some_and(Json::is_object) {
+                if let Some(own) = item.get("media_info").filter(|m| m.is_object()).cloned() {
+                    attach(item, own);
+                    addon.paths.insert(path_of(item), id_of(item));
                     continue;
                 }
                 match addon.probes.get(&id_of(item)) {
@@ -425,7 +442,7 @@ impl App {
         }
 
         if !todo.is_empty() {
-            match &self.ffprobe {
+            match &self.prober.bin {
                 None => warn(id, &format!("{} items are not probed (no --ffprobe): rex holds them and shows none of them", todo.len())),
                 Some(ffprobe) => self.probe_all(id, ffprobe, &mut items, todo)?,
             }
@@ -455,7 +472,7 @@ impl App {
                 let (queue, sender) = (&queue, sender.clone());
                 scope.spawn(move || {
                     while let Some((at, url)) = { let next = queue.lock().unwrap().pop_front(); next } {
-                        let _ = sender.send((at, probe(ffprobe, &url)));
+                        let _ = sender.send((at, probe::run(ffprobe, &url, &[])));
                     }
                 });
             }
@@ -564,6 +581,217 @@ impl App {
     }
 }
 
+/// Addon repositories, and what is installed from them.
+impl App {
+    fn repo_dir(&self, id: &str) -> PathBuf {
+        self.data.join("repos").join(id)
+    }
+
+    fn save_repos(&self, repos: &Repos) {
+        let saved = json!({"repos": repos.list.iter().map(Repo::to_json).collect::<Vec<_>>(), "defaults": repos.defaults});
+        if let Err(error) = write_atomic(&self.data.join("repos.json"), saved.to_string().as_bytes()) {
+            warn("host", &format!("repos.json: {error}"));
+        }
+    }
+
+    /// Fetches a repository into its folder and lists its addons. A fetch that fails leaves
+    /// the folder as it was.
+    fn fetch_repo(&self, url: &str) -> Result<Repo, String> {
+        let id = repos::repo_id(url)?;
+        let dest = self.repo_dir(&id);
+        std::fs::create_dir_all(dest.parent().unwrap()).map_err(|e| e.to_string())?;
+        let (commit, written) = crate::git::fetch(url, &dest)?;
+        let (addons, problems) = repos::discover(&dest);
+        for problem in &problems {
+            warn(&id, problem);
+        }
+        let (name, description) = repos::describe(&dest, url);
+        log(&id, &format!("fetched {commit}: {} files, {} addons{}", written.files, addons.len(),
+            if written.skipped > 0 { format!(", {} links and submodules left out", written.skipped) } else { String::new() }));
+        let error = addons.is_empty().then(|| match problems.first() {
+            Some(problem) => format!("no addons in it ({problem})"),
+            None => "no addons in it: no folder holds a manifest.json and a main.js".to_string(),
+        });
+        Ok(Repo { id, url: url.trim().to_string(), name, description, commit: Some(commit), last_fetch: Some(now()), error, addons })
+    }
+
+    /// The installed addons: id to (version, repository).
+    fn installed(&self) -> HashMap<String, (String, Option<String>)> {
+        self.addons.lock().unwrap().values().map(|a| (a.manifest.id.clone(), (a.manifest.version.clone(), a.repo.clone()))).collect()
+    }
+
+    /// A repository's addons as the API lists them: each with what is installed of it.
+    fn repo_addons(repo: &Repo, installed: &HashMap<String, (String, Option<String>)>) -> Vec<Json> {
+        repo.addons
+            .iter()
+            .map(|addon| {
+                let here = installed.get(&addon.id);
+                // An update is this repository's, or adopts a bundled one; one installed from
+                // another repository is that one's to update.
+                let ours = here.is_some_and(|(_, from)| from.as_deref().is_none_or(|from| from == repo.id));
+                json!({
+                    "id": addon.id, "name": addon.name, "version": addon.version, "description": addon.description,
+                    "hosts": addon.hosts,
+                    "installed_version": here.map(|(version, _)| version),
+                    "update_available": ours && here.is_some_and(|(version, _)| newer(&addon.version, version)),
+                })
+            })
+            .collect()
+    }
+
+    fn repo_json(repo: &Repo, installed: &HashMap<String, (String, Option<String>)>) -> Json {
+        let mut value = repo.to_json();
+        value["addons"] = json!(Self::repo_addons(repo, installed));
+        value
+    }
+
+    pub fn list_repos(&self) -> Json {
+        let installed = self.installed();
+        json!(self.repos.lock().unwrap().list.iter().map(|r| Self::repo_json(r, &installed)).collect::<Vec<_>>())
+    }
+
+    pub fn repo_addons_json(&self, id: &str) -> Option<Json> {
+        let installed = self.installed();
+        let repos = self.repos.lock().unwrap();
+        repos.list.iter().find(|r| r.id == id).map(|r| json!(Self::repo_addons(r, &installed)))
+    }
+
+    /// `POST /api/repos`: a new repository is fetched and must hold an addon; the same one
+    /// again is refreshed.
+    pub fn add_repo(&self, url: &str) -> Result<(u16, Json), (u16, String)> {
+        let id = repos::repo_id(url).map_err(|e| (400, e))?;
+        let known = self.repos.lock().unwrap().list.iter().find(|r| r.id == id).map(|r| r.url.clone());
+        match known {
+            Some(known) if known == url.trim() => return self.refresh_repo(&id).map(|repo| (200, repo)),
+            Some(known) => return Err((409, format!("that repository is already added as {known}"))),
+            None => {}
+        }
+        let repo = match self.fetch_repo(url) {
+            Ok(repo) if repo.error.is_none() => repo,
+            Ok(repo) => {
+                let _ = std::fs::remove_dir_all(self.repo_dir(&id));
+                return Err((400, repo.error.unwrap()));
+            }
+            Err(error) => return Err((400, error)),
+        };
+        let mut repos = self.repos.lock().unwrap();
+        repos.list.retain(|r| r.id != id);
+        repos.list.push(repo.clone());
+        self.save_repos(&repos);
+        drop(repos);
+        Ok((201, Self::repo_json(&repo, &self.installed())))
+    }
+
+    /// Fetches a repository again. A failure is kept on it, beside what it had.
+    pub fn refresh_repo(&self, id: &str) -> Result<Json, (u16, String)> {
+        let url = self.repos.lock().unwrap().list.iter().find(|r| r.id == id).map(|r| r.url.clone()).ok_or((404, "no such repository".to_string()))?;
+        let fetched = self.fetch_repo(&url);
+        let mut repos = self.repos.lock().unwrap();
+        let repo = repos.list.iter_mut().find(|r| r.id == id).ok_or((404, "no such repository".to_string()))?;
+        match fetched {
+            Ok(fetched) => *repo = fetched,
+            Err(error) => {
+                warn(id, &format!("fetch failed: {error}"));
+                repo.error = Some(error);
+            }
+        }
+        let repo = repo.clone();
+        self.save_repos(&repos);
+        drop(repos);
+        Ok(Self::repo_json(&repo, &self.installed()))
+    }
+
+    /// Its addons stay installed, and get no more updates.
+    pub fn remove_repo(&self, id: &str) -> Result<(), String> {
+        let mut repos = self.repos.lock().unwrap();
+        let before = repos.list.len();
+        repos.list.retain(|r| r.id != id);
+        if repos.list.len() == before {
+            return Err("no such repository".into());
+        }
+        self.save_repos(&repos);
+        drop(repos);
+        let _ = std::fs::remove_dir_all(self.repo_dir(id));
+        log(id, "repository removed");
+        Ok(())
+    }
+
+    /// Each `--default-repo` not added before is added once, and fetched in the background;
+    /// so is any repository never fetched yet.
+    pub fn start_repos(self: &Arc<Self>, defaults: &[String]) {
+        let mut repos = self.repos.lock().unwrap();
+        for url in defaults {
+            let Ok(id) = repos::repo_id(url) else {
+                warn("host", &format!("--default-repo {url}: not a repository address"));
+                continue;
+            };
+            if repos.defaults.insert(url.clone()) && !repos.list.iter().any(|r| r.id == id) {
+                repos.list.push(Repo {
+                    id, url: url.clone(), name: repos::name_from_url(url), description: String::new(),
+                    commit: None, last_fetch: None, error: Some("not fetched yet".into()), addons: Vec::new(),
+                });
+            }
+        }
+        self.save_repos(&repos);
+        let unfetched: Vec<String> = repos.list.iter().filter(|r| r.commit.is_none()).map(|r| r.id.clone()).collect();
+        drop(repos);
+        for id in unfetched {
+            let app = self.clone();
+            std::thread::spawn(move || {
+                let _ = app.refresh_repo(&id);
+            });
+        }
+    }
+
+    /// `POST /api/addons`: installs a repository's addon, or updates it, keeping its settings
+    /// and storage. One installed from another repository is refused.
+    pub fn install_from_repo(&self, repo_id: &str, addon_id: &str) -> Result<(u16, String), (u16, String)> {
+        let dir = {
+            let repos = self.repos.lock().unwrap();
+            let repo = repos.list.iter().find(|r| r.id == repo_id).ok_or((404, "no such repository".to_string()))?;
+            let addon = repo.addons.iter().find(|a| a.id == addon_id).ok_or((404, format!("{} holds no addon {addon_id}", repo.name)))?;
+            self.repo_dir(repo_id).join(&addon.dir)
+        };
+        let raw = read_json(&dir.join("manifest.json")).ok_or((404, "its manifest.json is gone: refresh the repository".to_string()))?;
+        let source = std::fs::read_to_string(dir.join("main.js")).map_err(|_| (404, "its main.js is gone: refresh the repository".to_string()))?;
+        if raw["id"].as_str() != Some(addon_id) {
+            return Err((409, "the addon changed: refresh the repository".into()));
+        }
+        let existing = self.addons.lock().unwrap().get(addon_id).map(|a| a.repo.clone());
+        if let Some(Some(other)) = &existing {
+            if other != repo_id {
+                return Err((409, format!("{addon_id} is already installed from {other}: remove it first")));
+            }
+        }
+        let id = self.install(&raw, &source, Some(repo_id)).map_err(|e| (400, e))?;
+        log(&id, &format!("{} from {repo_id}", if existing.is_some() { "updated" } else { "installed" }));
+        Ok((if existing.is_some() { 200 } else { 201 }, id))
+    }
+
+    /// An addon as the API shows it: its state, and whether its repository has a newer version.
+    pub fn status(&self, id: &str) -> Option<Json> {
+        let versions: HashMap<(String, String), String> = self
+            .repos
+            .lock()
+            .unwrap()
+            .list
+            .iter()
+            .flat_map(|r| r.addons.iter().map(move |a| ((r.id.clone(), a.id.clone()), a.version.clone())))
+            .collect();
+        let addons = self.addons.lock().unwrap();
+        let addon = addons.get(id)?;
+        let mut status = addon.status();
+        let offered = addon.repo.as_ref().and_then(|r| versions.get(&(r.clone(), id.to_string())));
+        status["update_available"] = json!(offered.is_some_and(|v| newer(v, &addon.manifest.version)));
+        Some(status)
+    }
+
+    pub fn statuses(&self) -> Vec<Json> {
+        let ids: Vec<String> = self.addons.lock().unwrap().keys().cloned().collect();
+        ids.iter().filter_map(|id| self.status(id)).collect()
+    }
+}
+
 fn id_of(item: &Map<String, Json>) -> String {
     item["id"].as_str().unwrap_or_default().to_string()
 }
@@ -644,26 +872,6 @@ pub fn encode_path(path: &str) -> String {
     path.split('/').map(|s| percent_encoding::utf8_percent_encode(s, SEGMENT).to_string()).collect::<Vec<_>>().join("/")
 }
 
-fn probe(ffprobe: &str, url: &str) -> Result<Json, String> {
-    let out = Command::new(ffprobe)
-        .args(["-v", "error", "-rw_timeout", "60000000", "-print_format", "json"])
-        .args(["-show_format", "-show_streams", "-show_chapters", url])
-        .output()
-        .map_err(|e| format!("{ffprobe}: {e}"))?;
-    if !out.status.success() {
-        let error = String::from_utf8_lossy(&out.stderr);
-        let error = error.trim();
-        return Err(error[error.len().saturating_sub(300)..].to_string());
-    }
-    let mut probe: Json = serde_json::from_slice(&out.stdout).map_err(|e| e.to_string())?;
-    if !probe["format"].is_object() || probe["streams"].as_array().is_none_or(Vec::is_empty) {
-        return Err("ffprobe found no streams".into());
-    }
-    // It names this host's own URL, which means nothing to rex.
-    probe["format"].as_object_mut().unwrap().remove("filename");
-    Ok(probe)
-}
-
 fn load(path: &Path) -> Result<Addon, String> {
     let raw = read_json(&path.join("manifest.json")).ok_or("no manifest.json")?;
     let manifest = Manifest::parse(&raw)?;
@@ -680,6 +888,7 @@ fn load(path: &Path) -> Result<Addon, String> {
         config: object("config.json"),
         storage: Arc::new(Storage::open(path.join("storage.json"))),
         enabled: state["enabled"].as_bool().unwrap_or(true),
+        repo: state["repo"].as_str().map(str::to_string),
         last_sync: state["last_sync"].as_u64(),
         items: state["items"].as_u64().unwrap_or(0) as usize,
         held: state["held"].as_u64().unwrap_or(0) as usize,
@@ -698,7 +907,7 @@ fn load(path: &Path) -> Result<Addon, String> {
 fn save_state(app: &App, addon: &Addon) {
     let state = json!({
         "enabled": addon.enabled, "last_sync": addon.last_sync, "items": addon.items, "held": addon.held,
-        "error": addon.error, "deleted": addon.deleted,
+        "error": addon.error, "deleted": addon.deleted, "repo": addon.repo,
     });
     let _ = write_atomic(&dir(app, &addon.manifest.id).join("state.json"), state.to_string().as_bytes());
 }
@@ -797,7 +1006,7 @@ mod sync_tests {
         // No ffprobe: items go to rex unprobed, which rex holds.
         let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
         let source = "export default { items() { return [{id: 'a', path: 'films/a.mp4'}]; }, open() {} };";
-        app.install(&json!({"id": "demo", "name": "Demo", "version": "1.0.0"}), source).unwrap();
+        app.install(&json!({"id": "demo", "name": "Demo", "version": "1.0.0"}), source, None).unwrap();
 
         assert!(app.start_sync("demo", false));
         let status = wait_idle(&app, "demo");
@@ -824,7 +1033,7 @@ mod sync_tests {
         // items() takes a moment, so the settings change lands while it runs.
         let source = "export default { items(ctx) { const end = Date.now() + 300; while (Date.now() < end); return [{id: 'a' + ctx.config.n, path: 'films/a.mp4'}]; }, open() {} };";
         let manifest = json!({"id": "slow", "name": "Slow", "version": "1.0.0", "config": [{"key": "n", "label": "N", "type": "number", "default": 1}]});
-        app.install(&manifest, source).unwrap();
+        app.install(&manifest, source, None).unwrap();
         assert!(app.start_sync("slow", false));
         std::thread::sleep(Duration::from_millis(100));
         app.set_config("slow", &json!({"n": 2})).unwrap();
@@ -838,6 +1047,125 @@ mod sync_tests {
         assert_eq!(seen.len(), 2, "{seen:?}");
         assert_eq!((seen[0]["items"][0]["id"].as_str(), seen[0].get("force")), (Some("a1"), None));
         assert_eq!((seen[1]["items"][0]["id"].as_str(), &seen[1]["force"]), (Some("a2"), &json!(true)));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    fn write_addon(root: &Path, id: &str, version: &str) {
+        let dir = root.join("addons").join(id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = json!({"id": id, "name": id, "version": version, "config": [{"key": "n", "label": "N", "type": "number", "default": 1}]});
+        std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap();
+        std::fs::write(dir.join("main.js"), format!("export default {{ items() {{ return []; }}, open() {{}}, version: '{version}' }};")).unwrap();
+    }
+
+    /// A repository as a fetch leaves it: its checkout in `repos/<id>/`, its record listed.
+    fn add_local_repo(app: &App, id: &str) {
+        let (addons, _) = repos::discover(&app.repo_dir(id));
+        let mut repos = app.repos.lock().unwrap();
+        repos.list.retain(|r| r.id != id);
+        repos.list.push(Repo {
+            id: id.into(), url: format!("https://example.com/{id}"), name: id.into(), description: String::new(),
+            commit: Some("0".repeat(40)), last_fetch: Some(now()), error: None, addons,
+        });
+    }
+
+    #[test]
+    fn repository_installs_update_keep_settings_and_conflict() {
+        let (rex, _) = stub_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-repos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+        write_addon(&app.repo_dir("one"), "films", "1.0.0");
+        write_addon(&app.repo_dir("two"), "films", "1.0.0");
+        add_local_repo(&app, "one");
+        add_local_repo(&app, "two");
+
+        assert_eq!(app.install_from_repo("one", "films").unwrap(), (201, "films".to_string()));
+        assert_eq!(app.status("films").unwrap()["repo"], "one");
+        assert_eq!(app.status("films").unwrap()["update_available"], false);
+        app.set_config("films", &json!({"n": 5})).unwrap();
+        std::fs::write(dir(&app, "films").join("storage.json"), r#"{"kept": true}"#).unwrap();
+
+        // The repository moves on: an update shows, and installing it keeps settings and storage.
+        write_addon(&app.repo_dir("one"), "films", "1.1.0");
+        add_local_repo(&app, "one");
+        assert_eq!(app.status("films").unwrap()["update_available"], true);
+        let listed = app.repo_addons_json("one").unwrap();
+        assert_eq!((listed[0]["installed_version"].as_str(), &listed[0]["update_available"]), (Some("1.0.0"), &json!(true)));
+        assert_eq!(app.install_from_repo("one", "films").unwrap(), (200, "films".to_string()));
+        let addon = app.addons.lock().unwrap();
+        assert_eq!((addon["films"].manifest.version.as_str(), &addon["films"].config["n"]), ("1.1.0", &json!(5)));
+        assert!(addon["films"].source.contains("1.1.0"));
+        drop(addon);
+        assert_eq!(std::fs::read_to_string(dir(&app, "films").join("storage.json")).unwrap(), r#"{"kept": true}"#);
+        assert_eq!(app.status("films").unwrap()["update_available"], false);
+
+        // The same id from another repository is refused; the other repository's listing shows
+        // it installed, with no update of its own to offer.
+        let (status, error) = app.install_from_repo("two", "films").unwrap_err();
+        assert_eq!(status, 409, "{error}");
+        assert!(error.contains("already installed from one"), "{error}");
+        assert_eq!(app.repo_addons_json("two").unwrap()[0]["update_available"], false);
+        assert_eq!(app.install_from_repo("two", "nope").unwrap_err().0, 404);
+        assert_eq!(app.install_from_repo("three", "films").unwrap_err().0, 404);
+
+        // A bundled addon is adopted by the repository that offers it.
+        write_addon(&app.repo_dir("two"), "solo", "2.0.0");
+        add_local_repo(&app, "two");
+        let solo = std::fs::read_to_string(app.repo_dir("two").join("addons/solo/main.js")).unwrap();
+        app.install(&json!({"id": "solo", "name": "solo", "version": "1.0.0"}), &solo, None).unwrap();
+        assert_eq!(app.status("solo").unwrap()["repo"], Json::Null);
+        assert_eq!(app.repo_addons_json("two").unwrap()[1]["update_available"], true);
+        assert_eq!(app.install_from_repo("two", "solo").unwrap().0, 200);
+        assert_eq!(app.status("solo").unwrap()["repo"], "two");
+
+        // Removing a repository leaves its addons installed, with no more updates.
+        app.remove_repo("one").unwrap();
+        assert!(!app.repo_dir("one").exists());
+        assert_eq!(app.status("films").unwrap()["repo"], "one");
+        assert_eq!(app.status("films").unwrap()["update_available"], false);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn a_default_repository_is_added_once_and_stays_removed() {
+        let data = std::env::temp_dir().join(format!("rex-addons-defaults-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        // A host nothing answers on: the background fetch fails, the repository stays listed.
+        let defaults = ["https://127.0.0.1:9/me/addons".to_string()];
+        let app = App::new(data.clone(), "http://127.0.0.1:9".into(), "127.0.0.1:9".parse().unwrap(), None, None);
+        app.start_repos(&defaults);
+        let listed = app.list_repos();
+        assert_eq!((listed[0]["id"].as_str(), listed[0]["name"].as_str()), (Some("127-0-0-1-me-addons"), Some("addons")));
+        app.remove_repo("127-0-0-1-me-addons").unwrap();
+        drop(app);
+        let app = App::new(data.clone(), "http://127.0.0.1:9".into(), "127.0.0.1:9".parse().unwrap(), None, None);
+        app.start_repos(&defaults);
+        assert_eq!(app.list_repos(), json!([]));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    #[ignore = "network: GitHub and Codeberg"]
+    fn real_repositories() {
+        let data = std::env::temp_dir().join(format!("rex-addons-real-repos-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), "http://127.0.0.1:9".into(), "127.0.0.1:9".parse().unwrap(), None, None);
+        let url = std::env::var("REX_ADDONS_REPO").unwrap_or("https://github.com/debridmediamanager/rex-addons".into());
+        let (status, repo) = app.add_repo(&url).unwrap();
+        eprintln!("{status} {repo}");
+        assert_eq!(status, 201);
+        let ids: Vec<&str> = repo["addons"].as_array().unwrap().iter().map(|a| a["id"].as_str().unwrap()).collect();
+        assert!(ids.contains(&"internet-archive") && ids.contains(&"stremio"), "{ids:?}");
+        assert_eq!(app.add_repo(&url).unwrap().0, 200);
+        let (status, error) = app.add_repo("https://codeberg.org/Codeberg/Community").unwrap_err();
+        eprintln!("{status} {error}");
+        assert_eq!(status, 400);
+        assert!(error.starts_with("no addons in it"), "{error}");
+        assert!(!app.repo_dir("codeberg-org-codeberg-community").exists());
+        let (status, error) = app.add_repo("https://notes.debridmediamanager.com/rex").unwrap_err();
+        eprintln!("{status} {error}");
+        assert_eq!(status, 400);
         let _ = std::fs::remove_dir_all(&data);
     }
 }

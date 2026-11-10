@@ -4,7 +4,10 @@
 mod addon_tests;
 mod addons;
 mod app;
+mod git;
 mod net;
+mod probe;
+mod repos;
 mod sandbox;
 mod server;
 
@@ -12,19 +15,20 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const USAGE: &str = "rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [--ffprobe <path>] [--bundled <dir>]
+const USAGE: &str = "rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [--ffprobe <path>] [--bundled <dir>] [--default-repo <url>]...
 
   --listen   where the management API and the byte paths rex reads answer (default 127.0.0.1:32410)
   --rex      rex's address (default http://127.0.0.1:32400)
   --data     where installed addons, their settings and storage are kept (default ./rex-addons-data)
   --ffprobe  the ffprobe that checks each item once; without it rex holds every item unshown
-  --bundled  addons installed on the first start and updated when a newer version is bundled";
+  --bundled  addons installed on the first start and updated when a newer version is bundled
+  --default-repo  an addon repository added once, the first time it is given; repeatable";
 
 fn main() {
     let mut listen: SocketAddr = "127.0.0.1:32410".parse().unwrap();
     let mut rex = "http://127.0.0.1:32400".to_string();
     let mut data = PathBuf::from("rex-addons-data");
-    let (mut ffprobe, mut bundled) = (None, None);
+    let (mut ffprobe, mut bundled, mut defaults) = (None, None, Vec::new());
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         if matches!(flag.as_str(), "-h" | "--help") {
@@ -50,6 +54,7 @@ fn main() {
             "--data" => data = value.into(),
             "--ffprobe" => ffprobe = Some(value),
             "--bundled" => bundled = Some(PathBuf::from(value)),
+            "--default-repo" => defaults.push(value),
             _ => {
                 eprintln!("unknown flag {flag}\n\n{USAGE}");
                 std::process::exit(2);
@@ -66,7 +71,8 @@ fn main() {
     });
     let app = app::App::new(data, rex, listen, ffprobe, bundled.as_deref());
     app::log("host", &format!("rex-addons {} on {listen}, rex at {}, {} addons", env!("CARGO_PKG_VERSION"), app.rex, app.addons.lock().unwrap().len()));
-    if app.ffprobe.is_none() {
+    app.start_repos(&defaults);
+    if app.prober.bin.is_none() {
         app::warn("host", "no --ffprobe: rex holds every item it is sent until it is probed, so nothing shows in Plex");
     }
     let scheduler = app.clone();

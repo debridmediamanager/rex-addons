@@ -499,7 +499,9 @@ dependencies = [
 name = "rex-addons"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "percent-encoding",
+ "ring",
  "rquickjs",
  "serde_json",
  "tiny_http",

@@ -44,7 +44,7 @@ fn handle(app: &Arc<App>, mut request: Request) {
         }
         return bytes(app, request, rest);
     }
-    if !path.starts_with("/api/") {
+    if !path.starts_with("/api/") && !path.starts_with("/relay/") {
         let _ = request.respond(error(404, "not found"));
         return;
     }
@@ -52,6 +52,9 @@ fn handle(app: &Arc<App>, mut request: Request) {
     if !peer.is_some_and(net::is_loopback) {
         let _ = request.respond(error(403, "the management API answers only this device"));
         return;
+    }
+    if let Some(rest) = url.strip_prefix("/relay/") {
+        return relay(app, request, rest);
     }
     let mut body = String::new();
     if request.as_reader().take(1 << 20).read_to_string(&mut body).is_err() {
@@ -73,9 +76,9 @@ fn parse(body: &str) -> Result<Json, (u16, String)> {
 }
 
 fn detail(app: &App, id: &str) -> Answer {
+    let mut answer = app.status(id).ok_or((404, "no such addon".to_string()))?;
     let addons = app.addons.lock().unwrap();
     let addon = addons.get(id).ok_or((404, "no such addon".to_string()))?;
-    let mut answer = addon.status();
     answer["manifest"] = addon.manifest.raw.clone();
     answer["config"] = Json::Object(addon.manifest.masked(&addon.config));
     Ok((200, answer))
@@ -83,22 +86,29 @@ fn detail(app: &App, id: &str) -> Answer {
 
 fn api(app: &Arc<App>, method: &Method, path: &str, body: &str) -> Answer {
     let parts: Vec<&str> = path.trim_end_matches('/').split('/').skip(2).collect();
-    let bad = |e: String| (400, e);
+    let text = |body: &Json, key: &str| body[key].as_str().map(str::to_string).ok_or((400, format!("give {key}")));
     match (method, parts.as_slice()) {
-        (Method::Get, ["status"]) => {
-            let addons: Vec<Json> = app.addons.lock().unwrap().values().map(app::Addon::status).collect();
-            Ok((200, json!({
-                "version": env!("CARGO_PKG_VERSION"),
-                "rex": {"url": app.rex, "reachable": app.rex_reachable()},
-                "addons": addons,
-            })))
+        (Method::Get, ["status"]) => Ok((200, json!({
+            "version": env!("CARGO_PKG_VERSION"),
+            "rex": {"url": app.rex, "reachable": app.rex_reachable()},
+            "addons": app.statuses(),
+        }))),
+        (Method::Get, ["repos"]) => Ok((200, app.list_repos())),
+        (Method::Post, ["repos"]) => app.add_repo(&text(&parse(body)?, "url")?),
+        (Method::Delete, ["repos", id]) => {
+            app.remove_repo(id).map_err(|e| (404, e))?;
+            Ok((200, json!({"removed": true})))
         }
+        (Method::Post, ["repos", id, "refresh"]) => app.refresh_repo(id).map(|repo| (200, repo)),
+        (Method::Get, ["repos", id, "addons"]) => app.repo_addons_json(id).map(|list| (200, list)).ok_or((404, "no such repository".into())),
         (Method::Post, ["addons"]) => {
             let body = parse(body)?;
-            let url = body["url"].as_str().ok_or((400, "give the manifest.json link as url".to_string()))?;
-            let id = app.install_url(url).map_err(bad)?;
+            if body.get("url").is_some() && body.get("repo").is_none() {
+                return Err((400, "addons install from a repository: add it with POST /api/repos, then send {\"repo\", \"addon\"}".into()));
+            }
+            let (status, id) = app.install_from_repo(&text(&body, "repo")?, &text(&body, "addon")?)?;
             app.start_sync(&id, false);
-            detail(app, &id).map(|(_, answer)| (201, answer))
+            detail(app, &id).map(|(_, answer)| (status, answer))
         }
         (Method::Get, ["addons", id]) => detail(app, id),
         (Method::Delete, ["addons", id]) => {
@@ -165,38 +175,79 @@ fn bytes(app: &Arc<App>, request: Request, rest: &str) {
                 let _ = request.respond(Response::empty(302).with_header(header("Location", &opened.url)));
                 return;
             }
-            let mut headers = opened.headers.clone();
-            headers.push(("Accept-Encoding".into(), "identity".into()));
-            if let Some(range) = request.headers().iter().find(|h| h.field.equiv("Range")) {
-                headers.push(("Range".into(), range.value.to_string()));
-            }
-            let method = if request.method() == &Method::Head { "HEAD" } else { "GET" };
-            match net::request(&net::sandboxed_agent(&hosts), &hosts, method, &opened.url, &headers, None) {
-                Ok((upstream, _)) => {
-                    let status = upstream.status();
-                    if status >= 400 {
-                        app.forget_open(id, &item);
-                        app::warn(id, &format!("{item}: the link answered {status}"));
-                    }
-                    let copied: Vec<Header> = ["Content-Type", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag"]
-                        .iter()
-                        .filter_map(|name| upstream.header(name).map(|value| header(name, value)))
-                        .collect();
-                    let length = upstream.header("Content-Length").and_then(|v| v.parse().ok());
-                    let response = Response::new(StatusCode(status), copied, upstream.into_reader(), length, None);
-                    let _ = request.respond(response);
-                }
-                Err(e) => {
-                    app.forget_open(id, &item);
-                    app::warn(id, &format!("{item}: {e}"));
-                    let _ = request.respond(error(502, &e));
-                }
+            if let Err(e) = proxy(request, &hosts, &opened.url, &opened.headers, None) {
+                app.forget_open(id, &item);
+                app::warn(id, &format!("{item}: {e}"));
             }
         }
         _ => {
             let _ = request.respond(error(405, "GET, HEAD or DELETE"));
         }
     }
+}
+
+/// Relays a link with the client's Range, through the addon's sandboxed client. With
+/// `playlists` (the relay's own base), an HLS playlist comes back with its URIs pointed
+/// through the relay. An error, or an answer of 400 or more, is the caller's to log.
+fn proxy(request: Request, hosts: &net::Hosts, url: &str, extra: &[(String, String)], playlists: Option<&str>) -> Result<(), String> {
+    let mut headers = extra.to_vec();
+    headers.push(("Accept-Encoding".into(), "identity".into()));
+    if let Some(range) = request.headers().iter().find(|h| h.field.equiv("Range")) {
+        headers.push(("Range".into(), range.value.to_string()));
+    }
+    let method = if request.method() == &Method::Head { "HEAD" } else { "GET" };
+    let (upstream, final_url) = match net::request(&net::sandboxed_agent(hosts), hosts, method, url, &headers, None) {
+        Ok(answer) => answer,
+        Err(e) => {
+            let _ = request.respond(error(502, &e));
+            return Err(e);
+        }
+    };
+    let status = upstream.status();
+    let kind = upstream.header("Content-Type").unwrap_or_default().to_ascii_lowercase();
+    if let Some(base) = playlists.filter(|_| status < 300 && (kind.contains("mpegurl") || final_url.split(['?', '#']).next().unwrap_or("").ends_with(".m3u8"))) {
+        let mut text = String::new();
+        upstream.into_reader().take(4 << 20).read_to_string(&mut text).map_err(|e| e.to_string())?;
+        let playlist = url::Url::parse(&final_url).map_err(|e| e.to_string())?;
+        let rewritten = crate::probe::rewrite_playlist(&text, &playlist, base);
+        let _ = request.respond(Response::from_string(rewritten).with_header(header("Content-Type", "application/vnd.apple.mpegurl")));
+        return Ok(());
+    }
+    let copied: Vec<Header> = ["Content-Type", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag"]
+        .iter()
+        .filter_map(|name| upstream.header(name).map(|value| header(name, value)))
+        .collect();
+    let length = upstream.header("Content-Length").and_then(|v| v.parse().ok());
+    let _ = request.respond(Response::new(StatusCode(status), copied, upstream.into_reader(), length, None));
+    if status >= 400 {
+        return Err(format!("the link answered {status}"));
+    }
+    Ok(())
+}
+
+/// `/relay/{token}/{rest}`: what an addon's `ffprobe()` reads, while it runs. `rest` is the
+/// link's own file name, a URI relative to it, or `abs/<an absolute URI, percent-encoded>/<name>`.
+fn relay(app: &Arc<App>, request: Request, rest: &str) {
+    let (token, rest) = rest.split_once('/').unwrap_or((rest, ""));
+    let Some(relay) = app.prober.relay(token) else {
+        let _ = request.respond(error(404, "no such probe"));
+        return;
+    };
+    let target = if let Some(absolute) = rest.strip_prefix("abs/") {
+        let encoded = absolute.split('/').next().unwrap_or("");
+        Some(percent_encoding::percent_decode_str(encoded).decode_utf8_lossy().into_owned())
+    } else {
+        url::Url::parse(&relay.url).ok().and_then(|link| {
+            let own = link.path_segments().and_then(|mut s| s.next_back()).unwrap_or("");
+            if rest == own || rest == "media" { Some(relay.url.clone()) } else { link.join(rest).ok().map(String::from) }
+        })
+    };
+    let Some(target) = target else {
+        let _ = request.respond(error(400, "not a link"));
+        return;
+    };
+    let base = format!("http://{}/relay/{token}", net::reachable(app.listen));
+    let _ = proxy(request, &relay.hosts, &target, &relay.headers, Some(&base));
 }
 
 #[cfg(test)]
@@ -221,7 +272,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
         let app = App::new(data, "http://127.0.0.1:9".into(), addr, None, None);
         let manifest = json!({"id": "demo", "name": "Demo", "version": "1.0.0", "hosts": hosts});
-        app.install(&manifest, source).unwrap();
+        app.install(&manifest, source, None).unwrap();
         app.addons.lock().unwrap().get_mut("demo").unwrap().paths.insert("films/a film.mp4".into(), "a".into());
         let served = app.clone();
         std::thread::spawn(move || serve(served, server));

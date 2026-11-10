@@ -13,6 +13,9 @@ serde_json = { version = "1.0", features = ["preserve_order"] }
 # Already ureq's: redirects are joined and paths percent-coded with them.
 url = "2"
 percent-encoding = "2"
+# Already ureq's and rustls': a repository's pack is inflated and its objects hashed with them.
+flate2 = "1"
+ring = "0.17"
 
 [features]
 # rquickjs ships no prebuilt bindings for Android: build-android.sh turns this on so they are

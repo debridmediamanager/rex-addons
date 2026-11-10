@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::{json, Value as Json};
 
 use crate::net::Hosts;
+use crate::probe::Prober;
 use crate::sandbox::{self, Env, Storage};
 
 fn lan_ip() -> Option<IpAddr> {
@@ -23,6 +24,7 @@ struct Fixture {
     /// Links that answer 404, as an expired debrid link does.
     dead: Arc<Mutex<HashSet<String>>>,
     storage: Arc<Storage>,
+    prober: Arc<Prober>,
 }
 
 fn header(name: &str, value: &str) -> tiny_http::Header {
@@ -59,12 +61,19 @@ fn serve() -> Option<Fixture> {
     });
     let path = std::env::temp_dir().join(format!("rex-addons-stremio-{}.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    Some(Fixture { hosts: Hosts(vec![lan.to_string()]), base, dead, storage: Arc::new(Storage::open(path)) })
+    let prober = Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap()));
+    Some(Fixture { hosts: Hosts(vec![lan.to_string()]), base, dead, storage: Arc::new(Storage::open(path)), prober })
 }
 
 impl Fixture {
     fn call(&self, method: &str, args: &[Json]) -> Result<Json, String> {
-        let env = Env { addon: "stremio", source: include_str!("../addons/stremio/main.js"), hosts: &self.hosts, storage: self.storage.clone() };
+        let env = Env {
+            addon: "stremio",
+            source: include_str!("../addons/stremio/main.js"),
+            hosts: &self.hosts,
+            storage: self.storage.clone(),
+            prober: self.prober.clone(),
+        };
         sandbox::call(&env, method, args, sandbox::ITEMS)
     }
 
@@ -151,7 +160,89 @@ fn unread_fetches_are_closed_past_the_cap() {
          }}, open() {{}} }};",
         fx.base
     );
-    let env = Env { addon: "t", source: &source, hosts: &fx.hosts, storage: fx.storage.clone() };
+    let env = Env { addon: "t", source: &source, hosts: &fx.hosts, storage: fx.storage.clone(), prober: fx.prober.clone() };
     let got = sandbox::call(&env, "items", &[], sandbox::ITEMS).unwrap();
     assert_eq!(got, json!(["the body was already read, or closed after 32 newer unread ones", "Cinemeta"]));
+}
+
+/// A file server on this machine's network address that answers Range, logging each path read.
+fn media_server(root: std::path::PathBuf) -> Option<(String, Arc<Mutex<Vec<String>>>)> {
+    let lan = lan_ip()?;
+    let server = tiny_http::Server::http("0.0.0.0:0").unwrap();
+    let base = format!("http://{lan}:{}", server.server_addr().to_ip().unwrap().port());
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let seen = log.clone();
+    std::thread::spawn(move || {
+        for request in server.incoming_requests() {
+            let path = request.url().split('?').next().unwrap_or("").to_string();
+            seen.lock().unwrap().push(path.clone());
+            let Ok(bytes) = std::fs::read(root.join(path.trim_start_matches('/'))) else {
+                let _ = request.respond(tiny_http::Response::from_string("no").with_status_code(404));
+                continue;
+            };
+            let kind = if path.ends_with(".m3u8") { "application/vnd.apple.mpegurl" } else if path.ends_with(".ts") { "video/mp2t" } else { "video/mp4" };
+            let range = request.headers().iter().find(|h| h.field.equiv("Range")).and_then(|h| {
+                let (start, end) = h.value.as_str().strip_prefix("bytes=")?.split_once('-')?;
+                let start: usize = start.parse().ok()?;
+                let end = end.parse::<usize>().map_or(bytes.len() - 1, |e| e.min(bytes.len() - 1));
+                (start <= end).then_some((start, end))
+            });
+            let response = match range {
+                Some((start, end)) => tiny_http::Response::from_data(bytes[start..=end].to_vec())
+                    .with_status_code(206)
+                    .with_header(header("Content-Range", &format!("bytes {start}-{end}/{}", bytes.len()))),
+                None => tiny_http::Response::from_data(bytes),
+            };
+            let _ = request.respond(response.with_header(header("Content-Type", kind)).with_header(header("Accept-Ranges", "bytes")));
+        }
+    });
+    Some((base, log))
+}
+
+#[test]
+fn ffprobe_reads_through_the_relay() {
+    let tools = ["ffmpeg", "ffprobe"].iter().all(|t| std::process::Command::new(t).arg("-version").output().is_ok_and(|o| o.status.success()));
+    let root = std::env::temp_dir().join(format!("rex-addons-media-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("hls")).unwrap();
+    let Some((base, log)) = media_server(root.clone()).filter(|_| tools) else {
+        eprintln!("SKIP: needs ffmpeg, ffprobe and a network address");
+        return;
+    };
+    // An MP4, and an HLS playlist of three segments.
+    let make = |args: &str| {
+        let status = std::process::Command::new("ffmpeg").args(args.split(' ')).current_dir(&root).status().unwrap();
+        assert!(status.success(), "ffmpeg {args}");
+    };
+    make("-v error -f lavfi -i testsrc=size=160x120:rate=10 -t 2 -c:v mpeg4 clip.mp4");
+    make("-v error -f lavfi -i testsrc=size=160x120:rate=10 -t 3 -c:v mpeg2video -f hls -hls_time 1 -hls_list_size 0 hls/index.m3u8");
+
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let listen = server.server_addr().to_ip().unwrap();
+    let data = root.join("data");
+    let app = crate::app::App::new(data, "http://127.0.0.1:9".into(), listen, Some("ffprobe".into()), None);
+    let served = app.clone();
+    std::thread::spawn(move || crate::server::serve(served, server));
+
+    let lan = base.trim_start_matches("http://").split(':').next().unwrap().to_string();
+    let source = "export default { async items(ctx) {
+        const film = await ffprobe(ctx.config.film, { headers: { Referer: 'https://example.com/' } });
+        const live = await ffprobe(ctx.config.live);
+        return [film.format.format_name, film.streams[0].codec_name, film.format.filename ?? null, live.format.format_name, live.streams.length];
+    }, open() {} };";
+    let env = Env {
+        addon: "t",
+        source,
+        hosts: &Hosts(vec![lan]),
+        storage: Arc::new(Storage::open(root.join("storage.json"))),
+        prober: app.prober.clone(),
+    };
+    let config = json!({"config": {"film": format!("{base}/clip.mp4"), "live": format!("{base}/hls/index.m3u8")}});
+    let got = sandbox::call(&env, "items", &[config], sandbox::ITEMS).unwrap();
+    assert_eq!(got, json!(["mov,mp4,m4a,3gp,3g2,mj2", "mpeg4", null, "hls", 1]));
+    // Every read came through the relay, segments included: the playlist was rewritten.
+    let seen = log.lock().unwrap();
+    assert!(seen.iter().any(|p| p == "/clip.mp4"), "{seen:?}");
+    assert!(seen.iter().any(|p| p.starts_with("/hls/index") && p.ends_with(".ts")), "{seen:?}");
+    let _ = std::fs::remove_dir_all(&root);
 }

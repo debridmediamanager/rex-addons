@@ -13,6 +13,7 @@ use rquickjs::{Context, Ctx, Exception, Function, Module, Object, Runtime, Value
 use serde_json::{Map, Value as Json};
 
 use crate::net::{self, Hosts};
+use crate::probe::Prober;
 
 /// How much a call may take. `cpu` counts the time JavaScript runs, not the time a `fetch`
 /// waits on the network; `wall` bounds the whole call.
@@ -30,44 +31,66 @@ pub const OPEN: Limits = Limits { memory: 64 << 20, cpu: Duration::from_secs(10)
 const MAX_BODY: u64 = 16 << 20;
 /// Fetched responses whose body was not read yet, at most: each holds a connection open.
 const UNREAD: usize = 32;
-/// An addon's storage, all keys together, as JSON.
-const MAX_STORAGE: usize = 8 << 20;
+/// An addon's storage, all keys together, as JSON: room for a probe of each of 1,000 films.
+const MAX_STORAGE: usize = 16 << 20;
 
-/// An addon's `storage`: one JSON object, written to disk on every change.
+/// An addon's `storage`: one JSON object, written to disk when a call ends.
 pub struct Storage {
     path: PathBuf,
-    map: Mutex<Map<String, Json>>,
+    state: Mutex<Stored>,
+}
+
+struct Stored {
+    map: Map<String, Json>,
+    size: usize,
+    dirty: bool,
+}
+
+fn entry_size(key: &str, value: &Json) -> usize {
+    key.len() + value.to_string().len() + 4
 }
 
 impl Storage {
     pub fn open(path: PathBuf) -> Storage {
-        let map = std::fs::read(&path)
+        let map: Map<String, Json> = std::fs::read(&path)
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        Storage { path, map: Mutex::new(map) }
+        let size = map.iter().map(|(k, v)| entry_size(k, v)).sum();
+        Storage { path, state: Mutex::new(Stored { map, size, dirty: false }) }
     }
 
     fn get(&self, key: &str) -> Option<Json> {
-        self.map.lock().unwrap().get(key).cloned()
+        self.state.lock().unwrap().map.get(key).cloned()
     }
 
     fn change(&self, key: &str, value: Option<Json>) -> Result<(), String> {
-        let mut map = self.map.lock().unwrap();
-        let before = map.get(key).cloned();
-        match value {
-            Some(value) => map.insert(key.to_string(), value),
-            None => map.remove(key),
-        };
-        let text = serde_json::to_vec(&*map).unwrap();
-        if text.len() > MAX_STORAGE {
-            match before {
-                Some(value) => map.insert(key.to_string(), value),
-                None => map.remove(key),
-            };
+        let mut state = self.state.lock().unwrap();
+        let before = state.map.get(key).map_or(0, |v| entry_size(key, v));
+        let after = value.as_ref().map_or(0, |v| entry_size(key, v));
+        if state.size - before + after > MAX_STORAGE {
             return Err(format!("storage is limited to {} MB", MAX_STORAGE >> 20));
         }
-        crate::addons::write_atomic(&self.path, &text).map_err(|e| e.to_string())
+        state.size = state.size - before + after;
+        match value {
+            Some(value) => state.map.insert(key.to_string(), value),
+            None => state.map.remove(key),
+        };
+        state.dirty = true;
+        Ok(())
+    }
+
+    /// Writes what changed. Every call ends with it, so a call that sets thousands of keys
+    /// writes the file once.
+    pub fn flush(&self) {
+        let mut state = self.state.lock().unwrap();
+        if state.dirty {
+            let text = serde_json::to_vec(&state.map).unwrap();
+            if let Err(error) = crate::addons::write_atomic(&self.path, &text) {
+                eprintln!("WARN [host] {}: {error}", self.path.display());
+            }
+            state.dirty = false;
+        }
     }
 }
 
@@ -76,13 +99,14 @@ pub struct Env<'a> {
     pub source: &'a str,
     pub hosts: &'a Hosts,
     pub storage: Arc<Storage>,
+    pub prober: Arc<Prober>,
 }
 
 const PRELUDE: &str = r#"
 (() => {
   const host = globalThis.__rex;
   delete globalThis.__rex;
-  // QuickJS-NG's web extras: an addon gets plain ECMAScript and the three globals below only.
+  // QuickJS-NG's web extras: an addon gets plain ECMAScript and the four globals below only.
   for (const name of ["queueMicrotask", "btoa", "atob", "performance", "DOMException"]) delete globalThis[name];
   const show = (args) => args.map((arg) => {
     if (typeof arg === "string") return arg;
@@ -115,12 +139,15 @@ const PRELUDE: &str = r#"
       json: async () => JSON.parse(read()),
     });
   }
+  async function ffprobe(url, init = {}) {
+    return JSON.parse(host.ffprobe(String(url), JSON.stringify({ headers: init.headers })));
+  }
   const storage = Object.freeze({
     get: (key) => { const value = host.storageGet(String(key)); return value === undefined ? undefined : JSON.parse(value); },
     set: (key, value) => { value === undefined ? host.storageDelete(String(key)) : host.storageSet(String(key), JSON.stringify(value)); },
     delete: (key) => { host.storageDelete(String(key)); },
   });
-  for (const [name, value] of Object.entries({ console, fetch, storage })) {
+  for (const [name, value] of Object.entries({ console, fetch, ffprobe, storage })) {
     Object.defineProperty(globalThis, name, { value, writable: false, configurable: false, enumerable: false });
   }
 })();
@@ -192,6 +219,7 @@ pub fn call(env: &Env, method: &str, args: &[Json], limits: Limits) -> Result<Js
             None => Ok(Json::Null),
         }
     });
+    env.storage.flush();
     match stopped.get() {
         Some("wall") => Err(format!("{method}() took longer than {} s", limits.wall.as_secs())),
         Some(_) => Err(format!("{method}() ran JavaScript for longer than {} s", limits.cpu.as_secs())),
@@ -284,7 +312,9 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>) -> rquick
     )?;
     host.set(
         "body",
-        Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: usize| -> rquickjs::Result<String> {
+        Function::new(ctx.clone(), {
+            let waited = waited.clone();
+            move |ctx: Ctx<'js>, handle: usize| -> rquickjs::Result<String> {
             let response = bodies.borrow_mut().get_mut(handle).and_then(Option::take);
             let Some(response) = response else {
                 return Err(throw(&ctx, &format!("the body was already read, or closed after {UNREAD} newer unread ones")));
@@ -298,7 +328,7 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>) -> rquick
                 return Err(throw(&ctx, &format!("the body is over {} MB", MAX_BODY >> 20)));
             }
             Ok(String::from_utf8_lossy(&bytes).into_owned())
-        })?,
+        }})?,
     )?;
 
     let storage = env.storage.clone();
@@ -321,6 +351,21 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>) -> rquick
             storage.change(&key, None).map_err(|e| throw(&ctx, &e))
         })?,
     )?;
+    let (prober, hosts, probe_waited) = (env.prober.clone(), env.hosts.clone(), waited.clone());
+    host.set(
+        "ffprobe",
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, url: String, init: String| -> rquickjs::Result<String> {
+            let init: Json = serde_json::from_str(&init).unwrap_or_default();
+            let headers = init["headers"]
+                .as_object()
+                .map(|h| h.iter().map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_string))).collect())
+                .unwrap_or_default();
+            let started = Instant::now();
+            let probed = prober.probe(&url, headers, &hosts);
+            probe_waited.set(probe_waited.get() + started.elapsed());
+            probed.map(|probe| probe.to_string()).map_err(|error| throw(&ctx, &format!("ffprobe: {error}")))
+        })?,
+    )?;
     ctx.globals().set("__rex", host)?;
     ctx.eval::<(), _>(PRELUDE)
 }
@@ -337,6 +382,7 @@ mod tests {
             source,
             hosts: &Hosts(hosts.iter().map(|h| h.to_string()).collect()),
             storage: Arc::new(Storage::open(path)),
+            prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())),
         };
         call(&env, "items", &[serde_json::json!({"config": {"n": 2}})], limits)
     }
@@ -355,11 +401,11 @@ mod tests {
             "export default { items() { return ['setTimeout', 'setInterval', 'require', 'process', 'XMLHttpRequest', 'WebSocket', '__rex', 'os', 'std', 'print',
                'queueMicrotask', 'atob', 'btoa', 'performance', 'DOMException', 'URL', 'TextEncoder']
                .filter((name) => typeof globalThis[name] !== 'undefined')
-               .concat([typeof fetch, typeof console.log, typeof storage.get]); }, open() {} };",
+               .concat([typeof fetch, typeof console.log, typeof storage.get, typeof ffprobe]); }, open() {} };",
             &[],
             QUICK,
         );
-        assert_eq!(got.unwrap(), serde_json::json!(["function", "function", "function"]));
+        assert_eq!(got.unwrap(), serde_json::json!(["function", "function", "function", "function"]));
     }
 
     #[test]
@@ -404,7 +450,13 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let source = "export default { items() { const n = (storage.get('n') ?? 0) + 1; storage.set('n', n); storage.set('gone', 1); storage.delete('gone'); return [n, storage.get('gone')]; }, open() {} };";
         let call_once = || {
-            let env = Env { addon: "test", source, hosts: &Hosts::default(), storage: Arc::new(Storage::open(path.clone())) };
+            let env = Env {
+                addon: "test",
+                source,
+                hosts: &Hosts::default(),
+                storage: Arc::new(Storage::open(path.clone())),
+                prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())),
+            };
             call(&env, "items", &[], QUICK).unwrap()
         };
         assert_eq!(call_once(), serde_json::json!([1, null]));
@@ -416,5 +468,20 @@ mod tests {
     fn a_thrown_error_names_its_message() {
         let error = run("export default { items() { throw new Error('catalog down'); }, open() {} };", &[], QUICK).unwrap_err();
         assert!(error.starts_with("catalog down"), "{error}");
+    }
+
+    #[test]
+    fn ffprobe_needs_the_flag_and_the_hosts() {
+        let error = run("export default { async items() { return await ffprobe('https://example.com/a.mp4'); }, open() {} };", &["example.com"], QUICK).unwrap_err();
+        assert!(error.starts_with("ffprobe: ffprobe() is not available: rex-addons runs without --ffprobe"), "{error}");
+        let env = Env {
+            addon: "test",
+            source: "export default { async items() { return await ffprobe('http://127.0.0.1:32400/library/parts/1/file.mp4'); }, open() {} };",
+            hosts: &Hosts(vec!["*".into()]),
+            storage: Arc::new(Storage::open(PathBuf::from("/dev/null"))),
+            prober: Arc::new(Prober::new(Some("ffprobe".into()), "127.0.0.1:9".parse().unwrap())),
+        };
+        let error = call(&env, "items", &[], QUICK).unwrap_err();
+        assert!(error.starts_with("ffprobe: 127.0.0.1 is not in the addon's hosts"), "{error}");
     }
 }

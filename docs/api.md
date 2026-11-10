@@ -46,12 +46,13 @@ JSON in and out. It answers only this device: the socket's own peer address must
              "description": "...", "enabled": true, "repo": "github-com-debridmediamanager-rex-addons",
              "hosts": ["archive.org", "*.archive.org"],
              "state": "idle", "items": 100, "held": 0, "last_sync": 1794326938, "error": null,
-             "update_available": false, "update_hosts": null}]}
+             "error_kind": null, "update_available": false, "update_hosts": null}]}
 ```
 
 | Field | Meaning |
 |---|---|
 | `state` | `syncing`, `error` (the last sync failed: `error` says why), or `idle` |
+| `error_kind` | `would_remove` when the last sync failed because rex refused a snapshot that would remove more than half of the addon's titles (offer a forced sync), else `null` |
 | `items` | Titles in rex from the last sync, probed |
 | `held` | Titles sent without a probe, which rex holds unshown (no ffprobe, or one that failed; retried next sync) |
 | `last_sync` | Unix seconds of the last sync that worked, or `null` |
@@ -92,7 +93,8 @@ and starts a sync, which may remove more than half of the addon's titles (new se
 
 Starts a sync now: `202 {"syncing": true}`, also when one is already running. `409` when the addon
 is disabled. Body `{"force": true}` lets this sync remove more than half of the addon's titles,
-for when rex refused one that was right (the addon's `error` says so).
+for when rex refused one that was right (`error_kind` is `would_remove`). Force is for that one
+attempt: if it fails for another reason, the automatic retries are not forced.
 
 ### `POST /api/addons/{id}/enabled`
 

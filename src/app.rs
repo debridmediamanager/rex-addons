@@ -53,6 +53,8 @@ pub struct Addon {
     pub items: usize,
     pub held: usize,
     pub error: Option<String>,
+    /// `would_remove` when rex refused the last sync's snapshot as removing more than half.
+    pub error_kind: Option<String>,
     /// Ids a person deleted in a Plex app: never pushed again.
     pub deleted: BTreeSet<String>,
     /// Each pushed path (and each id) to its item id: what `/bytes` reads by.
@@ -75,6 +77,7 @@ impl Addon {
             "enabled": self.enabled, "repo": self.repo, "hosts": m.hosts.0,
             "state": if self.syncing { "syncing" } else if self.error.is_some() { "error" } else { "idle" },
             "items": self.items, "held": self.held, "last_sync": self.last_sync, "error": self.error,
+            "error_kind": self.error_kind,
         })
     }
 }
@@ -371,8 +374,12 @@ impl App {
 
     fn sync(self: &Arc<Self>, id: &str) {
         let started = Instant::now();
+        // Force is for this attempt only: the retries of one that fails are not forced.
         let force = match self.addons.lock().unwrap().get_mut(id) {
-            Some(addon) => std::mem::take(&mut addon.force),
+            Some(addon) => {
+                addon.error_kind = None;
+                std::mem::take(&mut addon.force)
+            }
             None => return,
         };
         let result = self.run_sync(id, force);
@@ -391,7 +398,6 @@ impl App {
             Err(error) => {
                 warn(id, &format!("sync failed: {error}"));
                 addon.error = Some(error);
-                addon.force |= force;
             }
         }
         save_state(self, addon);
@@ -542,6 +548,9 @@ impl App {
             match status {
                 200 => {}
                 409 if answer.get("would_remove").is_some() => {
+                    if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
+                        addon.error_kind = Some("would_remove".into());
+                    }
                     return Err(format!(
                         "rex kept everything: this sync would remove {} of the {} items it has from this addon, more than half. \
                          If that is right, sync with force",
@@ -900,6 +909,7 @@ fn load(path: &Path) -> Result<Addon, String> {
         items: state["items"].as_u64().unwrap_or(0) as usize,
         held: state["held"].as_u64().unwrap_or(0) as usize,
         error: state["error"].as_str().map(str::to_string),
+        error_kind: state["error_kind"].as_str().map(str::to_string),
         deleted: serde_json::from_value(state["deleted"].clone()).unwrap_or_default(),
         paths,
         probes: object("probes.json"),
@@ -914,7 +924,7 @@ fn load(path: &Path) -> Result<Addon, String> {
 fn save_state(app: &App, addon: &Addon) {
     let state = json!({
         "enabled": addon.enabled, "last_sync": addon.last_sync, "items": addon.items, "held": addon.held,
-        "error": addon.error, "deleted": addon.deleted, "repo": addon.repo,
+        "error": addon.error, "error_kind": addon.error_kind, "deleted": addon.deleted, "repo": addon.repo,
     });
     let _ = write_atomic(&dir(app, &addon.manifest.id).join("state.json"), state.to_string().as_bytes());
 }
@@ -1054,6 +1064,36 @@ mod sync_tests {
         assert_eq!(seen.len(), 2, "{seen:?}");
         assert_eq!((seen[0]["items"][0]["id"].as_str(), seen[0].get("force")), (Some("a1"), None));
         assert_eq!((seen[1]["items"][0]["id"].as_str(), &seen[1]["force"]), (Some("a2"), &json!(true)));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn force_is_for_one_attempt_and_the_guard_is_named() {
+        let (rex, seen) = stub_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-force-once-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+        let source = "export default { items() { return [{id: 'a', path: 'films/a.mp4'}]; }, open() {} };";
+        let manifest = json!({"id": "need", "name": "Need", "version": "1.0.0", "config": [{"key": "n", "label": "N", "type": "number", "required": true}]});
+        app.install(&manifest, source, None).unwrap();
+
+        // A forced sync that fails before rex is asked leaves nothing forced behind.
+        assert!(app.start_sync("need", true));
+        let status = wait_idle(&app, "need");
+        assert_eq!((status["error"].as_str(), &status["error_kind"]), (Some("set N first"), &Json::Null));
+        assert!(!app.addons.lock().unwrap()["need"].force);
+
+        // Its retry is unforced and meets the guard, which the status names.
+        app.addons.lock().unwrap().get_mut("need").unwrap().config.insert("n".into(), json!(1));
+        assert!(app.start_sync("need", false));
+        let status = wait_idle(&app, "need");
+        assert_eq!(status["error_kind"], "would_remove");
+        assert!(seen.lock().unwrap()[0].get("force").is_none());
+        let saved = read_json(&dir(&app, "need").join("state.json")).unwrap();
+        assert_eq!(saved["error_kind"], "would_remove");
+
+        assert!(app.start_sync("need", true));
+        assert_eq!(wait_idle(&app, "need")["error_kind"], Json::Null);
         let _ = std::fs::remove_dir_all(&data);
     }
 

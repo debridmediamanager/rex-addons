@@ -56,7 +56,10 @@ pub struct Addon {
     pub paths: HashMap<String, String>,
     pub probes: Map<String, Json>,
     pub syncing: bool,
+    /// The next sync may remove more than half of the addon's items.
     pub force: bool,
+    /// Asked for while one was running (new settings): run again when it ends.
+    pub again: bool,
     pub attempted: Option<Instant>,
     pub opened: HashMap<String, (Opened, Instant)>,
 }
@@ -315,16 +318,17 @@ impl App {
         log(id, &format!("{item} deleted in a Plex app: no longer pushed"));
     }
 
-    /// Starts a sync on its own thread unless one is running; false when it is.
+    /// Starts a sync on its own thread; one asked for while another runs follows it.
     pub fn start_sync(self: &Arc<Self>, id: &str, force: bool) -> bool {
         {
             let mut addons = self.addons.lock().unwrap();
             let Some(addon) = addons.get_mut(id) else { return false };
+            addon.force |= force;
             if addon.syncing {
+                addon.again = true;
                 return false;
             }
             addon.syncing = true;
-            addon.force |= force;
         }
         let (app, id) = (self.clone(), id.to_string());
         std::thread::spawn(move || app.sync(&id));
@@ -337,19 +341,24 @@ impl App {
         addons
             .values()
             .filter(|a| a.enabled && !a.syncing)
-            .filter(|a| match (a.last_sync, a.attempted) {
-                (_, Some(at)) if a.error.is_some() => at.elapsed() >= RETRY,
-                (Some(last), _) => now() >= last + a.manifest.refresh_minutes * 60,
-                (None, Some(at)) => at.elapsed() >= RETRY,
-                (None, None) => true,
+            .filter(|a| match (a.error.is_some(), a.attempted, a.last_sync) {
+                (true, Some(at), _) => at.elapsed() >= RETRY,
+                // A failure from before a restart is tried again at once.
+                (true, None, _) | (false, None, None) => true,
+                (false, _, Some(last)) => now() >= last + a.manifest.refresh_minutes * 60,
+                (false, Some(at), None) => at.elapsed() >= RETRY,
             })
             .map(|a| a.manifest.id.clone())
             .collect()
     }
 
-    fn sync(&self, id: &str) {
+    fn sync(self: &Arc<Self>, id: &str) {
         let started = Instant::now();
-        let result = self.run_sync(id);
+        let force = match self.addons.lock().unwrap().get_mut(id) {
+            Some(addon) => std::mem::take(&mut addon.force),
+            None => return,
+        };
+        let result = self.run_sync(id, force);
         let mut addons = self.addons.lock().unwrap();
         let Some(addon) = addons.get_mut(id) else { return };
         addon.syncing = false;
@@ -360,22 +369,26 @@ impl App {
                 addon.items = items;
                 addon.held = held;
                 addon.error = None;
-                addon.force = false;
                 log(id, &format!("synced in {:.1} s: {items} items in rex, {held} held", started.elapsed().as_secs_f64()));
             }
             Err(error) => {
                 warn(id, &format!("sync failed: {error}"));
                 addon.error = Some(error);
+                addon.force |= force;
             }
         }
         save_state(self, addon);
+        if std::mem::take(&mut addon.again) {
+            drop(addons);
+            self.start_sync(id, false);
+        }
     }
 
-    fn run_sync(&self, id: &str) -> Result<(usize, usize), String> {
-        let (manifest, source, config, storage, deleted, force) = {
+    fn run_sync(&self, id: &str, force: bool) -> Result<(usize, usize), String> {
+        let (manifest, source, config, storage, deleted) = {
             let addons = self.addons.lock().unwrap();
             let a = addons.get(id).ok_or("removed")?;
-            (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone(), a.deleted.clone(), a.force)
+            (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone(), a.deleted.clone())
         };
         if let Some(label) = manifest.missing(&config) {
             return Err(format!("set {label} first"));
@@ -528,12 +541,11 @@ impl App {
         write_atomic(&dir(self, id).join("config.json"), Json::Object(addon.config.clone()).to_string().as_bytes())
             .map_err(|e| e.to_string())?;
         addon.opened.clear();
-        // New settings can take more than half of the items away on purpose.
-        addon.force = true;
         let masked = addon.manifest.masked(&addon.config);
         let enabled = addon.enabled;
         drop(addons);
         if enabled {
+            // New settings can take more than half of the items away on purpose.
             self.start_sync(id, true);
         }
         Ok(Json::Object(masked))
@@ -677,6 +689,7 @@ fn load(path: &Path) -> Result<Addon, String> {
         probes: object("probes.json"),
         syncing: false,
         force: false,
+        again: false,
         attempted: None,
         opened: HashMap::new(),
     })
@@ -736,7 +749,6 @@ mod tests {
 #[cfg(test)]
 mod sync_tests {
     use super::*;
-    use std::io::Read as _;
 
     /// A rex that takes registrations and refuses every snapshot unforced as one that would remove
     /// more than half, recording each snapshot body it was sent.
@@ -800,6 +812,32 @@ mod sync_tests {
         let status = wait_idle(&app, "demo");
         assert_eq!((status["state"].as_str(), status["items"].as_u64(), status["held"].as_u64()), (Some("idle"), Some(0), Some(1)));
         assert_eq!(seen.lock().unwrap()[1]["force"], json!(true));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn new_settings_during_a_sync_sync_again_forced() {
+        let (rex, seen) = stub_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-again-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+        // items() takes a moment, so the settings change lands while it runs.
+        let source = "export default { items(ctx) { const end = Date.now() + 300; while (Date.now() < end); return [{id: 'a' + ctx.config.n, path: 'films/a.mp4'}]; }, open() {} };";
+        let manifest = json!({"id": "slow", "name": "Slow", "version": "1.0.0", "config": [{"key": "n", "label": "N", "type": "number", "default": 1}]});
+        app.install(&manifest, source).unwrap();
+        assert!(app.start_sync("slow", false));
+        std::thread::sleep(Duration::from_millis(100));
+        app.set_config("slow", &json!({"n": 2})).unwrap();
+        for _ in 0..200 {
+            if seen.lock().unwrap().len() == 2 && wait_idle(&app, "slow")["state"] == "idle" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "{seen:?}");
+        assert_eq!((seen[0]["items"][0]["id"].as_str(), seen[0].get("force")), (Some("a1"), None));
+        assert_eq!((seen[1]["items"][0]["id"].as_str(), &seen[1]["force"]), (Some("a2"), &json!(true)));
         let _ = std::fs::remove_dir_all(&data);
     }
 }

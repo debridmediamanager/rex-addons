@@ -1,0 +1,1648 @@
+{
+ "_provenance": "Stremio addons' real answers, from rex-stremio's tests/fixtures (stremio.json and manifests.json, recorded 2026-10-23/24 with keys removed): Cinemeta's manifest, top films (first 2) and top series (first, its first 3 episodes); Torrentio's manifest and cached-RD streams for those episodes, their links pointed at the test's own server ({BASE}/video/torrentio-<episode>-<n>.mkv) instead of RDKEY links; Eclipsia's manifest and streams, recorded for tt0111161 and served here for Cinemeta's first top film, its links on {BASE}/hdr/.",
+ "routes": {
+  "/cinemeta/manifest.json": {
+   "id": "com.linvo.cinemeta",
+   "version": "3.0.14",
+   "description": "The official addon for movie and series catalogs",
+   "name": "Cinemeta",
+   "resources": [
+    "catalog",
+    "meta",
+    "addon_catalog"
+   ],
+   "types": [
+    "movie",
+    "series"
+   ],
+   "idPrefixes": [
+    "tt"
+   ],
+   "addonCatalogs": [
+    {
+     "type": "all",
+     "id": "official",
+     "name": "Official"
+    },
+    {
+     "type": "movie",
+     "id": "official",
+     "name": "Official"
+    },
+    {
+     "type": "series",
+     "id": "official",
+     "name": "Official"
+    },
+    {
+     "type": "channel",
+     "id": "official",
+     "name": "Official"
+    },
+    {
+     "type": "all",
+     "id": "community",
+     "name": "Community"
+    },
+    {
+     "type": "movie",
+     "id": "community",
+     "name": "Community"
+    },
+    {
+     "type": "series",
+     "id": "community",
+     "name": "Community"
+    },
+    {
+     "type": "channel",
+     "id": "community",
+     "name": "Community"
+    },
+    {
+     "type": "tv",
+     "id": "community",
+     "name": "Community"
+    },
+    {
+     "type": "Podcasts",
+     "id": "community",
+     "name": "Community"
+    },
+    {
+     "type": "other",
+     "id": "community",
+     "name": "Community"
+    }
+   ],
+   "catalogs": [
+    {
+     "type": "movie",
+     "id": "top",
+     "genres": [
+      "Action",
+      "Adventure",
+      "Animation",
+      "Biography",
+      "Comedy",
+      "Crime",
+      "Documentary",
+      "Drama",
+      "Family",
+      "Fantasy",
+      "History",
+      "Horror",
+      "Mystery",
+      "Romance",
+      "Sci-Fi",
+      "Sport",
+      "Thriller",
+      "War",
+      "Western"
+     ],
+     "extra": [
+      {
+       "name": "genre",
+       "options": [
+        "Action",
+        "Adventure",
+        "Animation",
+        "Biography",
+        "Comedy",
+        "Crime",
+        "Documentary",
+        "Drama",
+        "Family",
+        "Fantasy",
+        "History",
+        "Horror",
+        "Mystery",
+        "Romance",
+        "Sci-Fi",
+        "Sport",
+        "Thriller",
+        "War",
+        "Western"
+       ]
+      },
+      {
+       "name": "search"
+      },
+      {
+       "name": "skip"
+      }
+     ],
+     "extraSupported": [
+      "search",
+      "genre",
+      "skip"
+     ],
+     "name": "Popular"
+    },
+    {
+     "type": "series",
+     "id": "top",
+     "genres": [
+      "Action",
+      "Adventure",
+      "Animation",
+      "Biography",
+      "Comedy",
+      "Crime",
+      "Documentary",
+      "Drama",
+      "Family",
+      "Fantasy",
+      "History",
+      "Horror",
+      "Mystery",
+      "Romance",
+      "Sci-Fi",
+      "Sport",
+      "Thriller",
+      "War",
+      "Western",
+      "Reality-TV",
+      "Talk-Show",
+      "Game-Show"
+     ],
+     "extra": [
+      {
+       "name": "genre",
+       "options": [
+        "Action",
+        "Adventure",
+        "Animation",
+        "Biography",
+        "Comedy",
+        "Crime",
+        "Documentary",
+        "Drama",
+        "Family",
+        "Fantasy",
+        "History",
+        "Horror",
+        "Mystery",
+        "Romance",
+        "Sci-Fi",
+        "Sport",
+        "Thriller",
+        "War",
+        "Western",
+        "Reality-TV",
+        "Talk-Show",
+        "Game-Show"
+       ]
+      },
+      {
+       "name": "search"
+      },
+      {
+       "name": "skip"
+      }
+     ],
+     "extraSupported": [
+      "search",
+      "genre",
+      "skip"
+     ],
+     "name": "Popular"
+    },
+    {
+     "type": "movie",
+     "id": "year",
+     "genres": [
+      "2026",
+      "2025",
+      "2024",
+      "2023",
+      "2022",
+      "2021",
+      "2020",
+      "2019",
+      "2018",
+      "2017",
+      "2016",
+      "2015",
+      "2014",
+      "2013",
+      "2012",
+      "2011",
+      "2010",
+      "2009",
+      "2008",
+      "2007",
+      "2006",
+      "2005",
+      "2004",
+      "2003",
+      "2002",
+      "2001",
+      "2000",
+      "1999",
+      "1998",
+      "1997",
+      "1996",
+      "1995",
+      "1994",
+      "1993",
+      "1992",
+      "1991",
+      "1990",
+      "1989",
+      "1988",
+      "1987",
+      "1986",
+      "1985",
+      "1984",
+      "1983",
+      "1982",
+      "1981",
+      "1980",
+      "1979",
+      "1978",
+      "1977",
+      "1976",
+      "1975",
+      "1974",
+      "1973",
+      "1972",
+      "1971",
+      "1970",
+      "1969",
+      "1968",
+      "1967",
+      "1966",
+      "1965",
+      "1964",
+      "1963",
+      "1962",
+      "1961",
+      "1960",
+      "1959",
+      "1958",
+      "1957",
+      "1956",
+      "1955",
+      "1954",
+      "1953",
+      "1952",
+      "1951",
+      "1950",
+      "1949",
+      "1948",
+      "1947",
+      "1946",
+      "1945",
+      "1944",
+      "1943",
+      "1942",
+      "1941",
+      "1940",
+      "1939",
+      "1938",
+      "1937",
+      "1936",
+      "1935",
+      "1934",
+      "1933",
+      "1932",
+      "1931",
+      "1930",
+      "1929",
+      "1928",
+      "1927",
+      "1926",
+      "1925",
+      "1924",
+      "1923",
+      "1922",
+      "1921",
+      "1920"
+     ],
+     "extra": [
+      {
+       "name": "genre",
+       "options": [
+        "2026",
+        "2025",
+        "2024",
+        "2023",
+        "2022",
+        "2021",
+        "2020",
+        "2019",
+        "2018",
+        "2017",
+        "2016",
+        "2015",
+        "2014",
+        "2013",
+        "2012",
+        "2011",
+        "2010",
+        "2009",
+        "2008",
+        "2007",
+        "2006",
+        "2005",
+        "2004",
+        "2003",
+        "2002",
+        "2001",
+        "2000",
+        "1999",
+        "1998",
+        "1997",
+        "1996",
+        "1995",
+        "1994",
+        "1993",
+        "1992",
+        "1991",
+        "1990",
+        "1989",
+        "1988",
+        "1987",
+        "1986",
+        "1985",
+        "1984",
+        "1983",
+        "1982",
+        "1981",
+        "1980",
+        "1979",
+        "1978",
+        "1977",
+        "1976",
+        "1975",
+        "1974",
+        "1973",
+        "1972",
+        "1971",
+        "1970",
+        "1969",
+        "1968",
+        "1967",
+        "1966",
+        "1965",
+        "1964",
+        "1963",
+        "1962",
+        "1961",
+        "1960",
+        "1959",
+        "1958",
+        "1957",
+        "1956",
+        "1955",
+        "1954",
+        "1953",
+        "1952",
+        "1951",
+        "1950",
+        "1949",
+        "1948",
+        "1947",
+        "1946",
+        "1945",
+        "1944",
+        "1943",
+        "1942",
+        "1941",
+        "1940",
+        "1939",
+        "1938",
+        "1937",
+        "1936",
+        "1935",
+        "1934",
+        "1933",
+        "1932",
+        "1931",
+        "1930",
+        "1929",
+        "1928",
+        "1927",
+        "1926",
+        "1925",
+        "1924",
+        "1923",
+        "1922",
+        "1921",
+        "1920"
+       ],
+       "isRequired": true
+      },
+      {
+       "name": "skip"
+      }
+     ],
+     "extraSupported": [
+      "genre",
+      "skip"
+     ],
+     "extraRequired": [
+      "genre"
+     ],
+     "name": "New"
+    },
+    {
+     "type": "series",
+     "id": "year",
+     "genres": [
+      "2026",
+      "2025",
+      "2024",
+      "2023",
+      "2022",
+      "2021",
+      "2020",
+      "2019",
+      "2018",
+      "2017",
+      "2016",
+      "2015",
+      "2014",
+      "2013",
+      "2012",
+      "2011",
+      "2010",
+      "2009",
+      "2008",
+      "2007",
+      "2006",
+      "2005",
+      "2004",
+      "2003",
+      "2002",
+      "2001",
+      "2000",
+      "1999",
+      "1998",
+      "1997",
+      "1996",
+      "1995",
+      "1994",
+      "1993",
+      "1992",
+      "1991",
+      "1990",
+      "1989",
+      "1988",
+      "1987",
+      "1986",
+      "1985",
+      "1984",
+      "1983",
+      "1982",
+      "1981",
+      "1980",
+      "1979",
+      "1978",
+      "1977",
+      "1976",
+      "1975",
+      "1974",
+      "1973",
+      "1972",
+      "1971",
+      "1970",
+      "1969",
+      "1968",
+      "1967",
+      "1966",
+      "1965",
+      "1964",
+      "1963",
+      "1962",
+      "1961",
+      "1960"
+     ],
+     "extra": [
+      {
+       "name": "genre",
+       "options": [
+        "2026",
+        "2025",
+        "2024",
+        "2023",
+        "2022",
+        "2021",
+        "2020",
+        "2019",
+        "2018",
+        "2017",
+        "2016",
+        "2015",
+        "2014",
+        "2013",
+        "2012",
+        "2011",
+        "2010",
+        "2009",
+        "2008",
+        "2007",
+        "2006",
+        "2005",
+        "2004",
+        "2003",
+        "2002",
+        "2001",
+        "2000",
+        "1999",
+        "1998",
+        "1997",
+        "1996",
+        "1995",
+        "1994",
+        "1993",
+        "1992",
+        "1991",
+        "1990",
+        "1989",
+        "1988",
+        "1987",
+        "1986",
+        "1985",
+        "1984",
+        "1983",
+        "1982",
+        "1981",
+        "1980",
+        "1979",
+        "1978",
+        "1977",
+        "1976",
+        "1975",
+        "1974",
+        "1973",
+        "1972",
+        "1971",
+        "1970",
+        "1969",
+        "1968",
+        "1967",
+        "1966",
+        "1965",
+        "1964",
+        "1963",
+        "1962",
+        "1961",
+        "1960"
+       ],
+       "isRequired": true
+      },
+      {
+       "name": "skip"
+      }
+     ],
+     "extraSupported": [
+      "genre",
+      "skip"
+     ],
+     "extraRequired": [
+      "genre"
+     ],
+     "name": "New"
+    },
+    {
+     "type": "movie",
+     "id": "imdbRating",
+     "genres": [
+      "Action",
+      "Adventure",
+      "Animation",
+      "Biography",
+      "Comedy",
+      "Crime",
+      "Documentary",
+      "Drama",
+      "Family",
+      "Fantasy",
+      "History",
+      "Horror",
+      "Mystery",
+      "Romance",
+      "Sci-Fi",
+      "Sport",
+      "Thriller",
+      "War",
+      "Western"
+     ],
+     "extra": [
+      {
+       "name": "genre",
+       "options": [
+        "Action",
+        "Adventure",
+        "Animation",
+        "Biography",
+        "Comedy",
+        "Crime",
+        "Documentary",
+        "Drama",
+        "Family",
+        "Fantasy",
+        "History",
+        "Horror",
+        "Mystery",
+        "Romance",
+        "Sci-Fi",
+        "Sport",
+        "Thriller",
+        "War",
+        "Western"
+       ]
+      },
+      {
+       "name": "skip"
+      }
+     ],
+     "extraSupported": [
+      "genre",
+      "skip"
+     ],
+     "name": "Featured"
+    },
+    {
+     "type": "series",
+     "id": "imdbRating",
+     "genres": [
+      "Action",
+      "Adventure",
+      "Animation",
+      "Biography",
+      "Comedy",
+      "Crime",
+      "Documentary",
+      "Drama",
+      "Family",
+      "Fantasy",
+      "History",
+      "Horror",
+      "Mystery",
+      "Romance",
+      "Sci-Fi",
+      "Sport",
+      "Thriller",
+      "War",
+      "Western",
+      "Reality-TV",
+      "Talk-Show",
+      "Game-Show"
+     ],
+     "extra": [
+      {
+       "name": "genre",
+       "options": [
+        "Action",
+        "Adventure",
+        "Animation",
+        "Biography",
+        "Comedy",
+        "Crime",
+        "Documentary",
+        "Drama",
+        "Family",
+        "Fantasy",
+        "History",
+        "Horror",
+        "Mystery",
+        "Romance",
+        "Sci-Fi",
+        "Sport",
+        "Thriller",
+        "War",
+        "Western",
+        "Reality-TV",
+        "Talk-Show",
+        "Game-Show"
+       ]
+      },
+      {
+       "name": "skip"
+      }
+     ],
+     "extraSupported": [
+      "genre",
+      "skip"
+     ],
+     "name": "Featured"
+    },
+    {
+     "type": "series",
+     "id": "last-videos",
+     "extra": [
+      {
+       "name": "lastVideosIds",
+       "isRequired": true,
+       "optionsLimit": 100
+      }
+     ],
+     "extraSupported": [
+      "lastVideosIds"
+     ],
+     "extraRequired": [
+      "lastVideosIds"
+     ],
+     "name": "Last videos"
+    },
+    {
+     "type": "series",
+     "id": "calendar-videos",
+     "extra": [
+      {
+       "name": "calendarVideosIds",
+       "isRequired": true,
+       "optionsLimit": 100
+      }
+     ],
+     "extraSupported": [
+      "calendarVideosIds"
+     ],
+     "extraRequired": [
+      "calendarVideosIds"
+     ],
+     "name": "Calendar videos"
+    }
+   ],
+   "behaviorHints": {
+    "newEpisodeNotifications": true
+   }
+  },
+  "/torrentio/manifest.json": {
+   "id": "com.stremio.torrentio.addon",
+   "version": "0.0.15",
+   "name": "Torrentio",
+   "description": "Provides torrent streams from scraped torrent providers. Currently supports YTS(+), EZTV(+), RARBG(+), 1337x(+), EXT(+), ThePirateBay(+), KickassTorrents(+), TorrentGalaxy(+), MagnetDL(+), HorribleSubs(+), NyaaSi(+), TokyoTosho(+), AniDex(+), nekoBT(+), Rutor(+), Rutracker(+), Comando(+), BluDV(+), MicoLeaoDublado(+), Torrent9(+), ilCorSaRoNeRo(+), MejorTorrent(+), Wolfmax4k(+), Cinecalidad(+), BestTorrents(+). To configure providers, RealDebrid/Premiumize/AllDebrid/DebridLink/EasyDebrid/Offcloud/TorBox/Put.io/HighWay support and other settings visit https://torrentio.strem.fun",
+   "catalogs": [],
+   "resources": [
+    {
+     "name": "stream",
+     "types": [
+      "movie",
+      "series",
+      "anime"
+     ],
+     "idPrefixes": [
+      "tt",
+      "kitsu"
+     ]
+    }
+   ],
+   "types": [
+    "movie",
+    "series",
+    "anime",
+    "other"
+   ],
+   "background": "https://torrentio.strem.fun/images/background_v1.jpg",
+   "logo": "https://torrentio.strem.fun/images/logo_v1.png",
+   "behaviorHints": {
+    "configurable": true,
+    "configurationRequired": false
+   }
+  },
+  "/eclipsia/manifest.json": {
+   "id": "org.eclipsia",
+   "version": "3.0.0",
+   "name": "Eclipsia",
+   "description": "Curated collection of providers",
+   "resources": [
+    "stream"
+   ],
+   "types": [
+    "movie",
+    "series",
+    "anime"
+   ],
+   "idPrefixes": [
+    "tt"
+   ],
+   "logo": "https://jsn.eclipsia.dpdns.org/logo.png",
+   "catalogs": [],
+   "behaviorHints": {
+    "configurable": true,
+    "configurationRequired": false,
+    "configureUrl": "https://jsn.eclipsia.dpdns.org/configure"
+   }
+  },
+  "/cinemeta/catalog/movie/top.json": {
+   "metas": [
+    {
+     "imdb_id": "tt34384900",
+     "name": "Love of Your Life",
+     "popularities": {
+      "trakt": 322,
+      "moviedb": 115.6703,
+      "stremio": 3.8556766666666666,
+      "stremio_lib": 0
+     },
+     "type": "movie",
+     "cast": [
+      "Margaret Qualley",
+      "Gabriel Basso",
+      "Catherine Keener"
+     ],
+     "country": "United States",
+     "description": "Maya, a smart, wry nurse, is swept up in an immersive love, that sets her life on a trajectory she never would have imagined.",
+     "director": [
+      "Rachel Morrison"
+     ],
+     "genre": [
+      "Drama",
+      "Romance"
+     ],
+     "imdbRating": "",
+     "released": "2026-10-14T00:00:00.000Z",
+     "slug": "movie/love-of-your-life-34384900",
+     "writer": [
+      "Julia Cox"
+     ],
+     "year": "2026",
+     "moviedb_id": 1381078,
+     "poster": "https://images.metahub.space/poster/small/tt34384900/img",
+     "runtime": "109 min",
+     "trailers": [
+      {
+       "source": "HzGx48E64Xg",
+       "type": "Trailer"
+      }
+     ],
+     "popularity": 3.8556766666666666,
+     "logo": "https://images.metahub.space/logo/medium/tt34384900/img",
+     "background": "https://images.metahub.space/background/medium/tt34384900/img",
+     "id": "tt34384900",
+     "genres": [
+      "Drama",
+      "Romance"
+     ],
+     "releaseInfo": "2026",
+     "trailerStreams": [
+      {
+       "title": "Love of Your Life",
+       "ytId": "HzGx48E64Xg"
+      }
+     ],
+     "links": [
+      {
+       "name": "Love of Your Life",
+       "category": "share",
+       "url": "https://www.strem.io/s/movie/love-of-your-life-34384900"
+      },
+      {
+       "name": "Drama",
+       "category": "Genres",
+       "url": "stremio:///discover/https%3A%2F%2Fv3-cinemeta.strem.io%2Fmanifest.json/movie/top?genre=Drama"
+      },
+      {
+       "name": "Romance",
+       "category": "Genres",
+       "url": "stremio:///discover/https%3A%2F%2Fv3-cinemeta.strem.io%2Fmanifest.json/movie/top?genre=Romance"
+      },
+      {
+       "name": "Margaret Qualley",
+       "category": "Cast",
+       "url": "stremio:///search?search=Margaret%20Qualley"
+      },
+      {
+       "name": "Gabriel Basso",
+       "category": "Cast",
+       "url": "stremio:///search?search=Gabriel%20Basso"
+      },
+      {
+       "name": "Catherine Keener",
+       "category": "Cast",
+       "url": "stremio:///search?search=Catherine%20Keener"
+      },
+      {
+       "name": "Julia Cox",
+       "category": "Writers",
+       "url": "stremio:///search?search=Julia%20Cox"
+      },
+      {
+       "name": "Rachel Morrison",
+       "category": "Directors",
+       "url": "stremio:///search?search=Rachel%20Morrison"
+      }
+     ],
+     "behaviorHints": {
+      "defaultVideoId": "tt34384900",
+      "hasScheduledVideos": false
+     }
+    },
+    {
+     "imdb_id": "tt6262770",
+     "name": "Tenzing",
+     "popularities": {
+      "trakt": 637,
+      "moviedb": 107.9694,
+      "stremio": 3.5989799999999996,
+      "stremio_lib": 0
+     },
+     "type": "movie",
+     "awards": "1 win & 1 nomination total",
+     "cast": [
+      "Genden Phuntsok",
+      "Tom Hiddleston",
+      "Willem Dafoe"
+     ],
+     "country": "United Kingdom, Australia, United States",
+     "description": "The untold and inspiring tale of one of the most important mountain climbers in history who, with Edmund Hillary, became the first person to reach the summit of Mount Everest.",
+     "director": [
+      "Jennifer Peedom"
+     ],
+     "genre": [
+      "Adventure",
+      "Biography",
+      "Drama"
+     ],
+     "imdbRating": "7.5",
+     "released": "2026-10-16T00:00:00.000Z",
+     "slug": "movie/tenzing-6262770",
+     "writer": [
+      "Luke Davies",
+      "Jennifer Peedom",
+      "Ed Douglas"
+     ],
+     "year": "2026",
+     "moviedb_id": 1288069,
+     "poster": "https://images.metahub.space/poster/small/tt6262770/img",
+     "runtime": "126 min",
+     "trailers": [
+      {
+       "source": "KkYCY5YR12U",
+       "type": "Trailer"
+      }
+     ],
+     "popularity": 3.5989799999999996,
+     "logo": "https://images.metahub.space/logo/medium/tt6262770/img",
+     "background": "https://images.metahub.space/background/medium/tt6262770/img",
+     "id": "tt6262770",
+     "genres": [
+      "Adventure",
+      "Biography",
+      "Drama"
+     ],
+     "releaseInfo": "2026",
+     "trailerStreams": [
+      {
+       "title": "Tenzing",
+       "ytId": "KkYCY5YR12U"
+      }
+     ],
+     "links": [
+      {
+       "name": "7.5",
+       "category": "imdb",
+       "url": "https://imdb.com/title/tt6262770"
+      },
+      {
+       "name": "Tenzing",
+       "category": "share",
+       "url": "https://www.strem.io/s/movie/tenzing-6262770"
+      },
+      {
+       "name": "Adventure",
+       "category": "Genres",
+       "url": "stremio:///discover/https%3A%2F%2Fv3-cinemeta.strem.io%2Fmanifest.json/movie/top?genre=Adventure"
+      },
+      {
+       "name": "Biography",
+       "category": "Genres",
+       "url": "stremio:///discover/https%3A%2F%2Fv3-cinemeta.strem.io%2Fmanifest.json/movie/top?genre=Biography"
+      },
+      {
+       "name": "Drama",
+       "category": "Genres",
+       "url": "stremio:///discover/https%3A%2F%2Fv3-cinemeta.strem.io%2Fmanifest.json/movie/top?genre=Drama"
+      },
+      {
+       "name": "Genden Phuntsok",
+       "category": "Cast",
+       "url": "stremio:///search?search=Genden%20Phuntsok"
+      },
+      {
+       "name": "Tom Hiddleston",
+       "category": "Cast",
+       "url": "stremio:///search?search=Tom%20Hiddleston"
+      },
+      {
+       "name": "Willem Dafoe",
+       "category": "Cast",
+       "url": "stremio:///search?search=Willem%20Dafoe"
+      },
+      {
+       "name": "Luke Davies",
+       "category": "Writers",
+       "url": "stremio:///search?search=Luke%20Davies"
+      },
+      {
+       "name": "Jennifer Peedom",
+       "category": "Writers",
+       "url": "stremio:///search?search=Jennifer%20Peedom"
+      },
+      {
+       "name": "Ed Douglas",
+       "category": "Writers",
+       "url": "stremio:///search?search=Ed%20Douglas"
+      },
+      {
+       "name": "Jennifer Peedom",
+       "category": "Directors",
+       "url": "stremio:///search?search=Jennifer%20Peedom"
+      }
+     ],
+     "behaviorHints": {
+      "defaultVideoId": "tt6262770",
+      "hasScheduledVideos": false
+     }
+    }
+   ],
+   "hasMore": true,
+   "cacheMaxAge": 14400,
+   "staleRevalidate": 3600,
+   "staleError": 3600
+  },
+  "/cinemeta/catalog/series/top.json": {
+   "metas": [
+    {
+     "imdb_id": "tt11540908",
+     "name": "Carrie",
+     "popularities": {
+      "trakt": 3160,
+      "moviedb": 227.9206,
+      "stremio": 9.289719999999999,
+      "stremio_lib": 0
+     },
+     "type": "series",
+     "cast": [
+      "Summer H. Howell",
+      "Samantha Sloyan",
+      "Siena Agudong"
+     ],
+     "country": "Canada, United States",
+     "description": "After her father's sudden death, sheltered teenager Carrie White, raised by her domineering mother, enters public high school, where she faces a viral bullying scandal and the awakening of mysterious telekinetic powers.",
+     "genre": [
+      "Drama",
+      "Horror"
+     ],
+     "imdbRating": "7.8",
+     "released": "2026-10-07T00:00:00.000Z",
+     "slug": "series/carrie-11540908",
+     "writer": [
+      "Mike Flanagan"
+     ],
+     "year": "2026–",
+     "runtime": "52 min",
+     "status": "Continuing",
+     "tvdb_id": 455755,
+     "moviedb_id": 288673,
+     "poster": "https://images.metahub.space/poster/small/tt11540908/img",
+     "trailers": [
+      {
+       "source": "jkUw2nh6fT0",
+       "type": "Trailer"
+      }
+     ],
+     "director": [],
+     "background": "https://images.metahub.space/background/medium/tt11540908/img",
+     "logo": "https://images.metahub.space/logo/medium/tt11540908/img",
+     "popularity": 9.289719999999999,
+     "id": "tt11540908",
+     "videos": [
+      {
+       "name": "FIRST PERIOD",
+       "season": 1,
+       "number": 1,
+       "firstAired": "2026-10-07T03:00:00.000Z",
+       "tvdb_id": 10755138,
+       "rating": 0,
+       "overview": "The start of a brand new day",
+       "thumbnail": "https://episodes.metahub.space/tt11540908/1/1/w780.jpg",
+       "id": "tt11540908:1:1",
+       "released": "2026-10-07T03:00:00.000Z",
+       "episode": 1,
+       "description": "The start of a brand new day"
+      },
+      {
+       "name": "FOREIGN LANGUAGE",
+       "season": 1,
+       "number": 2,
+       "firstAired": "2026-10-07T03:00:00.000Z",
+       "tvdb_id": 11873152,
+       "rating": 0,
+       "overview": "New communication skills from an unfamiliar culture",
+       "thumbnail": "https://episodes.metahub.space/tt11540908/1/2/w780.jpg",
+       "id": "tt11540908:1:2",
+       "released": "2026-10-07T03:00:00.000Z",
+       "episode": 2,
+       "description": "New communication skills from an unfamiliar culture"
+      },
+      {
+       "name": "SOCIAL STUDIES",
+       "season": 1,
+       "number": 3,
+       "firstAired": "2026-10-07T03:00:00.000Z",
+       "tvdb_id": 11873153,
+       "rating": 0,
+       "overview": "How people, communities, and societies interact",
+       "thumbnail": "https://episodes.metahub.space/tt11540908/1/3/w780.jpg",
+       "id": "tt11540908:1:3",
+       "released": "2026-10-07T03:00:00.000Z",
+       "episode": 3,
+       "description": "How people, communities, and societies interact"
+      },
+      {
+       "name": "DRAMATIC ARTS",
+       "season": 1,
+       "number": 4,
+       "firstAired": "2026-10-07T03:00:00.000Z",
+       "tvdb_id": 11873154,
+       "rating": 0,
+       "overview": "Voice, movement, and improvisation",
+       "thumbnail": "https://episodes.metahub.space/tt11540908/1/4/w780.jpg",
+       "id": "tt11540908:1:4",
+       "released": "2026-10-07T03:00:00.000Z",
+       "episode": 4,
+       "description": "Voice, movement, and improvisation"
+      },
+      {
+       "name": "PHYSICAL EDUCATION",
+       "season": 1,
+       "number": 5,
+       "firstAired": "2026-10-07T03:00:00.000Z",
+       "tvdb_id": 11873155,
+       "rating": 0,
+       "overview": "Health, fitness, and exercise",
+       "thumbnail": "https://episodes.metahub.space/tt11540908/1/5/w780.jpg",
+       "id": "tt11540908:1:5",
+       "released": "2026-10-07T03:00:00.000Z",
+       "episode": 5,
+       "description": "Health, fitness, and exercise"
+      },
+      {
+       "name": "HOME ECONOMICS",
+       "season": 1,
+       "number": 6,
+       "firstAired": "2026-10-07T03:00:00.000Z",
+       "tvdb_id": 11873156,
+       "rating": 0,
+       "overview": "Practical life skills for independent living",
+       "thumbnail": "https://episodes.metahub.space/tt11540908/1/6/w780.jpg",
+       "id": "tt11540908:1:6",
+       "released": "2026-10-07T03:00:00.000Z",
+       "episode": 6,
+       "description": "Practical life skills for independent living"
+      },
+      {
+       "name": "ROMANTIC LITERATURE",
+       "season": 1,
+       "number": 7,
+       "firstAired": "2026-10-07T03:00:00.000Z",
+       "tvdb_id": 11873157,
+       "rating": 0,
+       "overview": "The power of emotion and individual experience",
+       "thumbnail": "https://episodes.metahub.space/tt11540908/1/7/w780.jpg",
+       "id": "tt11540908:1:7",
+       "released": "2026-10-07T03:00:00.000Z",
+       "episode": 7,
+       "description": "The power of emotion and individual experience"
+      },
+      {
+       "name": "AP PHYSICS",
+       "season": 1,
+       "number": 8,
+       "firstAired": "2026-10-07T03:00:00.000Z",
+       "tvdb_id": 11873158,
+       "rating": 0,
+       "overview": "For every action, there is an equal and opposite reaction",
+       "thumbnail": "https://episodes.metahub.space/tt11540908/1/8/w780.jpg",
+       "id": "tt11540908:1:8",
+       "released": "2026-10-07T03:00:00.000Z",
+       "episode": 8,
+       "description": "For every action, there is an equal and opposite reaction"
+      }
+     ],
+     "genres": [
+      "Drama",
+      "Horror"
+     ],
+     "releaseInfo": "2026–",
+     "trailerStreams": [
+      {
+       "title": "Carrie",
+       "ytId": "jkUw2nh6fT0"
+      }
+     ],
+     "links": [
+      {
+       "name": "7.8",
+       "category": "imdb",
+       "url": "https://imdb.com/title/tt11540908"
+      },
+      {
+       "name": "Carrie",
+       "category": "share",
+       "url": "https://www.strem.io/s/series/carrie-11540908"
+      },
+      {
+       "name": "Drama",
+       "category": "Genres",
+       "url": "stremio:///discover/https%3A%2F%2Fv3-cinemeta.strem.io%2Fmanifest.json/series/top?genre=Drama"
+      },
+      {
+       "name": "Horror",
+       "category": "Genres",
+       "url": "stremio:///discover/https%3A%2F%2Fv3-cinemeta.strem.io%2Fmanifest.json/series/top?genre=Horror"
+      },
+      {
+       "name": "Summer H. Howell",
+       "category": "Cast",
+       "url": "stremio:///search?search=Summer%20H.%20Howell"
+      },
+      {
+       "name": "Samantha Sloyan",
+       "category": "Cast",
+       "url": "stremio:///search?search=Samantha%20Sloyan"
+      },
+      {
+       "name": "Siena Agudong",
+       "category": "Cast",
+       "url": "stremio:///search?search=Siena%20Agudong"
+      },
+      {
+       "name": "Mike Flanagan",
+       "category": "Writers",
+       "url": "stremio:///search?search=Mike%20Flanagan"
+      }
+     ],
+     "behaviorHints": {
+      "defaultVideoId": null,
+      "hasScheduledVideos": true
+     }
+    }
+   ],
+   "hasMore": true,
+   "cacheMaxAge": 14400,
+   "staleRevalidate": 3600,
+   "staleError": 3600
+  },
+  "/cinemeta/meta/series/tt11540908.json": {
+   "meta": {
+    "imdb_id": "tt11540908",
+    "name": "Carrie",
+    "popularities": {
+     "trakt": 3165,
+     "moviedb": 227.9206,
+     "stremio": 7.597353333333333,
+     "stremio_lib": 0
+    },
+    "type": "series",
+    "cast": [
+     "Summer H. Howell",
+     "Samantha Sloyan",
+     "Siena Agudong"
+    ],
+    "country": "Canada, United States",
+    "description": "After her father's sudden death, sheltered teenager Carrie White, raised by her domineering mother, enters public high school, where she faces a viral bullying scandal and the awakening of mysterious telekinetic powers.",
+    "genre": [
+     "Drama",
+     "Horror"
+    ],
+    "imdbRating": "7.8",
+    "released": "2026-10-07T00:00:00.000Z",
+    "slug": "series/carrie-11540908",
+    "writer": [
+     "Mike Flanagan"
+    ],
+    "year": "2026–",
+    "runtime": "52 min",
+    "status": "Continuing",
+    "tvdb_id": 455755,
+    "moviedb_id": 288673,
+    "poster": "https://images.metahub.space/poster/small/tt11540908/img",
+    "trailers": [
+     {
+      "source": "jkUw2nh6fT0",
+      "type": "Trailer"
+     }
+    ],
+    "director": [],
+    "background": "https://images.metahub.space/background/medium/tt11540908/img",
+    "logo": "https://images.metahub.space/logo/medium/tt11540908/img",
+    "popularity": 7.597353333333333,
+    "id": "tt11540908",
+    "genres": [
+     "Drama",
+     "Horror"
+    ],
+    "releaseInfo": "2026–",
+    "videos": [
+     {
+      "name": "FIRST PERIOD",
+      "season": 1,
+      "number": 1,
+      "firstAired": "2026-10-07T03:00:00.000Z",
+      "tvdb_id": 10755138,
+      "rating": "0",
+      "overview": "The start of a brand new day",
+      "thumbnail": "https://episodes.metahub.space/tt11540908/1/1/w780.jpg",
+      "id": "tt11540908:1:1",
+      "released": "2026-10-07T03:00:00.000Z",
+      "episode": 1,
+      "description": "The start of a brand new day"
+     },
+     {
+      "name": "FOREIGN LANGUAGE",
+      "season": 1,
+      "number": 2,
+      "firstAired": "2026-10-07T03:00:00.000Z",
+      "tvdb_id": 11873152,
+      "rating": "0",
+      "overview": "New communication skills from an unfamiliar culture",
+      "thumbnail": "https://episodes.metahub.space/tt11540908/1/2/w780.jpg",
+      "id": "tt11540908:1:2",
+      "released": "2026-10-07T03:00:00.000Z",
+      "episode": 2,
+      "description": "New communication skills from an unfamiliar culture"
+     },
+     {
+      "name": "SOCIAL STUDIES",
+      "season": 1,
+      "number": 3,
+      "firstAired": "2026-10-07T03:00:00.000Z",
+      "tvdb_id": 11873153,
+      "rating": "0",
+      "overview": "How people, communities, and societies interact",
+      "thumbnail": "https://episodes.metahub.space/tt11540908/1/3/w780.jpg",
+      "id": "tt11540908:1:3",
+      "released": "2026-10-07T03:00:00.000Z",
+      "episode": 3,
+      "description": "How people, communities, and societies interact"
+     }
+    ],
+    "trailerStreams": [
+     {
+      "title": "Carrie",
+      "ytId": "jkUw2nh6fT0"
+     }
+    ],
+    "links": [
+     {
+      "name": "7.8",
+      "category": "imdb",
+      "url": "https://imdb.com/title/tt11540908"
+     },
+     {
+      "name": "Carrie",
+      "category": "share",
+      "url": "https://www.strem.io/s/series/carrie-11540908"
+     },
+     {
+      "name": "Drama",
+      "category": "Genres",
+      "url": "stremio:///discover/https%3A%2F%2Fv3-cinemeta.strem.io%2Fmanifest.json/series/top?genre=Drama"
+     },
+     {
+      "name": "Horror",
+      "category": "Genres",
+      "url": "stremio:///discover/https%3A%2F%2Fv3-cinemeta.strem.io%2Fmanifest.json/series/top?genre=Horror"
+     },
+     {
+      "name": "Summer H. Howell",
+      "category": "Cast",
+      "url": "stremio:///search?search=Summer%20H.%20Howell"
+     },
+     {
+      "name": "Samantha Sloyan",
+      "category": "Cast",
+      "url": "stremio:///search?search=Samantha%20Sloyan"
+     },
+     {
+      "name": "Siena Agudong",
+      "category": "Cast",
+      "url": "stremio:///search?search=Siena%20Agudong"
+     },
+     {
+      "name": "Mike Flanagan",
+      "category": "Writers",
+      "url": "stremio:///search?search=Mike%20Flanagan"
+     }
+    ],
+    "behaviorHints": {
+     "defaultVideoId": null,
+     "hasScheduledVideos": true
+    }
+   }
+  },
+  "/torrentio/stream/series/tt11540908:1:1.json": {
+   "streams": [
+    {
+     "name": "[RD+] Torrentio\n4k DV | HDR",
+     "title": "Carrie S01 (CZ/EN)[2160p][DV/HDR]\nCarrie_S01E01 4K CZ dab.mkv\n👤 25 💾 5.84 GB ⚙️ EXT\n🇬🇧 / 🇨🇿",
+     "url": "{BASE}/video/torrentio-1-0.mkv",
+     "behaviorHints": {
+      "bingeGroup": "torrentio|35b89c05e9d9c48cb3ccb9a95f035bc7786e7890",
+      "filename": "Carrie_S01E01 4K CZ dab.mkv"
+     }
+    },
+    {
+     "name": "[RD+] Torrentio\n4k HDR",
+     "title": "Carrie.2026.S01.MULTi.VF2.2160p.WEB.HDR10.H265.E-AC3-AKM\nCarrie.2026.S01E01.MULTi.VF2.2160p.WEB.HDR10.H265.E-AC3-AKM.mkv\n👤 7 💾 6.07 GB ⚙️ EXT\nMulti Audio / 🇬🇧 / 🇫🇷",
+     "url": "{BASE}/video/torrentio-1-1.mkv",
+     "behaviorHints": {
+      "bingeGroup": "torrentio|be34bd21413c4974e85bf8e33293257b29ca71c9",
+      "filename": "Carrie.2026.S01E01.MULTi.VF2.2160p.WEB.HDR10.H265.E-AC3-AKM.mkv"
+     }
+    },
+    {
+     "name": "[RD+] Torrentio\n4k",
+     "title": "Carrie [4k 2160p][Cap.101]\n👤 20 💾 5.81 GB ⚙️ Wolfmax4k\n🇪🇸",
+     "url": "{BASE}/video/torrentio-1-2.mkv",
+     "behaviorHints": {
+      "bingeGroup": "torrentio|4k",
+      "filename": "Carrie [4k 2160p][Cap.101].mkv"
+     }
+    }
+   ],
+   "cacheMaxAge": 3600,
+   "staleRevalidate": 14400,
+   "staleError": 604800
+  },
+  "/torrentio/stream/series/tt11540908:1:2.json": {
+   "streams": [
+    {
+     "name": "[RD+] Torrentio\n4k DV | HDR",
+     "title": "Carrie S01 (CZ/EN)[2160p][DV/HDR]\nCarrie_S01E02 4K CZ dab.mkv\n👤 25 💾 5.49 GB ⚙️ EXT\n🇬🇧 / 🇨🇿",
+     "url": "{BASE}/video/torrentio-2-0.mkv",
+     "behaviorHints": {
+      "bingeGroup": "torrentio|35b89c05e9d9c48cb3ccb9a95f035bc7786e7890",
+      "filename": "Carrie_S01E02 4K CZ dab.mkv"
+     }
+    },
+    {
+     "name": "[RD+] Torrentio\n4k HDR",
+     "title": "Carrie.2026.S01.MULTi.VF2.2160p.WEB.HDR10.H265.E-AC3-AKM\nCarrie.2026.S01E02.MULTi.VF2.2160p.WEB.HDR10.H265.E-AC3-AKM.mkv\n👤 7 💾 5.7 GB ⚙️ EXT\nMulti Audio / 🇬🇧 / 🇫🇷",
+     "url": "{BASE}/video/torrentio-2-1.mkv",
+     "behaviorHints": {
+      "bingeGroup": "torrentio|be34bd21413c4974e85bf8e33293257b29ca71c9",
+      "filename": "Carrie.2026.S01E02.MULTi.VF2.2160p.WEB.HDR10.H265.E-AC3-AKM.mkv"
+     }
+    },
+    {
+     "name": "[RD+] Torrentio\n4k",
+     "title": "Carrie [4k 2160p][Cap.102]\n👤 18 💾 5.46 GB ⚙️ Wolfmax4k\n🇪🇸",
+     "url": "{BASE}/video/torrentio-2-2.mkv",
+     "behaviorHints": {
+      "bingeGroup": "torrentio|4k",
+      "filename": "Carrie [4k 2160p][Cap.102].mkv"
+     }
+    }
+   ],
+   "cacheMaxAge": 3600,
+   "staleRevalidate": 14400,
+   "staleError": 604800
+  },
+  "/torrentio/stream/series/tt11540908:1:3.json": {
+   "streams": [
+    {
+     "name": "[RD+] Torrentio\n4k DV | HDR",
+     "title": "Carrie S01 (CZ/EN)[2160p][DV/HDR]\nCarrie_S01E03 4K CZ dab.mkv\n👤 25 💾 5.17 GB ⚙️ EXT\n🇬🇧 / 🇨🇿",
+     "url": "{BASE}/video/torrentio-3-0.mkv",
+     "behaviorHints": {
+      "bingeGroup": "torrentio|35b89c05e9d9c48cb3ccb9a95f035bc7786e7890",
+      "filename": "Carrie_S01E03 4K CZ dab.mkv"
+     }
+    },
+    {
+     "name": "[RD+] Torrentio\n4k HDR",
+     "title": "Carrie.2026.S01.MULTi.VF2.2160p.WEB.HDR10.H265.E-AC3-AKM\nCarrie.2026.S01E03.MULTi.VF2.2160p.WEB.HDR10.H265.E-AC3-AKM.mkv\n👤 7 💾 5.37 GB ⚙️ EXT\nMulti Audio / 🇬🇧 / 🇫🇷",
+     "url": "{BASE}/video/torrentio-3-1.mkv",
+     "behaviorHints": {
+      "bingeGroup": "torrentio|be34bd21413c4974e85bf8e33293257b29ca71c9",
+      "filename": "Carrie.2026.S01E03.MULTi.VF2.2160p.WEB.HDR10.H265.E-AC3-AKM.mkv"
+     }
+    },
+    {
+     "name": "[RD+] Torrentio\n4k",
+     "title": "Carrie [4k 2160p][Cap.103]\n👤 15 💾 5.14 GB ⚙️ Wolfmax4k\n🇪🇸",
+     "url": "{BASE}/video/torrentio-3-2.mkv",
+     "behaviorHints": {
+      "bingeGroup": "torrentio|4k",
+      "filename": "Carrie [4k 2160p][Cap.103].mkv"
+     }
+    }
+   ],
+   "cacheMaxAge": 3600,
+   "staleRevalidate": 14400,
+   "staleError": 604800
+  },
+  "/eclipsia/stream/movie/tt34384900.json": {
+   "streams": [
+    {
+     "name": "Netmirror.",
+     "title": "1080p - Netmirror • 1080p",
+     "url": "{BASE}/hdr/eclipsia-0.mp4",
+     "behaviorHints": {
+      "proxyHeaders": {
+       "request": {
+        "Referer": "https://videodownloader.site/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+        "Accept-Encoding": "identity"
+       }
+      }
+     }
+    },
+    {
+     "name": "Nxsha.",
+     "title": "1080p - Nxsha • Nitro • English • Hindi",
+     "url": "{BASE}/hdr/eclipsia-1.m3u8",
+     "behaviorHints": {
+      "proxyHeaders": {
+       "request": {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+        "Referer": "https://nxsha.space/",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "identity"
+       }
+      }
+     }
+    },
+    {
+     "name": "Nxsha.",
+     "title": "1080p - Nxsha • Nitro • hGuider",
+     "url": "{BASE}/hdr/eclipsia-2.m3u8",
+     "behaviorHints": {
+      "proxyHeaders": {
+       "request": {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
+        "Referer": "https://nxsha.space/",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Encoding": "identity"
+       }
+      }
+     }
+    },
+    {
+     "name": "VAplayer.",
+     "title": "1080p - VAplayer",
+     "url": "{BASE}/hdr/eclipsia-3.m3u8",
+     "behaviorHints": {
+      "proxyHeaders": {
+       "request": {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+        "Referer": "https://nextgencloudfabric.com/",
+        "Origin": "https://nextgencloudfabric.com/",
+        "Accept-Encoding": "identity"
+       }
+      }
+     }
+    },
+    {
+     "name": "Vidlink.",
+     "title": "1080p - ​​​​​​​​​​​​​​​​​​​﻿Vidlink",
+     "url": "{BASE}/hdr/eclipsia-4.mp4"
+    },
+    {
+     "name": "Castle.",
+     "title": "720P - ​​​​​​​​​​​​​​​​​​﻿​Castle",
+     "url": "{BASE}/hdr/eclipsia-5.m3u8",
+     "behaviorHints": {
+      "proxyHeaders": {
+       "request": {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+        "Accept": "video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Sec-Fetch-Dest": "video",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Accept-Encoding": "identity"
+       }
+      }
+     }
+    },
+    {
+     "name": "Netmirror.",
+     "title": "720p - Netmirror • 720p",
+     "url": "{BASE}/hdr/eclipsia-6.mp4",
+     "behaviorHints": {
+      "proxyHeaders": {
+       "request": {
+        "Referer": "https://videodownloader.site/",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+        "Accept-Encoding": "identity"
+       }
+      }
+     }
+    },
+    {
+     "name": "Vidlink.",
+     "title": "720p - ​​​​​​​​​​​​​​​​​​﻿​Vidlink",
+     "url": "{BASE}/hdr/eclipsia-7.mp4"
+    }
+   ]
+  }
+ }
+}

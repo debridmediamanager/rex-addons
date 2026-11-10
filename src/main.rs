@@ -1,5 +1,7 @@
 //! rex-addons: runs JavaScript addons in QuickJS sandboxes and feeds what they return to rex,
 //! each addon one source of rex's feed API.
+#[cfg(test)]
+mod addon_tests;
 mod addons;
 mod app;
 mod net;

@@ -14,8 +14,9 @@ pub const MAX_PACK: u64 = 32 << 20;
 /// What a checkout may write: files, and bytes in all.
 pub const MAX_FILES: usize = 2000;
 pub const MAX_BYTES: u64 = 64 << 20;
-/// What the pack's objects may inflate to in all.
-const MAX_INFLATED: usize = 256 << 20;
+/// What the pack's objects may inflate to in all, deltas applied: MAX_BYTES of files plus room
+/// for folders, the commit and the deltas' own instructions. Past it the checkout is refused anyway.
+const MAX_INFLATED: usize = 96 << 20;
 /// Some servers serve the smart protocol only to a client that names itself git.
 const AGENT: &str = concat!("git/2.0 (rex-addons/", env!("CARGO_PKG_VERSION"), ")");
 
@@ -289,7 +290,12 @@ fn inflate(input: &[u8], size: usize) -> Result<(Vec<u8>, usize), String> {
     }
 }
 
-fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
+fn too_big() -> String {
+    format!("the repository is over {} MB unpacked", MAX_INFLATED >> 20)
+}
+
+/// `delta` applied to `base`; its result may be `budget` bytes at most.
+fn apply_delta(base: &[u8], delta: &[u8], budget: usize) -> Result<Vec<u8>, String> {
     let bad = || "a damaged delta".to_string();
     let mut at = 0;
     let varint = |at: &mut usize| -> Result<usize, String> {
@@ -305,8 +311,11 @@ fn apply_delta(base: &[u8], delta: &[u8]) -> Result<Vec<u8>, String> {
         }
     };
     let (base_size, size) = (varint(&mut at)?, varint(&mut at)?);
-    if base_size != base.len() || size > MAX_INFLATED {
+    if base_size != base.len() {
         return Err(bad());
+    }
+    if size > budget {
+        return Err(too_big());
     }
     let mut out = Vec::with_capacity(size);
     while at < delta.len() {
@@ -396,13 +405,15 @@ pub fn unpack(pack: &[u8]) -> Result<HashMap<Oid, Object>, String> {
         };
         inflated += size;
         if inflated > MAX_INFLATED {
-            return Err(format!("the repository is over {} MB unpacked", MAX_INFLATED >> 20));
+            return Err(too_big());
         }
         let (data, used) = inflate(&body[at..], size)?;
         at += used;
         entries.push((start, base, kind, data));
     }
     // Deltas apply to objects earlier in the pack, or (by id) anywhere in it: resolve until done.
+    // Each object's data moves into `resolved`; what deltas produce counts against the cap too.
+    let mut budget = MAX_INFLATED - inflated;
     let index: HashMap<usize, usize> = entries.iter().enumerate().map(|(i, e)| (e.0, i)).collect();
     let mut resolved: Vec<Option<(u8, Vec<u8>, Oid)>> = vec![None; entries.len()];
     let mut by_id: HashMap<Oid, usize> = HashMap::new();
@@ -412,22 +423,27 @@ pub fn unpack(pack: &[u8]) -> Result<HashMap<Oid, Object>, String> {
             if resolved[i].is_some() {
                 continue;
             }
-            let (_, base, kind, data) = &entries[i];
+            let (_, base, kind, data) = &mut entries[i];
             let done = match base {
-                None => Some((*kind, data.clone())),
+                None => Some((*kind, std::mem::take(data))),
                 Some(Base::Offset(offset)) => {
                     let b = *index.get(offset).ok_or_else(damaged)?;
-                    resolved[b].as_ref().map(|(k, d, _)| (*k, d)).map(|(k, d)| apply_delta(d, data).map(|out| (k, out))).transpose()?
+                    resolved[b].as_ref().map(|(k, d, _)| apply_delta(d, data, budget).map(|out| (*k, out))).transpose()?
                 }
                 Some(Base::Id(oid)) => match by_id.get(oid) {
-                    Some(&b) => resolved[b].as_ref().map(|(k, d, _)| apply_delta(d, data).map(|out| (*k, out))).transpose()?,
+                    Some(&b) => resolved[b].as_ref().map(|(k, d, _)| apply_delta(d, data, budget).map(|out| (*k, out))).transpose()?,
                     None => None,
                 },
             };
-            if let Some((kind, data)) = done {
-                let oid = oid_of(kind, &data);
+            if let Some((kind, out)) = done {
+                if base.is_some() {
+                    budget -= out.len();
+                    // The delta's instructions are spent.
+                    *data = Vec::new();
+                }
+                let oid = oid_of(kind, &out);
                 by_id.insert(oid, i);
-                resolved[i] = Some((kind, data, oid));
+                resolved[i] = Some((kind, out, oid));
                 progress = true;
             }
         }
@@ -574,6 +590,43 @@ mod tests {
         let mut damaged = std::fs::read("tests/fixtures/git/delta-ofs.pack").unwrap();
         damaged[40] ^= 1;
         assert_eq!(unpack(&damaged).err().unwrap(), "the pack's checksum does not match");
+    }
+
+    /// A pack entry: its header declaring `size`, `extra` (a REF_DELTA's base id), `data` deflated.
+    fn entry(kind: u8, size: usize, extra: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut out = vec![(kind << 4) | (size & 15) as u8];
+        let mut rest = size >> 4;
+        while rest > 0 {
+            *out.last_mut().unwrap() |= 0x80;
+            out.push((rest & 0x7f) as u8);
+            rest >>= 7;
+        }
+        out.extend_from_slice(extra);
+        let mut encoder = flate2::write::ZlibEncoder::new(out, flate2::Compression::default());
+        std::io::Write::write_all(&mut encoder, data).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    fn pack_of(entries: &[Vec<u8>]) -> Vec<u8> {
+        let mut pack = b"PACK\0\0\0\x02".to_vec();
+        pack.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+        entries.iter().for_each(|e| pack.extend_from_slice(e));
+        let sum = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &pack);
+        pack.extend_from_slice(sum.as_ref());
+        pack
+    }
+
+    #[test]
+    fn a_pack_past_the_inflated_cap_is_refused() {
+        let over = "the repository is over 96 MB unpacked";
+        // An object that says it inflates past the cap.
+        assert_eq!(unpack(&pack_of(&[entry(3, (96 << 20) + 1, &[], b"x")])).err().unwrap(), over);
+        // Two deltas of 800 bytes, each copying a 64 KB blob 800 times: 100 MB once applied.
+        let base = vec![0u8; 0x10000];
+        let mut delta = vec![0x80, 0x80, 0x04, 0x80, 0x80, 0x80, 0x19];
+        delta.extend_from_slice(&[0x80; 800]);
+        let copy = entry(7, delta.len(), &oid_of(3, &base), &delta);
+        assert_eq!(unpack(&pack_of(&[entry(3, base.len(), &[], &base), copy.clone(), copy])).err().unwrap(), over);
     }
 
     fn put(objects: &mut HashMap<Oid, Object>, kind: u8, data: Vec<u8>) -> Oid {

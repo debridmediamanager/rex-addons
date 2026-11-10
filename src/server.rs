@@ -1,0 +1,342 @@
+//! The HTTP side: the management API (this device only) and the byte paths rex reads.
+use std::io::{Cursor, Read};
+use std::sync::Arc;
+
+use serde_json::{json, Value as Json};
+use tiny_http::{Header, Method, Request, Response, StatusCode};
+
+use crate::app::{self, App};
+use crate::net;
+
+fn header(name: &str, value: &str) -> Header {
+    Header::from_bytes(name.as_bytes(), value.as_bytes()).unwrap()
+}
+
+fn json_response(status: u16, body: Json) -> Response<Cursor<Vec<u8>>> {
+    Response::from_data(serde_json::to_vec(&body).unwrap())
+        .with_status_code(status)
+        .with_header(header("Content-Type", "application/json"))
+}
+
+fn error(status: u16, message: &str) -> Response<Cursor<Vec<u8>>> {
+    json_response(status, json!({"error": message}))
+}
+
+pub fn serve(app: Arc<App>, server: tiny_http::Server) {
+    for request in server.incoming_requests() {
+        let app = app.clone();
+        let spawned = std::thread::Builder::new().stack_size(4 << 20).spawn(move || handle(&app, request));
+        if let Err(e) = spawned {
+            app::warn("host", &format!("cannot start a request thread: {e}"));
+        }
+    }
+}
+
+fn handle(app: &Arc<App>, mut request: Request) {
+    let peer = request.remote_addr().map(|addr| addr.ip());
+    let url = request.url().to_string();
+    let path = url.split('?').next().unwrap_or_default().to_string();
+    if let Some(rest) = path.strip_prefix("/bytes/") {
+        // rex reads these; like rex's own feed, only from this device or a private network.
+        if !peer.is_some_and(net::is_private) {
+            let _ = request.respond(error(403, "only rex on a private network reads bytes here"));
+            return;
+        }
+        return bytes(app, request, rest);
+    }
+    if !path.starts_with("/api/") {
+        let _ = request.respond(error(404, "not found"));
+        return;
+    }
+    // The socket's own peer, never a header: the API answers only this device.
+    if !peer.is_some_and(net::is_loopback) {
+        let _ = request.respond(error(403, "the management API answers only this device"));
+        return;
+    }
+    let mut body = String::new();
+    if request.as_reader().take(1 << 20).read_to_string(&mut body).is_err() {
+        let _ = request.respond(error(400, "the body is not UTF-8"));
+        return;
+    }
+    let method = request.method().clone();
+    let response = match api(app, &method, &path, &body) {
+        Ok((status, answer)) => json_response(status, answer),
+        Err((status, message)) => error(status, &message),
+    };
+    let _ = request.respond(response);
+}
+
+type Answer = Result<(u16, Json), (u16, String)>;
+
+fn parse(body: &str) -> Result<Json, (u16, String)> {
+    serde_json::from_str(body).map_err(|e| (400, format!("the body is not JSON: {e}")))
+}
+
+fn detail(app: &App, id: &str) -> Answer {
+    let addons = app.addons.lock().unwrap();
+    let addon = addons.get(id).ok_or((404, "no such addon".to_string()))?;
+    let mut answer = addon.status();
+    answer["manifest"] = addon.manifest.raw.clone();
+    answer["config"] = Json::Object(addon.manifest.masked(&addon.config));
+    Ok((200, answer))
+}
+
+fn api(app: &Arc<App>, method: &Method, path: &str, body: &str) -> Answer {
+    let parts: Vec<&str> = path.trim_end_matches('/').split('/').skip(2).collect();
+    let bad = |e: String| (400, e);
+    match (method, parts.as_slice()) {
+        (Method::Get, ["status"]) => {
+            let addons: Vec<Json> = app.addons.lock().unwrap().values().map(app::Addon::status).collect();
+            Ok((200, json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "rex": {"url": app.rex, "reachable": app.rex_reachable()},
+                "addons": addons,
+            })))
+        }
+        (Method::Post, ["addons"]) => {
+            let body = parse(body)?;
+            let url = body["url"].as_str().ok_or((400, "give the manifest.json link as url".to_string()))?;
+            let id = app.install_url(url).map_err(bad)?;
+            app.start_sync(&id, false);
+            detail(app, &id).map(|(_, answer)| (201, answer))
+        }
+        (Method::Get, ["addons", id]) => detail(app, id),
+        (Method::Delete, ["addons", id]) => {
+            let answer = app.remove(id).map_err(|e| (if e == "no such addon" { 404 } else { 500 }, e))?;
+            Ok((200, answer))
+        }
+        (Method::Put, ["addons", id, "config"]) => {
+            let config = app.set_config(id, &parse(body)?).map_err(|e| (if e == "no such addon" { 404 } else { 400 }, e))?;
+            Ok((200, json!({"config": config})))
+        }
+        (Method::Post, ["addons", id, "sync"]) => {
+            let force = !body.trim().is_empty() && parse(body)?["force"].as_bool().unwrap_or(false);
+            let enabled = app.addons.lock().unwrap().get(*id).map(|a| a.enabled);
+            match enabled {
+                None => Err((404, "no such addon".into())),
+                Some(false) => Err((409, "the addon is disabled".into())),
+                Some(true) => {
+                    app.start_sync(id, force);
+                    Ok((202, json!({"syncing": true})))
+                }
+            }
+        }
+        (Method::Post, ["addons", id, "enabled"]) => {
+            let enabled = parse(body)?["enabled"].as_bool().ok_or((400, "give enabled: true or false".to_string()))?;
+            app.set_enabled(id, enabled).map_err(|e| (404, e))?;
+            detail(app, id)
+        }
+        _ => Err((404, "not found".into())),
+    }
+}
+
+/// `/bytes/{addon}/{path}`: the item's link from `open()`, as a redirect, or relayed when
+/// the link needs headers of its own. rex's DELETE is a person deleting the item in a Plex app.
+fn bytes(app: &Arc<App>, request: Request, rest: &str) {
+    let Some((id, encoded)) = rest.split_once('/') else {
+        let _ = request.respond(error(404, "no such item"));
+        return;
+    };
+    let decoded: Vec<String> = encoded.split('/').map(|s| percent_encoding::percent_decode_str(s).decode_utf8_lossy().into_owned()).collect();
+    let item = {
+        let addons = app.addons.lock().unwrap();
+        let addon = addons.get(id).filter(|a| a.enabled);
+        addon.and_then(|a| Some((a.paths.get(&decoded.join("/"))?.clone(), a.manifest.hosts.clone())))
+    };
+    let Some((item, hosts)) = item else {
+        let _ = request.respond(error(404, "no such item"));
+        return;
+    };
+    match request.method() {
+        Method::Delete => {
+            app.delete_item(id, &item);
+            let _ = request.respond(Response::empty(204));
+        }
+        Method::Get | Method::Head => {
+            let opened = match app.open(id, &item) {
+                Ok(opened) => opened,
+                Err(e) => {
+                    app::warn(id, &format!("open({item}): {e}"));
+                    let _ = request.respond(error(502, &e));
+                    return;
+                }
+            };
+            if opened.headers.is_empty() {
+                let _ = request.respond(Response::empty(302).with_header(header("Location", &opened.url)));
+                return;
+            }
+            let mut headers = opened.headers.clone();
+            headers.push(("Accept-Encoding".into(), "identity".into()));
+            if let Some(range) = request.headers().iter().find(|h| h.field.equiv("Range")) {
+                headers.push(("Range".into(), range.value.to_string()));
+            }
+            let method = if request.method() == &Method::Head { "HEAD" } else { "GET" };
+            match net::request(&net::sandboxed_agent(&hosts), &hosts, method, &opened.url, &headers, None) {
+                Ok((upstream, _)) => {
+                    let status = upstream.status();
+                    if status >= 400 {
+                        app.forget_open(id, &item);
+                        app::warn(id, &format!("{item}: the link answered {status}"));
+                    }
+                    let copied: Vec<Header> = ["Content-Type", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag"]
+                        .iter()
+                        .filter_map(|name| upstream.header(name).map(|value| header(name, value)))
+                        .collect();
+                    let length = upstream.header("Content-Length").and_then(|v| v.parse().ok());
+                    let response = Response::new(StatusCode(status), copied, upstream.into_reader(), length, None);
+                    let _ = request.respond(response);
+                }
+                Err(e) => {
+                    app.forget_open(id, &item);
+                    app::warn(id, &format!("{item}: {e}"));
+                    let _ = request.respond(error(502, &e));
+                }
+            }
+        }
+        _ => {
+            let _ = request.respond(error(405, "GET, HEAD or DELETE"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{IpAddr, SocketAddr, UdpSocket};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// This machine's address on its network, to reach the host as a peer that is not loopback.
+    fn lan_ip() -> Option<IpAddr> {
+        let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
+        socket.connect("192.0.2.1:9").ok()?;
+        let ip = socket.local_addr().ok()?.ip();
+        (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+    }
+
+    fn start(listen: &str, hosts: Json, source: &str) -> (Arc<App>, SocketAddr) {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let server = tiny_http::Server::http(listen).unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let data = std::env::temp_dir().join(format!("rex-addons-test-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data, "http://127.0.0.1:9".into(), addr, None, None);
+        let manifest = json!({"id": "demo", "name": "Demo", "version": "1.0.0", "hosts": hosts});
+        app.install(&manifest, source).unwrap();
+        app.addons.lock().unwrap().get_mut("demo").unwrap().paths.insert("films/a film.mp4".into(), "a".into());
+        let served = app.clone();
+        std::thread::spawn(move || serve(served, server));
+        (app, addr)
+    }
+
+    fn agent() -> ureq::Agent {
+        ureq::AgentBuilder::new().redirects(0).build()
+    }
+
+    fn status(result: Result<ureq::Response, ureq::Error>) -> ureq::Response {
+        match result {
+            Ok(r) | Err(ureq::Error::Status(_, r)) => r,
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    #[test]
+    fn management_api_answers_only_this_device() {
+        let (_, addr) = start("0.0.0.0:0", json!([]), "export default { items() { return []; }, open() {} };");
+        let port = addr.port();
+        let answer: Json = serde_json::from_str(&status(agent().get(&format!("http://127.0.0.1:{port}/api/status")).call()).into_string().unwrap()).unwrap();
+        assert_eq!(answer["addons"][0]["id"], "demo");
+        assert_eq!(answer["rex"]["reachable"], false);
+        let Some(lan) = lan_ip() else {
+            eprintln!("SKIP: no network address to come from");
+            return;
+        };
+        // A header saying otherwise changes nothing: the socket's peer decides.
+        let refused = status(agent().get(&format!("http://{lan}:{port}/api/status")).set("X-Forwarded-For", "127.0.0.1").call());
+        assert_eq!(refused.status(), 403);
+        // rex on the home network may still read bytes.
+        let bytes = status(agent().get(&format!("http://{lan}:{port}/bytes/demo/nothing")).call());
+        assert_eq!(bytes.status(), 404);
+    }
+
+    #[test]
+    fn bytes_redirect_when_the_link_needs_nothing() {
+        let (_, addr) = start(
+            "127.0.0.1:0",
+            json!(["cdn.example.com"]),
+            "export default { items() { return []; }, open(id) { return { url: 'https://cdn.example.com/' + id + '.mp4' }; } };",
+        );
+        let response = status(agent().get(&format!("http://{addr}/bytes/demo/films/a%20film.mp4")).call());
+        assert_eq!(response.status(), 302);
+        assert_eq!(response.header("location"), Some("https://cdn.example.com/a.mp4"));
+        assert_eq!(status(agent().get(&format!("http://{addr}/bytes/demo/films/other.mp4")).call()).status(), 404);
+    }
+
+    #[test]
+    fn bytes_refuse_a_link_off_the_hosts() {
+        let (_, addr) = start("127.0.0.1:0", json!(["cdn.example.com"]), "export default { items() { return []; }, open() { return { url: 'https://evil.example/x.mp4' }; } };");
+        let response = status(agent().get(&format!("http://{addr}/bytes/demo/films/a%20film.mp4")).call());
+        assert_eq!(response.status(), 502);
+        assert!(response.into_string().unwrap().contains("not on the addon's hosts"));
+    }
+
+    #[test]
+    fn bytes_are_relayed_with_range_when_the_link_needs_headers() {
+        let Some(lan) = lan_ip() else {
+            eprintln!("SKIP: no network address for the upstream (loopback is never fetched)");
+            return;
+        };
+        let upstream = tiny_http::Server::http("0.0.0.0:0").unwrap();
+        let upstream_port = upstream.server_addr().to_ip().unwrap().port();
+        let file: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let served = file.clone();
+        std::thread::spawn(move || {
+            for request in upstream.incoming_requests() {
+                let referer = request.headers().iter().any(|h| h.field.equiv("Referer") && h.value == "https://site.example/");
+                let range = request.headers().iter().find(|h| h.field.equiv("Range")).map(|h| h.value.to_string());
+                let response = match (referer, range.as_deref()) {
+                    (false, _) => Response::from_string("no referer").with_status_code(403),
+                    (true, Some("bytes=100-199")) => Response::from_data(served[100..200].to_vec())
+                        .with_status_code(206)
+                        .with_header(header("Content-Range", "bytes 100-199/1000"))
+                        .with_header(header("Content-Type", "video/mp4")),
+                    (true, _) => Response::from_data(served.clone()).with_header(header("Content-Type", "video/mp4")),
+                };
+                let _ = request.respond(response);
+            }
+        });
+        let source = format!(
+            "export default {{ items() {{ return []; }}, open() {{ return {{ url: 'http://{lan}:{upstream_port}/file.mp4', headers: {{ Referer: 'https://site.example/' }} }}; }} }};"
+        );
+        let (_, addr) = start("127.0.0.1:0", json!([lan.to_string()]), &source);
+        let response = status(agent().get(&format!("http://{addr}/bytes/demo/films/a%20film.mp4")).set("Range", "bytes=100-199").call());
+        assert_eq!(response.status(), 206);
+        assert_eq!(response.header("content-range"), Some("bytes 100-199/1000"));
+        assert_eq!(response.header("content-length"), Some("100"));
+        let mut body = Vec::new();
+        response.into_reader().read_to_end(&mut body).unwrap();
+        assert_eq!(body, file[100..200]);
+        let whole = status(agent().get(&format!("http://{addr}/bytes/demo/films/a%20film.mp4")).call());
+        assert_eq!(whole.status(), 200);
+        assert_eq!(whole.header("content-length"), Some("1000"));
+    }
+
+    #[test]
+    fn a_delete_from_rex_stops_the_item() {
+        let (app, addr) = start("127.0.0.1:0", json!([]), "export default { items() { return []; }, open() {} };");
+        let response = status(agent().delete(&format!("http://{addr}/bytes/demo/films/a%20film.mp4")).call());
+        assert_eq!(response.status(), 204);
+        assert!(app.addons.lock().unwrap()["demo"].deleted.contains("a"));
+        assert_eq!(status(agent().delete(&format!("http://{addr}/bytes/demo/films/a%20film.mp4")).call()).status(), 404);
+    }
+
+    #[test]
+    fn config_is_validated_and_secrets_masked() {
+        let (_, addr) = start("127.0.0.1:0", json!([]), "export default { items() { return []; }, open() {} };");
+        let url = format!("http://{addr}/api/addons/demo/config");
+        // The test manifest has no settings at all.
+        let refused = status(agent().put(&url).send_string(r#"{"token": "x"}"#));
+        assert_eq!(refused.status(), 400);
+        assert!(refused.into_string().unwrap().contains("no setting"));
+        assert_eq!(status(agent().get(&format!("http://{addr}/api/addons/nope")).call()).status(), 404);
+    }
+}

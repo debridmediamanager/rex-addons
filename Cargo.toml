@@ -1,0 +1,26 @@
+[package]
+name = "rex-addons"
+version = "0.1.0"
+edition = "2021"
+description = "Runs JavaScript addons in QuickJS sandboxes and feeds what they return to rex"
+license = "MIT"
+
+[dependencies]
+rquickjs = "0.14"
+ureq = "2.12"
+tiny_http = "0.12"
+serde_json = { version = "1.0", features = ["preserve_order"] }
+# Already ureq's: redirects are joined and paths percent-coded with them.
+url = "2"
+percent-encoding = "2"
+
+[features]
+# rquickjs ships no prebuilt bindings for Android: build-android.sh turns this on so they are
+# generated with libclang against the NDK's headers.
+android = ["rquickjs/bindgen"]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "unwind"

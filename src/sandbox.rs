@@ -1,0 +1,412 @@
+//! One QuickJS runtime per call: the addon's `main.js` is loaded, one method of its default
+//! export is called and its promise driven to the end, and the runtime is dropped. Nothing
+//! survives a call but what the addon put in `storage`.
+use std::cell::{Cell, RefCell};
+use std::io::Read;
+use std::path::PathBuf;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use rquickjs::function::Args;
+use rquickjs::{Context, Ctx, Exception, Function, Module, Object, Runtime, Value};
+use serde_json::{Map, Value as Json};
+
+use crate::net::{self, Hosts};
+
+/// How much a call may take. `cpu` counts the time JavaScript runs, not the time a `fetch`
+/// waits on the network; `wall` bounds the whole call.
+#[derive(Clone, Copy)]
+pub struct Limits {
+    pub memory: usize,
+    pub cpu: Duration,
+    pub wall: Duration,
+}
+
+pub const ITEMS: Limits = Limits { memory: 64 << 20, cpu: Duration::from_secs(30), wall: Duration::from_secs(20 * 60) };
+pub const OPEN: Limits = Limits { memory: 64 << 20, cpu: Duration::from_secs(10), wall: Duration::from_secs(90) };
+
+/// A fetched body is read up to this; more is an error the addon sees.
+const MAX_BODY: u64 = 16 << 20;
+/// An addon's storage, all keys together, as JSON.
+const MAX_STORAGE: usize = 8 << 20;
+
+/// An addon's `storage`: one JSON object, written to disk on every change.
+pub struct Storage {
+    path: PathBuf,
+    map: Mutex<Map<String, Json>>,
+}
+
+impl Storage {
+    pub fn open(path: PathBuf) -> Storage {
+        let map = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        Storage { path, map: Mutex::new(map) }
+    }
+
+    fn get(&self, key: &str) -> Option<Json> {
+        self.map.lock().unwrap().get(key).cloned()
+    }
+
+    fn change(&self, key: &str, value: Option<Json>) -> Result<(), String> {
+        let mut map = self.map.lock().unwrap();
+        let before = map.get(key).cloned();
+        match value {
+            Some(value) => map.insert(key.to_string(), value),
+            None => map.remove(key),
+        };
+        let text = serde_json::to_vec(&*map).unwrap();
+        if text.len() > MAX_STORAGE {
+            match before {
+                Some(value) => map.insert(key.to_string(), value),
+                None => map.remove(key),
+            };
+            return Err(format!("storage is limited to {} MB", MAX_STORAGE >> 20));
+        }
+        crate::addons::write_atomic(&self.path, &text).map_err(|e| e.to_string())
+    }
+}
+
+pub struct Env<'a> {
+    pub addon: &'a str,
+    pub source: &'a str,
+    pub hosts: &'a Hosts,
+    pub storage: Arc<Storage>,
+}
+
+const PRELUDE: &str = r#"
+(() => {
+  const host = globalThis.__rex;
+  delete globalThis.__rex;
+  // QuickJS-NG's web extras: an addon gets plain ECMAScript and the three globals below only.
+  for (const name of ["queueMicrotask", "btoa", "atob", "performance", "DOMException"]) delete globalThis[name];
+  const show = (args) => args.map((arg) => {
+    if (typeof arg === "string") return arg;
+    if (arg instanceof Error) return arg.stack ? `${arg}\n${arg.stack}` : String(arg);
+    try { return JSON.stringify(arg) ?? String(arg); } catch { return String(arg); }
+  }).join(" ");
+  const console = Object.freeze({
+    log: (...args) => host.log("info", show(args)),
+    info: (...args) => host.log("info", show(args)),
+    debug: (...args) => host.log("info", show(args)),
+    warn: (...args) => host.log("warn", show(args)),
+    error: (...args) => host.log("error", show(args)),
+  });
+  async function fetch(url, init = {}) {
+    const answer = JSON.parse(host.fetch(String(url), JSON.stringify({
+      method: init.method, headers: init.headers, body: init.body,
+    })));
+    let used = false;
+    const read = () => {
+      if (used) throw new TypeError("the body was already read");
+      used = true;
+      return host.body(answer.handle);
+    };
+    return Object.freeze({
+      status: answer.status,
+      ok: answer.status >= 200 && answer.status < 300,
+      headers: Object.freeze(answer.headers),
+      url: answer.url,
+      text: async () => read(),
+      json: async () => JSON.parse(read()),
+    });
+  }
+  const storage = Object.freeze({
+    get: (key) => { const value = host.storageGet(String(key)); return value === undefined ? undefined : JSON.parse(value); },
+    set: (key, value) => { value === undefined ? host.storageDelete(String(key)) : host.storageSet(String(key), JSON.stringify(value)); },
+    delete: (key) => { host.storageDelete(String(key)); },
+  });
+  for (const [name, value] of Object.entries({ console, fetch, storage })) {
+    Object.defineProperty(globalThis, name, { value, writable: false, configurable: false, enumerable: false });
+  }
+})();
+"#;
+
+/// `default[method](...args)` in a fresh runtime, its promise driven to the end, as JSON. An
+/// empty `method` only loads the module and checks it exports `items` and `open`.
+pub fn call(env: &Env, method: &str, args: &[Json], limits: Limits) -> Result<Json, String> {
+    let runtime = Runtime::new().map_err(|e| e.to_string())?;
+    runtime.set_memory_limit(limits.memory);
+    // Calls run on the host's request threads, whose stacks are small.
+    runtime.set_max_stack_size(512 << 10);
+    let start = Instant::now();
+    let waited = Rc::new(Cell::new(Duration::ZERO));
+    let stopped = Rc::new(Cell::new(None::<&'static str>));
+    {
+        let (waited, stopped) = (waited.clone(), stopped.clone());
+        runtime.set_interrupt_handler(Some(Box::new(move || {
+            let elapsed = start.elapsed();
+            let reason = if elapsed > limits.wall {
+                Some("wall")
+            } else if elapsed.saturating_sub(waited.get()) > limits.cpu {
+                Some("cpu")
+            } else {
+                None
+            };
+            stopped.set(stopped.get().or(reason));
+            reason.is_some()
+        })));
+    }
+    let context = Context::full(&runtime).map_err(|e| e.to_string())?;
+    let result = context.with(|ctx| -> Result<Json, String> {
+        let caught = |error: rquickjs::Error| describe(&ctx, error);
+        install(&ctx, env, waited.clone()).map_err(caught)?;
+        let module = Module::declare(ctx.clone(), "main.js", env.source).map_err(caught)?;
+        let (module, loaded) = module.eval().map_err(caught)?;
+        loaded.finish::<()>().map_err(caught)?;
+        let exported: Value = module.get("default").map_err(caught)?;
+        let Some(exported) = exported.into_object() else {
+            return Err("main.js has no default export object".into());
+        };
+        if method.is_empty() {
+            // Installing: the module loads and exports both methods.
+            for name in ["items", "open"] {
+                if !exported.get::<_, Value>(name).map_err(caught)?.is_function() {
+                    return Err(format!("main.js exports no {name}()"));
+                }
+            }
+            return Ok(Json::Null);
+        }
+        let function: Value = exported.get(method).map_err(caught)?;
+        let Some(function) = function.into_function() else {
+            return Err(format!("main.js exports no {method}()"));
+        };
+        let mut call_args = Args::new(ctx.clone(), args.len());
+        call_args.this(exported).map_err(caught)?;
+        for arg in args {
+            call_args.push_arg(ctx.json_parse(arg.to_string()).map_err(caught)?).map_err(caught)?;
+        }
+        let mut returned: Value = function.call_arg(call_args).map_err(caught)?;
+        if let Some(promise) = returned.as_promise() {
+            returned = promise.finish::<Value>().map_err(|error| match error {
+                rquickjs::Error::WouldBlock => format!("{method}() never finished: it waits on something that never comes (there are no timers)"),
+                error => caught(error),
+            })?;
+        }
+        match ctx.json_stringify(returned).map_err(caught)? {
+            Some(text) => serde_json::from_str(&text.to_string().map_err(|e| e.to_string())?).map_err(|e| e.to_string()),
+            None => Ok(Json::Null),
+        }
+    });
+    match stopped.get() {
+        Some("wall") => Err(format!("{method}() took longer than {} s", limits.wall.as_secs())),
+        Some(_) => Err(format!("{method}() ran JavaScript for longer than {} s", limits.cpu.as_secs())),
+        None => result,
+    }
+}
+
+/// An error out of QuickJS as text: the thrown value's message and stack.
+fn describe(ctx: &Ctx, error: rquickjs::Error) -> String {
+    if !matches!(error, rquickjs::Error::Exception) {
+        return error.to_string();
+    }
+    let thrown = ctx.catch();
+    if let Some(exception) = thrown.as_exception() {
+        let message = exception.message().unwrap_or_default();
+        return match exception.stack() {
+            Some(stack) if !stack.trim().is_empty() => format!("{message}\n{}", stack.trim_end()),
+            _ => message,
+        };
+    }
+    match ctx.json_stringify(thrown.clone()) {
+        Ok(Some(text)) => text.to_string().unwrap_or_default(),
+        _ => format!("{thrown:?}"),
+    }
+}
+
+fn throw(ctx: &Ctx, message: &str) -> rquickjs::Error {
+    Exception::throw_type(ctx, message)
+}
+
+fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>) -> rquickjs::Result<()> {
+    let host = Object::new(ctx.clone())?;
+    let addon = env.addon.to_string();
+    host.set(
+        "log",
+        Function::new(ctx.clone(), move |level: String, text: String| {
+            let line = format!("[addon {addon}] {text}");
+            match level.as_str() {
+                "info" => println!("{line}"),
+                _ => eprintln!("{} {line}", level.to_uppercase()),
+            }
+        })?,
+    )?;
+
+    let agent = net::sandboxed_agent(env.hosts);
+    let hosts = env.hosts.clone();
+    let bodies: Rc<RefCell<Vec<Option<ureq::Response>>>> = Rc::default();
+    let (fetch_bodies, fetch_waited) = (bodies.clone(), waited.clone());
+    host.set(
+        "fetch",
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, url: String, init: String| -> rquickjs::Result<String> {
+            let init: Json = serde_json::from_str(&init).unwrap_or_default();
+            let method = init["method"].as_str().unwrap_or("GET").to_ascii_uppercase();
+            if !matches!(method.as_str(), "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE") {
+                return Err(throw(&ctx, &format!("fetch: method {method} is not allowed")));
+            }
+            let headers: Vec<(String, String)> = init["headers"]
+                .as_object()
+                .map(|headers| {
+                    headers
+                        .iter()
+                        .map(|(name, value)| (name.clone(), value.as_str().map_or_else(|| value.to_string(), str::to_string)))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let started = Instant::now();
+            let sent = net::request(&agent, &hosts, &method, &url, &headers, init["body"].as_str());
+            fetch_waited.set(fetch_waited.get() + started.elapsed());
+            let (response, final_url) = sent.map_err(|error| throw(&ctx, &format!("fetch: {error}")))?;
+            let mut names = response.headers_names();
+            names.dedup();
+            let headers: Map<String, Json> = names
+                .into_iter()
+                .map(|name| {
+                    let value = response.all(&name).join(", ");
+                    (name.to_ascii_lowercase(), Json::String(value))
+                })
+                .collect();
+            let status = response.status();
+            let mut bodies = fetch_bodies.borrow_mut();
+            bodies.push(Some(response));
+            Ok(serde_json::json!({"status": status, "headers": headers, "url": final_url, "handle": bodies.len() - 1}).to_string())
+        })?,
+    )?;
+    host.set(
+        "body",
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, handle: usize| -> rquickjs::Result<String> {
+            let response = bodies.borrow_mut().get_mut(handle).and_then(Option::take);
+            let Some(response) = response else {
+                return Err(throw(&ctx, "the body was already read"));
+            };
+            let started = Instant::now();
+            let mut bytes = Vec::new();
+            let read = response.into_reader().take(MAX_BODY + 1).read_to_end(&mut bytes);
+            waited.set(waited.get() + started.elapsed());
+            read.map_err(|error| throw(&ctx, &format!("reading the body: {error}")))?;
+            if bytes.len() as u64 > MAX_BODY {
+                return Err(throw(&ctx, &format!("the body is over {} MB", MAX_BODY >> 20)));
+            }
+            Ok(String::from_utf8_lossy(&bytes).into_owned())
+        })?,
+    )?;
+
+    let storage = env.storage.clone();
+    host.set(
+        "storageGet",
+        Function::new(ctx.clone(), move |key: String| storage.get(&key).map(|value| value.to_string()))?,
+    )?;
+    let storage = env.storage.clone();
+    host.set(
+        "storageSet",
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String, value: String| -> rquickjs::Result<()> {
+            let value = serde_json::from_str(&value).map_err(|e| throw(&ctx, &e.to_string()))?;
+            storage.change(&key, Some(value)).map_err(|e| throw(&ctx, &e))
+        })?,
+    )?;
+    let storage = env.storage.clone();
+    host.set(
+        "storageDelete",
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String| -> rquickjs::Result<()> {
+            storage.change(&key, None).map_err(|e| throw(&ctx, &e))
+        })?,
+    )?;
+    ctx.globals().set("__rex", host)?;
+    ctx.eval::<(), _>(PRELUDE)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn run(source: &str, hosts: &[&str], limits: Limits) -> Result<Json, String> {
+        let path = std::env::temp_dir().join(format!("rex-addons-storage-{}-{:?}.json", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_file(&path);
+        let env = Env {
+            addon: "test",
+            source,
+            hosts: &Hosts(hosts.iter().map(|h| h.to_string()).collect()),
+            storage: Arc::new(Storage::open(path)),
+        };
+        call(&env, "items", &[serde_json::json!({"config": {"n": 2}})], limits)
+    }
+
+    const QUICK: Limits = Limits { memory: 16 << 20, cpu: Duration::from_secs(1), wall: Duration::from_secs(10) };
+
+    #[test]
+    fn returns_json_and_reads_config() {
+        let got = run("export default { async items(ctx) { return [{id: 'a', n: ctx.config.n}]; }, open() {} };", &[], QUICK);
+        assert_eq!(got.unwrap(), serde_json::json!([{"id": "a", "n": 2}]));
+    }
+
+    #[test]
+    fn only_the_host_globals_beyond_ecmascript() {
+        let got = run(
+            "export default { items() { return ['setTimeout', 'setInterval', 'require', 'process', 'XMLHttpRequest', 'WebSocket', '__rex', 'os', 'std', 'print',
+               'queueMicrotask', 'atob', 'btoa', 'performance', 'DOMException', 'URL', 'TextEncoder']
+               .filter((name) => typeof globalThis[name] !== 'undefined')
+               .concat([typeof fetch, typeof console.log, typeof storage.get]); }, open() {} };",
+            &[],
+            QUICK,
+        );
+        assert_eq!(got.unwrap(), serde_json::json!(["function", "function", "function"]));
+    }
+
+    #[test]
+    fn memory_is_limited() {
+        let error = run("export default { items() { const a = []; for (;;) a.push('x'.repeat(1 << 20) + a.length); }, open() {} };", &[], QUICK).unwrap_err();
+        assert!(error.contains("out of memory"), "{error}");
+    }
+
+    #[test]
+    fn cpu_is_limited() {
+        let started = Instant::now();
+        let error = run("export default { items() { for (;;) {} }, open() {} };", &[], QUICK).unwrap_err();
+        assert!(error.contains("longer than 1 s"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn fetch_refuses_hosts_not_listed() {
+        let error = run("export default { async items() { await fetch('https://elsewhere.example.org/x'); }, open() {} };", &["example.com"], QUICK).unwrap_err();
+        assert!(error.contains("elsewhere.example.org is not in the addon's hosts"), "{error}");
+        // `*` is any public host, never this device.
+        let error = run("export default { async items() { await fetch('http://127.0.0.1:32400/rex/sources'); }, open() {} };", &["*"], QUICK).unwrap_err();
+        assert!(error.contains("127.0.0.1 is not in the addon's hosts"), "{error}");
+        let error = run("export default { async items() { await fetch('http://localtest.me:32400/'); }, open() {} };", &["*"], QUICK);
+        if let Err(error) = error {
+            // localtest.me resolves to 127.0.0.1 where DNS answers; offline it does not resolve at all.
+            assert!(error.contains("this device") || error.contains("resolve"), "{error}");
+        }
+    }
+
+    #[test]
+    fn no_imports_and_no_timers_to_wait_on() {
+        let error = run("import x from './other.js'; export default { items() { return x; }, open() {} };", &[], QUICK).unwrap_err();
+        assert!(error.contains("other.js"), "{error}");
+        let error = run("export default { items() { return new Promise(() => {}); }, open() {} };", &[], QUICK).unwrap_err();
+        assert!(error.contains("never finished"), "{error}");
+    }
+
+    #[test]
+    fn storage_persists_between_calls() {
+        let path = std::env::temp_dir().join(format!("rex-addons-storage-keep-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let source = "export default { items() { const n = (storage.get('n') ?? 0) + 1; storage.set('n', n); storage.set('gone', 1); storage.delete('gone'); return [n, storage.get('gone')]; }, open() {} };";
+        let call_once = || {
+            let env = Env { addon: "test", source, hosts: &Hosts::default(), storage: Arc::new(Storage::open(path.clone())) };
+            call(&env, "items", &[], QUICK).unwrap()
+        };
+        assert_eq!(call_once(), serde_json::json!([1, null]));
+        assert_eq!(call_once(), serde_json::json!([2, null]));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_thrown_error_names_its_message() {
+        let error = run("export default { items() { throw new Error('catalog down'); }, open() {} };", &[], QUICK).unwrap_err();
+        assert!(error.starts_with("catalog down"), "{error}");
+    }
+}

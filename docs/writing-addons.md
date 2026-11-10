@@ -86,7 +86,7 @@ Plain JavaScript, plus these:
 
 | Global | What it does |
 |---|---|
-| `fetch(url, {method, headers, body})` | Returns `{status, ok, headers, url, text(), json()}`. `headers` is a plain object with lowercase names, `url` is where redirects ended. Only `hosts` are reachable, and every redirect is checked again. `body` is text. The body is read only when you call `text()` or `json()`, so a `Range: bytes=0-0` check costs nothing |
+| `fetch(url, {method, headers, body})` | Returns `{status, ok, headers, url, text(), json(), bytes()}`, `bytes()` giving a `Uint8Array`. `headers` is a plain object with lowercase names, `url` is where redirects ended. Only `hosts` are reachable, and every redirect is checked again. `body` is text, a `Uint8Array` or an `ArrayBuffer`. The body is read only when you call `text()`, `json()` or `bytes()`, once, so a `Range: bytes=0-0` check costs nothing. Fetches run one at a time: `Promise.all` over several waits for each in turn |
 | `ffprobe(url, {headers})` | ffprobe's JSON of a video (`format`, `streams`, `chapters`), for `media_info`. rex-addons reads the link itself, for ffprobe, so the same `hosts` rule applies as for `fetch`; an HLS playlist works too. It fails with a clear message when rex-addons runs without ffprobe. Up to 2 minutes, which don't count as JavaScript time |
 | `console.log`, `console.warn`, `console.error` | Into rex-addons' log, tagged `[addon <id>]` |
 | `storage.get(key)`, `storage.set(key, value)`, `storage.delete(key)` | Your addon's own saved values, any JSON. They survive restarts and updates |

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use rquickjs::function::Args;
-use rquickjs::{Context, Ctx, Exception, Function, Module, Object, Runtime, Value};
+use rquickjs::{Context, Ctx, Exception, Function, Module, Object, Runtime, TypedArray, Value};
 use serde_json::{Map, Value as Json};
 
 use crate::net::{self, Hosts};
@@ -121,22 +121,27 @@ const PRELUDE: &str = r#"
     error: (...args) => host.log("error", show(args)),
   });
   async function fetch(url, init = {}) {
+    let body = init.body;
+    if (body instanceof ArrayBuffer) body = new Uint8Array(body);
+    else if (ArrayBuffer.isView(body)) body = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+    const binary = body instanceof Uint8Array;
     const answer = JSON.parse(host.fetch(String(url), JSON.stringify({
-      method: init.method, headers: init.headers, body: init.body,
-    })));
+      method: init.method, headers: init.headers, body: binary ? undefined : body,
+    }), binary ? body : null));
     let used = false;
-    const read = () => {
+    const read = (bytes) => {
       if (used) throw new TypeError("the body was already read");
       used = true;
-      return host.body(answer.handle);
+      return host.body(answer.handle, bytes);
     };
     return Object.freeze({
       status: answer.status,
       ok: answer.status >= 200 && answer.status < 300,
       headers: Object.freeze(answer.headers),
       url: answer.url,
-      text: async () => read(),
-      json: async () => JSON.parse(read()),
+      text: async () => read(false),
+      json: async () => JSON.parse(read(false)),
+      bytes: async () => read(true),
     });
   }
   async function sleep(ms) {
@@ -345,8 +350,11 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
     let (fetch_bodies, fetch_waited) = (bodies.clone(), waited.clone());
     host.set(
         "fetch",
-        Function::new(ctx.clone(), move |ctx: Ctx<'js>, url: String, init: String| -> rquickjs::Result<String> {
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, url: String, init: String, bytes: Option<TypedArray<'js, u8>>| -> rquickjs::Result<String> {
             let init: Json = serde_json::from_str(&init).unwrap_or_default();
+            // A copy: no JavaScript runs while it's taken.
+            let bytes = bytes.map(|bytes| unsafe { bytes.as_bytes() }.map(<[u8]>::to_vec).unwrap_or_default());
+            let body = bytes.as_deref().or(init["body"].as_str().map(str::as_bytes));
             let method = init["method"].as_str().unwrap_or("GET").to_ascii_uppercase();
             if !matches!(method.as_str(), "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE") {
                 return Err(throw(&ctx, &format!("fetch: method {method} is not allowed")));
@@ -362,7 +370,7 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
                 .unwrap_or_default();
             let started = Instant::now();
             // The response's body is bounded by the same deadline.
-            let sent = net::request_until(&agent, &hosts, &method, &url, &headers, init["body"].as_str(), Some(deadline));
+            let sent = net::request_until(&agent, &hosts, &method, &url, &headers, body, Some(deadline));
             fetch_waited.set(fetch_waited.get() + started.elapsed());
             let (response, final_url) = sent.map_err(|error| throw(&ctx, &out_of_time(deadline, wall, "fetch", error)))?;
             let mut names = response.headers_names();
@@ -390,7 +398,7 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
         "body",
         Function::new(ctx.clone(), {
             let waited = waited.clone();
-            move |ctx: Ctx<'js>, handle: usize| -> rquickjs::Result<String> {
+            move |ctx: Ctx<'js>, handle: usize, binary: bool| -> rquickjs::Result<Value<'js>> {
             let response = bodies.borrow_mut().get_mut(handle).and_then(Option::take);
             let Some(response) = response else {
                 return Err(throw(&ctx, &format!("the body was already read, or closed after {UNREAD} newer unread ones")));
@@ -403,7 +411,11 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
             if bytes.len() as u64 > MAX_BODY {
                 return Err(throw(&ctx, &format!("the body is over {} MB", MAX_BODY >> 20)));
             }
-            Ok(String::from_utf8_lossy(&bytes).into_owned())
+            // Copied into QuickJS's own memory, so the call's memory limit counts it.
+            match binary {
+                true => Ok(TypedArray::<u8>::new_copy(ctx, bytes)?.into_value()),
+                false => Ok(rquickjs::String::from_str(ctx, &String::from_utf8_lossy(&bytes))?.into_value()),
+            }
         }})?,
     )?;
 
@@ -758,6 +770,42 @@ mod tests {
             }
         });
         Some((base, lan.to_string()))
+    }
+
+    #[test]
+    fn binary_bodies_both_ways() {
+        let Some(lan) = lan_ip() else {
+            eprintln!("skipped: no network address");
+            return;
+        };
+        let server = tiny_http::Server::http("0.0.0.0:0").unwrap();
+        let base = format!("http://{lan}:{}", server.server_addr().to_ip().unwrap().port());
+        std::thread::spawn(move || {
+            for mut request in server.incoming_requests() {
+                let mut body = Vec::new();
+                request.as_reader().read_to_end(&mut body).unwrap();
+                let answer = if request.url() == "/bin" { vec![0, 255, 128, 10] } else { body };
+                let _ = request.respond(tiny_http::Response::from_data(answer));
+            }
+        });
+        let got = run(
+            &format!(
+                "export default {{ async items() {{
+                   const echo = async (body) => (await fetch('{base}/echo', {{ method: 'POST', body }}));
+                   const bin = await (await fetch('{base}/bin')).bytes();
+                   const once = await fetch('{base}/bin');
+                   await once.bytes();
+                   let again;
+                   try {{ await once.text(); }} catch (e) {{ again = e.message; }}
+                   const sent = new Uint8Array([1, 2, 250, 0]);
+                   return [bin instanceof Uint8Array, Array.from(bin), again, Array.from(await (await echo(sent.subarray(1))).bytes()),
+                     Array.from(await (await echo(sent.buffer)).bytes()), await (await echo('text \\u00e9')).text()];
+                 }}, open() {{}} }};"
+            ),
+            &[&lan.to_string()],
+            QUICK,
+        );
+        assert_eq!(got.unwrap(), serde_json::json!([true, [0, 255, 128, 10], "the body was already read", [2, 250, 0], [1, 2, 250, 0], "text é"]));
     }
 
     #[test]

@@ -119,7 +119,7 @@ pub fn request(
     method: &str,
     url: &str,
     headers: &[(String, String)],
-    body: Option<&str>,
+    body: Option<&[u8]>,
 ) -> Result<(ureq::Response, String), String> {
     request_until(agent, hosts, method, url, headers, body, None)
 }
@@ -131,7 +131,7 @@ pub fn request_until(
     method: &str,
     url: &str,
     headers: &[(String, String)],
-    body: Option<&str>,
+    body: Option<&[u8]>,
     deadline: Option<Instant>,
 ) -> Result<(ureq::Response, String), String> {
     let mut url = url::Url::parse(url).map_err(|e| format!("not a link: {e}"))?;
@@ -157,7 +157,7 @@ pub fn request_until(
             req = req.set(name, value);
         }
         let sent = match body {
-            Some(text) => req.send_string(text),
+            Some(bytes) => req.send_bytes(bytes),
             None => req.call(),
         };
         let response = match sent {

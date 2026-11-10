@@ -22,6 +22,8 @@ const CHUNK: usize = 200;
 /// Probed items go to rex in batches this big, so they show before the whole sync is done.
 const READY_BATCH: usize = 20;
 const PROBE_WORKERS: usize = 4;
+/// The longest an item whose probe keeps failing waits before it is probed again.
+const PROBE_BACKOFF_MAX: u64 = 7 * 86400;
 /// A repository is fetched again a day after its last fetch that worked...
 const REPO_REFRESH: u64 = 24 * 3600;
 /// ...and, while fetches fail, no more often than this.
@@ -64,6 +66,8 @@ pub struct Addon {
     /// Each pushed path (and each id) to its item id: what `/bytes` reads by.
     pub paths: HashMap<String, String>,
     pub probes: Map<String, Json>,
+    /// Items whose probe failed: `{"count", "at"}`, so they wait before the next try.
+    pub probe_failures: Map<String, Json>,
     pub syncing: bool,
     /// The next sync may remove more than half of the addon's items.
     pub force: bool,
@@ -213,6 +217,7 @@ impl App {
                 addon.source = Arc::new(source.to_string());
                 addon.opened.clear();
                 addon.last_sync = None;
+                clear_probe_failures(self, addon);
                 if repo.is_some() {
                     addon.repo = repo.map(str::to_string);
                 }
@@ -447,13 +452,15 @@ impl App {
 
         // An item the addon probed itself keeps its probe; one this host probed before takes
         // that; the rest are probed below.
-        let mut todo = Vec::new();
+        let (mut todo, mut waiting) = (Vec::new(), 0);
         {
             let mut addons = self.addons.lock().unwrap();
             let addon = addons.get_mut(id).ok_or("removed")?;
             // Added to, not replaced: rex keeps every old title until it takes the snapshot.
             addon.paths.extend(index_of(&items, &addon.deleted));
             addon.probes.retain(|key, _| items.iter().any(|i| id_of(i) == *key));
+            addon.probe_failures.retain(|key, _| items.iter().any(|i| id_of(i) == *key));
+            let interval = addon.manifest.refresh_minutes * 60;
             for (at, item) in items.iter_mut().enumerate() {
                 if let Some(own) = item.get("media_info").filter(|m| m.is_object()).cloned() {
                     attach(item, own);
@@ -465,10 +472,14 @@ impl App {
                         attach(item, probe.clone());
                         addon.paths.insert(path_of(item), id_of(item));
                     }
+                    None if probe_waits(addon.probe_failures.get(&id_of(item)), interval, now()) => waiting += 1,
                     None => todo.push(at),
                 }
             }
             write_index(self, addon);
+        }
+        if waiting > 0 {
+            log(id, &format!("{waiting} items whose probe failed wait before they are probed again; rex holds them"));
         }
 
         if !todo.is_empty() {
@@ -517,6 +528,7 @@ impl App {
                     Ok(probe) => {
                         attach(item, probe.clone());
                         if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
+                            addon.probe_failures.remove(&id_of(item));
                             addon.probes.insert(id_of(item), probe);
                             addon.paths.insert(path_of(item), id_of(item));
                         }
@@ -525,6 +537,10 @@ impl App {
                     Err(error) => {
                         failed += 1;
                         warn(id, &format!("{}: probe failed: {error}", id_of(item)));
+                        if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
+                            let count = addon.probe_failures.get(&id_of(item)).and_then(|f| f["count"].as_u64()).unwrap_or(0) + 1;
+                            addon.probe_failures.insert(id_of(item), json!({"count": count, "at": now()}));
+                        }
                     }
                 }
                 if batch.len() >= READY_BATCH {
@@ -538,6 +554,7 @@ impl App {
         }
         if let Some(addon) = self.addons.lock().unwrap().get(id) {
             let _ = write_atomic(&dir(self, id).join("probes.json"), Json::Object(addon.probes.clone()).to_string().as_bytes());
+            let _ = write_atomic(&dir(self, id).join("probe_failures.json"), Json::Object(addon.probe_failures.clone()).to_string().as_bytes());
             write_index(self, addon);
         }
         if failed > 0 {
@@ -595,6 +612,7 @@ impl App {
         write_atomic(&dir(self, id).join("config.json"), Json::Object(addon.config.clone()).to_string().as_bytes())
             .map_err(|e| e.to_string())?;
         addon.opened.clear();
+        clear_probe_failures(self, addon);
         let masked = addon.manifest.masked(&addon.config);
         let enabled = addon.enabled;
         drop(addons);
@@ -979,6 +997,7 @@ fn load(path: &Path) -> Result<Addon, String> {
         deleted: serde_json::from_value(state["deleted"].clone()).unwrap_or_default(),
         paths,
         probes: object("probes.json"),
+        probe_failures: object("probe_failures.json"),
         syncing: false,
         force: false,
         again: false,
@@ -994,6 +1013,23 @@ fn save_state(app: &App, addon: &Addon) {
         "error": addon.error, "error_kind": addon.error_kind, "deleted": addon.deleted, "repo": addon.repo,
     });
     let _ = write_atomic(&dir(app, &addon.manifest.id).join("state.json"), state.to_string().as_bytes());
+}
+
+/// An item whose probe failed `count` times waits a sync interval, doubled for each failure
+/// after the first, up to PROBE_BACKOFF_MAX.
+fn probe_waits(failure: Option<&Json>, interval: u64, now: u64) -> bool {
+    let Some(failure) = failure else { return false };
+    let count = failure["count"].as_u64().unwrap_or(1).max(1);
+    let wait = interval.saturating_mul(1 << (count - 1).min(32)).min(PROBE_BACKOFF_MAX);
+    now < failure["at"].as_u64().unwrap_or(0).saturating_add(wait)
+}
+
+/// New settings or a new version may well probe what failed before.
+fn clear_probe_failures(app: &App, addon: &mut Addon) {
+    if !addon.probe_failures.is_empty() {
+        addon.probe_failures.clear();
+        let _ = write_atomic(&dir(app, &addon.manifest.id).join("probe_failures.json"), b"{}");
+    }
 }
 
 fn write_index(app: &App, addon: &Addon) {
@@ -1164,6 +1200,52 @@ mod sync_tests {
         }
         // One call for the four good reads, one for the four bad ones.
         assert_eq!(read_json(&dir(&app, "slow").join("storage.json")).unwrap()["calls"], json!(2));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn a_failed_probe_waits_before_it_is_tried_again() {
+        let (rex, _) = stub_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-probe-backoff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        // An ffprobe that counts its runs and always fails.
+        let ffprobe = data.join("ffprobe");
+        std::fs::write(&ffprobe, format!("#!/bin/sh\necho run >> '{}'\nexit 1\n", data.join("runs").display())).unwrap();
+        std::fs::set_permissions(&ffprobe, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let runs = || std::fs::read_to_string(data.join("runs")).unwrap_or_default().lines().count();
+        let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), Some(ffprobe.display().to_string()), None);
+        let source = "export default { items() { return [{id: 'a', path: 'films/a.mp4'}]; }, open() {} };";
+        let manifest = json!({"id": "flaky", "name": "Flaky", "version": "1.0.0", "config": [{"key": "n", "label": "N", "type": "number", "default": 1}]});
+        app.install(&manifest, source, None).unwrap();
+
+        assert!(app.start_sync("flaky", true));
+        wait_idle(&app, "flaky");
+        assert_eq!(runs(), 1);
+        let saved = read_json(&dir(&app, "flaky").join("probe_failures.json")).unwrap();
+        assert_eq!(saved["a"]["count"], 1);
+        // The next sync, a moment later, leaves it held rather than probing it again.
+        assert!(app.start_sync("flaky", true));
+        assert_eq!(wait_idle(&app, "flaky")["held"], 1);
+        assert_eq!(runs(), 1);
+
+        // New settings clear the wait.
+        app.set_config("flaky", &json!({"n": 2})).unwrap();
+        for _ in 0..200 {
+            if runs() == 2 {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        wait_idle(&app, "flaky");
+        assert_eq!(runs(), 2);
+
+        // The wait doubles per failure, up to a week.
+        let failed = |count: u64| json!({"count": count, "at": 1000});
+        assert!(probe_waits(Some(&failed(1)), 60, 1059) && !probe_waits(Some(&failed(1)), 60, 1060));
+        assert!(probe_waits(Some(&failed(3)), 60, 1239) && !probe_waits(Some(&failed(3)), 60, 1240));
+        assert!(!probe_waits(Some(&failed(90)), 21600, 1000 + PROBE_BACKOFF_MAX));
+        assert!(!probe_waits(None, 60, 0));
         let _ = std::fs::remove_dir_all(&data);
     }
 

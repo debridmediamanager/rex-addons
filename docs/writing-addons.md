@@ -29,7 +29,7 @@ You write plain JavaScript (an ES module). There's no npm and no build step.
 | `name`, `description` | What people see in the app |
 | `version` | Numbers and dots. Raise it with every change: people see an update when the version in your repository is higher than theirs |
 | `hosts` | The websites `fetch()` may reach, and that `open()` links may point at: `example.com` exactly, `*.example.com` for anything under it, or `*` for any public website. Addresses on the device or the home network are never reachable through `*` |
-| `config` | The settings the app shows. Each has a `key`, a `label`, a `type` (`text`, `secret`, `bool`, `number` or `list`, a list of text), and optionally a `default` and `required: true`. A `secret` is shown masked |
+| `config` | The settings the app shows. Each has a `key`, a `label`, a `type` (`text`, `secret`, `bool`, `number` or `list`, a list of text), and optionally a `default` and `required: true`. A `secret` is shown masked; a `list` with `secret: true` shows only each link's website, for links that carry a key |
 | `refresh_minutes` | How often `items()` runs. Default 360, at least 5 |
 | `host` | Optional: the lowest rex-addons version your addon needs, numbers and dots, such as `"0.2"`. From 0.2 on, an older rex-addons refuses to install it and greys it out in a repository's list (0.1 doesn't know the field). Using `sleep`, `atob`, `btoa`, `URL`, `URLSearchParams`, `hash`, `hmac`, `bytes()` or a binary `body` needs `"host": "0.2"` |
 

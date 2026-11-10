@@ -707,6 +707,7 @@ impl App {
                     "installed_version": here.map(|(version, _, _)| version),
                     "installed_hosts": here.map(|(_, _, hosts)| hosts),
                     "installed_repo": here.and_then(|(_, from, _)| from.as_ref()),
+                    "compatible": addon.compatible(),
                     "update_available": ours && here.is_some_and(|(version, _, _)| newer(&addon.version, version)),
                 })
             })
@@ -1431,6 +1432,27 @@ mod sync_tests {
         assert!(app.due_repos().is_empty());
         app.repos.lock().unwrap().attempted.insert("stale".into(), now() - 3601);
         assert_eq!(app.due_repos(), ["stale"]);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn an_addon_needing_a_newer_host_is_listed_incompatible_and_refused() {
+        let (rex, _) = stub_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-host-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+        write_addon(&app.repo_dir("one"), "old", "1.0.0");
+        let dir = app.repo_dir("one").join("addons/new");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("manifest.json"), json!({"id": "new", "name": "new", "version": "1.0.0", "host": "99"}).to_string()).unwrap();
+        std::fs::write(dir.join("main.js"), "export default { items() { return []; }, open() {} };").unwrap();
+        add_local_repo(&app, "one");
+        let listed = app.repo_addons_json("one").unwrap();
+        assert_eq!((listed[0]["id"].as_str(), &listed[0]["compatible"]), (Some("new"), &json!(false)));
+        assert_eq!((listed[1]["id"].as_str(), &listed[1]["compatible"]), (Some("old"), &json!(true)));
+        let (status, error) = app.install_from_repo("one", "new").unwrap_err();
+        assert_eq!(status, 400, "{error}");
+        assert!(error.contains("needs rex-addons 99 or newer"), "{error}");
         let _ = std::fs::remove_dir_all(&data);
     }
 

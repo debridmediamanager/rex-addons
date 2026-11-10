@@ -122,7 +122,7 @@ Every repository added, as a list:
   "name": "rex-addons", "description": "...", "commit": "1dd7a645...", "last_fetch": 1794330057, "error": null,
   "addons": [{"id": "internet-archive", "name": "Internet Archive", "version": "1.1.0", "description": "...",
               "hosts": ["archive.org", "*.archive.org"],
-              "installed_version": "1.0.0", "installed_hosts": ["archive.org"], "installed_repo": null,
+              "installed_version": "1.0.0", "installed_hosts": ["archive.org"], "installed_repo": null, "compatible": true,
               "update_available": true}]}]
 ```
 
@@ -135,6 +135,7 @@ Every repository added, as a list:
 | `addons[].installed_version` | The version installed of that addon id, from wherever, or `null` |
 | `addons[].installed_hosts` | The hosts the installed one reaches, or `null` when none is installed. Compare with `hosts` before installing: an update may widen them |
 | `addons[].installed_repo` | The repository the installed one came from, or `null` when none is installed or it is bundled. Installing from another repository than this is `409`; installing over a bundled one moves it to this repository, which the app should confirm |
+| `addons[].compatible` | `false` when the addon's manifest names a `host` newer than this rex-addons: installing it answers `400` with the reason |
 | `addons[].update_available` | Installing it now would update it: it's installed from this repository (or bundled) and this version is higher |
 
 ### `POST /api/repos`

@@ -202,6 +202,7 @@ impl App {
     /// `repo` is where it came from; None (bundled) keeps what an installed one came from.
     pub fn install(&self, raw: &Json, source: &str, repo: Option<&str>) -> Result<String, String> {
         let manifest = Manifest::parse(raw)?;
+        manifest.check_host()?;
         let storage = Arc::new(Storage::open(PathBuf::from("/dev/null")));
         let env = Env { addon: &manifest.id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone() };
         sandbox::call(&env, "", &[], sandbox::OPEN).map_err(|error| format!("main.js: {error}"))?;

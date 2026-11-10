@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde_json::{json, Value as Json};
 
-use crate::addons::{read_json, Manifest};
+use crate::addons::{host_fits, read_json, Manifest};
 
 /// How deep under the repository's top an addon's folder may be: `addons/<id>/` is 2.
 const MAX_DEPTH: usize = 3;
@@ -19,6 +19,8 @@ pub struct RepoAddon {
     pub hosts: Vec<String>,
     /// Its folder, relative to the repository's top.
     pub dir: String,
+    /// The lowest rex-addons it needs, if it says.
+    pub host: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +72,7 @@ fn walk(root: &Path, dir: &Path, depth: usize, found: &mut Vec<RepoAddon>, probl
                 description: m.description,
                 hosts: m.hosts.0,
                 dir: relative,
+                host: m.host,
             }),
             Err(error) => problems.push(format!("{relative}: {error}")),
         }
@@ -102,8 +105,16 @@ pub fn name_from_url(url: &str) -> String {
 }
 
 impl RepoAddon {
+    /// Whether this rex-addons can install it; worked out anew, so an upgrade counts at once.
+    pub fn compatible(&self) -> bool {
+        host_fits(self.host.as_deref())
+    }
+
     pub fn to_json(&self) -> Json {
-        json!({"id": self.id, "name": self.name, "version": self.version, "description": self.description, "hosts": self.hosts, "dir": self.dir})
+        json!({
+            "id": self.id, "name": self.name, "version": self.version, "description": self.description, "hosts": self.hosts, "dir": self.dir,
+            "host": self.host, "compatible": self.compatible(),
+        })
     }
 
     fn from_json(value: &Json) -> Option<RepoAddon> {
@@ -115,6 +126,7 @@ impl RepoAddon {
             description: text("description").unwrap_or_default(),
             hosts: serde_json::from_value(value["hosts"].clone()).unwrap_or_default(),
             dir: text("dir")?,
+            host: text("host"),
         })
     }
 }
@@ -184,6 +196,25 @@ mod tests {
         assert_eq!(describe(&root, "https://codeberg.org/me/my-addons.git#dev"), ("my-addons".into(), String::new()));
         std::fs::write(root.join("repository.json"), json!({"name": "My addons", "description": "Mine."}).to_string()).unwrap();
         assert_eq!(describe(&root, "https://codeberg.org/me/my-addons"), ("My addons".into(), "Mine.".into()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn compatible_when_this_host_is_new_enough() {
+        let root = std::env::temp_dir().join(format!("rex-addons-host-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (dir, host) in [("plain", Json::Null), ("fits", json!("0.2")), ("later", json!("9.0"))] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join("manifest.json"), json!({"id": dir, "name": dir, "version": "1", "host": host}).to_string()).unwrap();
+            std::fs::write(root.join(dir).join("main.js"), "").unwrap();
+        }
+        let (found, problems) = discover(&root);
+        assert!(problems.is_empty(), "{problems:?}");
+        let listed: Vec<(String, Json)> = found.iter().map(|a| (a.id.clone(), a.to_json()["compatible"].clone())).collect();
+        assert_eq!(listed, [("fits".into(), json!(true)), ("later".into(), json!(false)), ("plain".into(), json!(true))]);
+        // Kept in repos.json and read back.
+        let again: Vec<bool> = found.iter().map(|a| RepoAddon::from_json(&a.to_json()).unwrap().compatible()).collect();
+        assert_eq!(again, [true, false, true]);
         let _ = std::fs::remove_dir_all(&root);
     }
 

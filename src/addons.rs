@@ -28,6 +28,8 @@ pub struct Manifest {
     pub hosts: Hosts,
     pub config: Vec<Field>,
     pub refresh_minutes: u64,
+    /// The lowest rex-addons it needs, if it says.
+    pub host: Option<String>,
     pub raw: Json,
 }
 
@@ -48,14 +50,26 @@ fn fits(kind: &str, value: &Json) -> bool {
     }
 }
 
+fn dotted(version: &str) -> bool {
+    !version.is_empty() && version.split('.').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// Whether this rex-addons is `host` or newer.
+pub fn host_fits(host: Option<&str>) -> bool {
+    host.is_none_or(|host| !newer(host, env!("CARGO_PKG_VERSION")))
+}
+
 impl Manifest {
     pub fn parse(raw: &Json) -> Result<Manifest, String> {
         let text = |key: &str| raw.get(key).and_then(Json::as_str).map(str::to_string);
         let id = text("id").filter(|id| valid_id(id)).ok_or("manifest: id must be lowercase letters, digits and -, at most 64")?;
         let name = text("name").filter(|name| !name.trim().is_empty()).ok_or("manifest: name is missing")?;
-        let version = text("version")
-            .filter(|v| !v.is_empty() && v.split('.').all(|part| !part.is_empty() && part.chars().all(|c| c.is_ascii_digit())))
-            .ok_or("manifest: version must be numbers separated by dots, such as 1.2.0")?;
+        let version = text("version").filter(|v| dotted(v)).ok_or("manifest: version must be numbers separated by dots, such as 1.2.0")?;
+        let host = match raw.get("host") {
+            None | Some(Json::Null) => None,
+            Some(Json::String(host)) if dotted(host) => Some(host.clone()),
+            Some(_) => return Err("manifest: host must be numbers separated by dots, such as 0.2".into()),
+        };
         let description = match raw.get("description") {
             None | Some(Json::Null) => String::new(),
             Some(Json::String(text)) => text.clone(),
@@ -107,7 +121,15 @@ impl Manifest {
             None | Some(Json::Null) => 360,
             Some(value) => value.as_u64().filter(|m| *m >= 5).ok_or("manifest: refresh_minutes must be a whole number, 5 or more")?,
         };
-        Ok(Manifest { id, name, version, description, hosts: Hosts(hosts), config, refresh_minutes, raw: raw.clone() })
+        Ok(Manifest { id, name, version, description, hosts: Hosts(hosts), config, refresh_minutes, host, raw: raw.clone() })
+    }
+
+    /// Installing refuses an addon that needs a newer rex-addons.
+    pub fn check_host(&self) -> Result<(), String> {
+        match &self.host {
+            Some(host) if !host_fits(Some(host)) => Err(format!("this addon needs rex-addons {host} or newer")),
+            _ => Ok(()),
+        }
     }
 
     /// The settings an addon is called with: each field's default, then what was saved.
@@ -240,6 +262,8 @@ mod tests {
             (json!({"id": "a", "name": "x", "version": "1", "config": [{"key": "k", "type": "color"}]}), "type"),
             (json!({"id": "a", "name": "x", "version": "1", "config": [{"key": "k", "type": "number", "default": "5"}]}), "default"),
             (json!({"id": "a", "name": "x", "version": "1", "refresh_minutes": 1}), "refresh_minutes"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "v0.2"}), "host"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": 2}), "host"),
         ] {
             let error = Manifest::parse(&bad).unwrap_err();
             assert!(error.contains(says), "{bad}: {error}");
@@ -285,6 +309,20 @@ mod tests {
         // A redacted entry nothing saved stands for is taken as typed.
         let third = m.apply(&saved, &json!({"addons": ["https://z.example/********"]})).unwrap();
         assert_eq!(third["addons"], json!(["https://z.example/********"]));
+    }
+
+    #[test]
+    fn host_version() {
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.2.0");
+        let needing = |host: &str| Manifest::parse(&json!({"id": "a", "name": "x", "version": "1", "host": host})).unwrap();
+        for fits in ["0.2", "0.2.0", "0.1.9", "0"] {
+            assert_eq!(needing(fits).check_host(), Ok(()), "{fits}");
+        }
+        for too_new in ["0.2.1", "0.3", "1"] {
+            assert_eq!(needing(too_new).check_host().unwrap_err(), format!("this addon needs rex-addons {too_new} or newer"));
+        }
+        assert_eq!(manifest().host, None);
+        assert_eq!(manifest().check_host(), Ok(()));
     }
 
     #[test]

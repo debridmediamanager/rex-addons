@@ -90,6 +90,7 @@ Plain JavaScript, plus these:
 | `ffprobe(url, {headers})` | ffprobe's JSON of a video (`format`, `streams`, `chapters`), for `media_info`. rex-addons reads the link itself, for ffprobe, so the same `hosts` rule applies as for `fetch`; an HLS playlist works too. It fails with a clear message when rex-addons runs without ffprobe. Up to 2 minutes, which don't count as JavaScript time |
 | `console.log`, `console.warn`, `console.error` | Into rex-addons' log, tagged `[addon <id>]` |
 | `storage.get(key)`, `storage.set(key, value)`, `storage.delete(key)` | Your addon's own saved values, any JSON. They survive restarts and updates |
+| `atob(text)`, `btoa(text)` | Base64, as in browsers: text whose characters are bytes (0 to 255) |
 | `await sleep(ms)` | Waits, for backing off when a website answers 429. The wait doesn't count as JavaScript time, and a sleep past the end of the call fails at once |
 
 There's nothing else: no timers (`setTimeout`, use `sleep`), no `require` or `import`, no `URL`, no

@@ -106,8 +106,8 @@ const PRELUDE: &str = r#"
 (() => {
   const host = globalThis.__rex;
   delete globalThis.__rex;
-  // QuickJS-NG's web extras: an addon gets plain ECMAScript and the four globals below only.
-  for (const name of ["queueMicrotask", "btoa", "atob", "performance", "DOMException"]) delete globalThis[name];
+  // QuickJS-NG's web extras: an addon gets plain ECMAScript, atob and btoa, and the globals below only.
+  for (const name of ["queueMicrotask", "performance", "DOMException"]) delete globalThis[name];
   const show = (args) => args.map((arg) => {
     if (typeof arg === "string") return arg;
     if (arg instanceof Error) return arg.stack ? `${arg}\n${arg.stack}` : String(arg);
@@ -425,13 +425,30 @@ mod tests {
     fn only_the_host_globals_beyond_ecmascript() {
         let got = run(
             "export default { items() { return ['setTimeout', 'setInterval', 'require', 'process', 'XMLHttpRequest', 'WebSocket', '__rex', 'os', 'std', 'print',
-               'queueMicrotask', 'atob', 'btoa', 'performance', 'DOMException', 'URL', 'TextEncoder']
+               'queueMicrotask', 'performance', 'DOMException', 'URL', 'TextEncoder']
                .filter((name) => typeof globalThis[name] !== 'undefined')
-               .concat([typeof fetch, typeof console.log, typeof storage.get, typeof ffprobe, typeof sleep]); }, open() {} };",
+               .concat([typeof fetch, typeof console.log, typeof storage.get, typeof ffprobe, typeof sleep, typeof atob, typeof btoa]); }, open() {} };",
             &[],
             QUICK,
         );
-        assert_eq!(got.unwrap(), serde_json::json!(["function", "function", "function", "function", "function"]));
+        assert_eq!(got.unwrap(), serde_json::json!(["function", "function", "function", "function", "function", "function", "function"]));
+    }
+
+    #[test]
+    fn base64_as_browsers_do_it() {
+        let got = run(
+            "export default { items() {
+               const thrown = (f) => { try { f(); return 'no error'; } catch (e) { return e.name; } };
+               return [btoa(''), btoa('hello'), btoa('\\xff\\xfe\\x00'), atob('aGVsbG8='), atob(' aGVs bG8\\n'), atob('aGVsbG8'), atob('//4A') === '\\xff\\xfe\\x00',
+                 thrown(() => btoa('\\u20ac')), thrown(() => atob('a')), thrown(() => atob('a*bc')), thrown(() => atob('aGVsbG8=='))];
+             }, open() {} };",
+            &[],
+            QUICK,
+        );
+        assert_eq!(
+            got.unwrap(),
+            serde_json::json!(["", "aGVsbG8=", "//4A", "hello", "hello", "hello", true, "InvalidCharacterError", "InvalidCharacterError", "InvalidCharacterError", "InvalidCharacterError"])
+        );
     }
 
     #[test]

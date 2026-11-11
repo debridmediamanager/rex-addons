@@ -232,7 +232,7 @@ macro_rules! rig {
 fn a_code_shows_until_entered_then_the_account_is_kept_and_synced() {
     let rig = rig!("sign-flow");
     // Not signed in yet: nothing is asked of items(), and no sync is due.
-    assert_eq!(rig.status()["sign_in"], json!({"label": "Sign in to Example", "account": null, "pending": null, "error": null}));
+    assert_eq!(rig.status()["sign_in"], json!({"label": "Sign in to Example", "kind": "code", "account": null, "pending": null, "error": null}));
     let started = Instant::now();
     let answer = rig.sign_in();
     let pending = &answer["sign_in"]["pending"];
@@ -248,7 +248,7 @@ fn a_code_shows_until_entered_then_the_account_is_kept_and_synced() {
     assert_eq!(rig.status()["sign_in"]["pending"]["code"], "WDJB-MJH1");
     rig.approve("dev-secret-1", true);
     let status = rig.until("the sign-in", |s| s["sign_in"]["account"].is_string());
-    assert_eq!(status["sign_in"], json!({"label": "Sign in to Example", "account": "ben@example.com", "pending": null, "error": null}));
+    assert_eq!(status["sign_in"], json!({"label": "Sign in to Example", "kind": "code", "account": "ben@example.com", "pending": null, "error": null}));
     // The website asked for 1 s between polls; the host waits 2.
     let site = rig.site.lock().unwrap();
     let first = site.hits.iter().find(|(hit, _)| hit.starts_with("POST /token")).unwrap().1;
@@ -348,7 +348,7 @@ fn signing_out_forgets_the_account_and_stops_a_pending_sign_in() {
     let snapshots = rig.snapshots();
     let (status, answer) = rig.call("DELETE", "/api/addons/sign-out/sign-in");
     assert_eq!(status, 200);
-    assert_eq!(answer["sign_in"], json!({"label": "Sign in to Example", "account": null, "pending": null, "error": null}));
+    assert_eq!(answer["sign_in"], json!({"label": "Sign in to Example", "kind": "code", "account": null, "pending": null, "error": null}));
     // The addon's signOut() ran and forgot its token; its titles stayed.
     assert_eq!(rig.hits("POST /revoke"), ["POST /revoke token=tok-dev-secret-1"]);
     assert_eq!(read_json(&rig.app.data.join("addons/sign-out/storage.json")).unwrap().get("token"), None);

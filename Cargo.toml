@@ -1,6 +1,6 @@
 [package]
 name = "rex-addons"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "Runs JavaScript addons in QuickJS sandboxes and feeds what they return to rex"
 license = "MIT"
@@ -16,6 +16,24 @@ percent-encoding = "2"
 # Already ureq's and rustls': a repository's pack is inflated and its objects hashed with them.
 flate2 = "1"
 ring = "0.17"
+# Spotify sign-in by Connect pairing and the session a spotify addon lists with (src/spotify.rs).
+# Pinned to the master revision that paired and signed in on 2026-11-11 (the 0.8.0 release is
+# older). Pure-Rust TLS, so it cross-compiles for Android; no playback or discovery crates.
+librespot-core = { git = "https://github.com/librespot-org/librespot", rev = "15e02e86c72d96dd39d548e3749f00abe39ffdde", default-features = false, features = ["rustls-tls-webpki-roots"] }
+# Already librespot-core's: its runtime, requests and key exchange; the pairing's mDNS
+# responder (pure Rust, librespot-discovery's), and the cipher of the credentials it is sent.
+tokio = { version = "1", features = ["rt-multi-thread", "time"] }
+http = "1"
+libmdns = "=0.10.1"
+rand = "0.9"
+base64 = "0.22"
+aes = "0.8"
+ctr = "0.9"
+
+[dev-dependencies]
+# The reference the pairing endpoint is tested against (src/spotify.rs).
+librespot-discovery = { git = "https://github.com/librespot-org/librespot", rev = "15e02e86c72d96dd39d548e3749f00abe39ffdde", default-features = false, features = ["with-libmdns", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false }
 
 [features]
 # rquickjs ships no prebuilt bindings for Android: build-android.sh turns this on so they are

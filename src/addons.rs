@@ -19,6 +19,22 @@ pub struct Field {
     pub secret: bool,
 }
 
+/// How an addon signs in to the person's account.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SignIn {
+    /// What the app's button says.
+    pub label: String,
+    /// `code`: the addon's own `signIn()`, a code typed on another device. `spotify`: the host
+    /// pairs with the Spotify app over the local network and keeps the session itself.
+    pub kind: String,
+}
+
+impl SignIn {
+    pub fn spotify(&self) -> bool {
+        self.kind == "spotify"
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Manifest {
     pub id: String,
@@ -30,8 +46,8 @@ pub struct Manifest {
     pub refresh_minutes: u64,
     /// The lowest rex-addons it needs, if it says.
     pub host: Option<String>,
-    /// What its sign-in button says, when it needs the person's account on a website.
-    pub sign_in: Option<String>,
+    /// When it needs the person's account on a website.
+    pub sign_in: Option<SignIn>,
     pub raw: Json,
 }
 
@@ -125,13 +141,21 @@ impl Manifest {
         };
         let sign_in = match raw.get("sign_in") {
             None | Some(Json::Null) => None,
-            Some(Json::Object(sign_in)) => Some(match sign_in.get("label") {
-                None | Some(Json::Null) => format!("Sign in to {name}"),
-                Some(Json::String(label)) if !label.trim().is_empty() => label.clone(),
-                Some(_) => return Err("manifest: sign_in.label must be text".into()),
+            Some(Json::Object(sign_in)) => Some(SignIn {
+                label: match sign_in.get("label") {
+                    None | Some(Json::Null) => format!("Sign in to {name}"),
+                    Some(Json::String(label)) if !label.trim().is_empty() => label.clone(),
+                    Some(_) => return Err("manifest: sign_in.label must be text".into()),
+                },
+                kind: match sign_in.get("kind") {
+                    None | Some(Json::Null) => "code".into(),
+                    Some(Json::String(kind)) if kind == "code" || kind == "spotify" => kind.clone(),
+                    Some(_) => return Err("manifest: sign_in.kind must be \"code\" or \"spotify\"".into()),
+                },
             }),
             Some(_) => return Err("manifest: sign_in must be an object, such as {\"label\": \"Sign in to Example\"}".into()),
         };
+
         // rex's own `directories` (docs/feed-api.md), passed on as they are when the addon registers.
         if raw.get("directories").is_some_and(|d| !d.is_null() && !d.is_array()) {
             return Err("manifest: directories must be a list, such as [{\"name\": \"youtube\", \"shows\": \"YouTube\"}]".into());
@@ -139,6 +163,10 @@ impl Manifest {
         // An older rex-addons would install it and never sign it in.
         if sign_in.is_some() && host.as_deref().is_none_or(|host| newer("0.3", host)) {
             return Err("manifest: sign_in needs \"host\": \"0.3\" or newer".into());
+        }
+        // An older rex-addons would install it and never sign it in.
+        if sign_in.as_ref().is_some_and(SignIn::spotify) && host.as_deref().is_none_or(|host| newer("0.5", host)) {
+            return Err("manifest: sign_in kind spotify needs \"host\": \"0.5\" or newer".into());
         }
         Ok(Manifest { id, name, version, description, hosts: Hosts(hosts), config, refresh_minutes, host, sign_in, raw: raw.clone() })
     }
@@ -314,14 +342,18 @@ mod tests {
             (json!({"id": "a", "name": "x", "version": "1", "host": "0.3", "sign_in": {"label": 5}}), "sign_in.label"),
             (json!({"id": "a", "name": "x", "version": "1", "sign_in": {}}), "\"host\": \"0.3\""),
             (json!({"id": "a", "name": "x", "version": "1", "host": "0.2.9", "sign_in": {}}), "\"host\": \"0.3\""),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "sign_in": {"kind": "password"}}), "sign_in.kind"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.4", "sign_in": {"kind": "spotify"}}), "\"host\": \"0.5\""),
         ] {
             let error = Manifest::parse(&bad).unwrap_err();
             assert!(error.contains(says), "{bad}: {error}");
         }
         assert_eq!(manifest().refresh_minutes, 360);
-        let signing = |sign_in: Json| Manifest::parse(&json!({"id": "a", "name": "Example", "version": "1", "host": "0.3", "sign_in": sign_in})).unwrap().sign_in;
-        assert_eq!(signing(json!({})).as_deref(), Some("Sign in to Example"));
-        assert_eq!(signing(json!({"label": "Use your Google account"})).as_deref(), Some("Use your Google account"));
+        let signing = |sign_in: Json| Manifest::parse(&json!({"id": "a", "name": "Example", "version": "1", "host": "0.5", "sign_in": sign_in})).unwrap().sign_in;
+        let sign_in = |label: &str, kind: &str| Some(SignIn { label: label.into(), kind: kind.into() });
+        assert_eq!(signing(json!({})), sign_in("Sign in to Example", "code"));
+        assert_eq!(signing(json!({"label": "Use your Google account"})), sign_in("Use your Google account", "code"));
+        assert_eq!(signing(json!({"kind": "spotify", "label": "Connect Spotify"})), sign_in("Connect Spotify", "spotify"));
         assert_eq!(signing(Json::Null), None);
         assert_eq!(manifest().sign_in, None);
     }
@@ -392,12 +424,12 @@ mod tests {
 
     #[test]
     fn host_version() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.4.0");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.5.0");
         let needing = |host: &str| Manifest::parse(&json!({"id": "a", "name": "x", "version": "1", "host": host})).unwrap();
-        for fits in ["0.4", "0.4.0", "0.3", "0.2", "0.1.9", "0"] {
+        for fits in ["0.5", "0.5.0", "0.4", "0.3", "0.2", "0.1.9", "0"] {
             assert_eq!(needing(fits).check_host(), Ok(()), "{fits}");
         }
-        for too_new in ["0.4.1", "0.5", "1"] {
+        for too_new in ["0.5.1", "0.6", "1"] {
             assert_eq!(needing(too_new).check_host().unwrap_err(), format!("this addon needs rex-addons {too_new} or newer"));
         }
         assert_eq!(manifest().host, None);

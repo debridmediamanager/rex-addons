@@ -73,6 +73,7 @@ impl Fixture {
             hosts: &self.hosts,
             storage: self.storage.clone(),
             prober: self.prober.clone(),
+            spotify: None,
         };
         sandbox::call(&env, method, args, sandbox::ITEMS)
     }
@@ -160,7 +161,7 @@ fn unread_fetches_are_closed_past_the_cap() {
          }}, open() {{}} }};",
         fx.base
     );
-    let env = Env { addon: "t", source: &source, hosts: &fx.hosts, storage: fx.storage.clone(), prober: fx.prober.clone() };
+    let env = Env { addon: "t", source: &source, hosts: &fx.hosts, storage: fx.storage.clone(), prober: fx.prober.clone(), spotify: None };
     let got = sandbox::call(&env, "items", &[], sandbox::ITEMS).unwrap();
     assert_eq!(got, json!(["the body was already read, or closed after 32 newer unread ones", "Cinemeta"]));
 }
@@ -236,6 +237,7 @@ fn ffprobe_reads_through_the_relay() {
         hosts: &Hosts(vec![lan]),
         storage: Arc::new(Storage::open(root.join("storage.json"))),
         prober: app.prober.clone(),
+        spotify: None,
     };
     let config = json!({"config": {"film": format!("{base}/clip.mp4"), "live": format!("{base}/hls/index.m3u8")}});
     let got = sandbox::call(&env, "items", &[config], sandbox::ITEMS).unwrap();

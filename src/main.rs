@@ -12,6 +12,9 @@ mod sandbox;
 mod server;
 #[cfg(test)]
 mod sign_in_tests;
+mod spotify;
+#[cfg(test)]
+mod spotify_tests;
 #[cfg(test)]
 mod youtube_tests;
 
@@ -19,7 +22,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const USAGE: &str = "rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [--ffprobe <path>] [--bundled <dir>] [--default-repo <url>]...
+const USAGE: &str = "rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [--ffprobe <path>] [--bundled <dir>] [--default-repo <url>]... [--device-name <name>]
 
   --listen   where the management API and the byte paths rex reads answer (default 127.0.0.1:32410)
   --rex      rex's address (default http://127.0.0.1:32400)
@@ -27,6 +30,7 @@ const USAGE: &str = "rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:
   --ffprobe  the ffprobe that checks each item once; without it rex holds every item unshown
   --bundled  addons installed on the first start and updated when a newer version is bundled
   --default-repo  an addon repository added once, the first time it is given; repeatable
+  --device-name   the name this device shows in the Spotify app while a Spotify addon pairs (default rex)
 
   REX_ADDONS_TOKEN  when set, every /api/ request must carry Authorization: Bearer <it>";
 
@@ -35,6 +39,7 @@ fn main() {
     let mut rex = "http://127.0.0.1:32400".to_string();
     let mut data = PathBuf::from("rex-addons-data");
     let (mut ffprobe, mut bundled, mut defaults) = (None, None, Vec::new());
+    let mut device_name = "rex".to_string();
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
         if matches!(flag.as_str(), "-h" | "--help") {
@@ -61,6 +66,7 @@ fn main() {
             "--ffprobe" => ffprobe = Some(value),
             "--bundled" => bundled = Some(PathBuf::from(value)),
             "--default-repo" => defaults.push(value),
+            "--device-name" if !value.trim().is_empty() => device_name = value,
             _ => {
                 eprintln!("unknown flag {flag}\n\n{USAGE}");
                 std::process::exit(2);
@@ -75,7 +81,7 @@ fn main() {
         eprintln!("cannot listen on {listen}: {e}");
         std::process::exit(1)
     });
-    let app = app::App::new(data, rex, listen, ffprobe, bundled.as_deref());
+    let app = app::App::with_spotify(data, rex, listen, ffprobe, bundled.as_deref(), device_name, std::sync::Arc::new(spotify::Librespot::default()));
     app::log("host", &format!("rex-addons {} on {listen}, rex at {}, {} addons", env!("CARGO_PKG_VERSION"), app.rex, app.addons.lock().unwrap().len()));
     app.start_repos(&defaults);
     if app.prober.bin.is_none() {

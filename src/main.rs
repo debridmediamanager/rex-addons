@@ -14,6 +14,8 @@ mod server;
 mod sign_in_tests;
 mod spotify;
 #[cfg(test)]
+mod spotify_addon_tests;
+#[cfg(test)]
 mod spotify_tests;
 #[cfg(test)]
 mod youtube_tests;

@@ -31,7 +31,8 @@ You write plain JavaScript (an ES module). There's no npm and no build step.
 | `hosts` | The websites `fetch()` may reach, and that `open()` links may point at: `example.com` exactly, `*.example.com` for anything under it, or `*` for any public website. Addresses on the device or the home network are never reachable through `*` |
 | `config` | The settings the app shows. Each has a `key`, a `label`, a `type` (`text`, `secret`, `bool`, `number` or `list`, a list of text), and optionally a `default` and `required: true`. A `secret` is shown masked; a `list` with `secret: true` shows only each link's website, for links that carry a key |
 | `refresh_minutes` | How often `items()` runs. Default 360, at least 5 |
-| `host` | Optional: the lowest rex-addons version your addon needs, numbers and dots, such as `"0.2"`. From 0.2 on, an older rex-addons refuses to install it and greys it out in a repository's list (0.1 doesn't know the field). Using `sleep`, `atob`, `btoa`, `URL`, `URLSearchParams`, `hash`, `hmac`, `bytes()` or a binary `body` needs `"host": "0.2"` |
+| `host` | Optional: the lowest rex-addons version your addon needs, numbers and dots, such as `"0.2"`. From 0.2 on, an older rex-addons refuses to install it and greys it out in a repository's list (0.1 doesn't know the field). Using `sleep`, `atob`, `btoa`, `URL`, `URLSearchParams`, `hash`, `hmac`, `bytes()` or a binary `body` needs `"host": "0.2"`; `sign_in` needs `"host": "0.3"` |
+| `sign_in` | Optional: `{"label": "Sign in to Example"}` for an addon that needs the person's account on a website ([below](#signing-in-with-a-code)). `label` is what the app's button says, `Sign in to <name>` without it |
 
 ## main.js
 
@@ -107,6 +108,8 @@ Limits, per call:
 | Memory | 64 MB |
 | JavaScript time | 30 s for `items()`, 10 s for `open()`. Time spent waiting on `fetch`, `ffprobe` or `sleep` doesn't count |
 | Whole call | 20 minutes for `items()`, 90 s for `open()`. A `fetch` or body read still waiting then fails |
+
+`signIn()`, `signInPoll()` and `signOut()` get `open()`'s limits.
 | A fetched body | 16 MB |
 | `storage` | 16 MB in all, written to disk when the call ends |
 
@@ -160,6 +163,116 @@ export default {
 function link(film) {
   return `https://archive.org/download/${film.item}/${film.file}`;
 }
+```
+
+## Signing in with a code
+
+For an addon that needs the person's account on a website. rex-addons runs on TVs with only a
+remote, so nobody types a password: the app shows a short code, the person enters it on their
+phone at the website's address, and the addon is signed in. That's OAuth's device flow, which
+Google, Microsoft, GitHub and many others offer.
+
+The manifest says so, and that it needs rex-addons 0.3:
+
+```json
+"host": "0.3",
+"sign_in": {"label": "Sign in to Example"}
+```
+
+`main.js` then exports two more functions, and optionally a third. Installing refuses an addon
+with `sign_in` that lacks `signIn` or `signInPoll`.
+
+| Function | What it does |
+|---|---|
+| `async signIn(ctx)` | Starts a sign-in. Returns `{code, url, expires_in, interval, state}`: the code the person types, the https page they type it on, how many seconds the code lives (at most 3600) and how many to wait between checks (2 to 60), and `state`, any JSON you need to finish. `state` stays inside rex-addons: the app never sees it and it is never logged |
+| `async signInPoll(state, ctx)` | Called every `interval` seconds with that `state`. Return `{done: false}` while the person hasn't entered the code, and `{done: true, account: "<name to show>"}` once they approved, with your tokens kept in `storage` by then. Throw when the website refused: your message is shown |
+| `async signOut(ctx)` | Optional. Forget your tokens, and revoke them if the website lets you |
+
+How it goes:
+
+- Until it is signed in, the addon doesn't sync (`items()` isn't called) and its titles don't
+  play. Signing in syncs it right away.
+- A new sign-in replaces one still waiting. One whose code expires ends with
+  `the code expired before it was entered`.
+- When the website ends the session (a refresh token revoked or expired), throw an error from
+  `items()` or `open()` whose message starts with `SIGN_IN_REQUIRED`, such as
+  `SIGN_IN_REQUIRED: Example signed you out`. The addon is signed out, the rest of the message is
+  shown (or `signed out by the website`), and its titles stay in rex until it is signed in again.
+- Signing out calls `signOut()` and forgets the account. Titles, settings and `storage` stay,
+  so `signOut()` is where you delete your tokens. Updating the addon keeps it signed in.
+- The code is masked in the log while the sign-in waits, but not yet inside `signIn()`: don't
+  print it there. Never print `state` or your tokens.
+
+A generic device flow ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)), with the access token
+refreshed when it expires. Its `hosts` are `auth.example.com`, `api.example.com` and wherever
+`stream_url` points.
+
+```js
+const AUTH = "https://auth.example.com";
+const API = "https://api.example.com";
+const CLIENT = "rex-addons-example";
+
+async function post(url, fields) {
+  const body = new URLSearchParams(fields).toString();
+  return await (await fetch(url, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body })).json();
+}
+
+function keep(tokens) {
+  storage.set("tokens", { access: tokens.access_token, refresh: tokens.refresh_token ?? storage.get("tokens")?.refresh });
+}
+
+// A request with the access token, refreshed once when the API says it expired.
+async function api(path) {
+  for (let tries = 0; tries < 2; tries++) {
+    const tokens = storage.get("tokens");
+    if (!tokens) throw new Error("SIGN_IN_REQUIRED");
+    const answer = await fetch(`${API}${path}`, { headers: { Authorization: `Bearer ${tokens.access}` } });
+    if (answer.status !== 401) {
+      if (!answer.ok) throw new Error(`${path} answered ${answer.status}`);
+      return await answer.json();
+    }
+    const refreshed = await post(`${AUTH}/token`, { client_id: CLIENT, grant_type: "refresh_token", refresh_token: tokens.refresh });
+    if (refreshed.error) throw new Error(`SIGN_IN_REQUIRED: ${refreshed.error_description ?? refreshed.error}`);
+    keep(refreshed);
+  }
+  throw new Error(`${path} keeps answering 401`);
+}
+
+export default {
+  async items(ctx) {
+    const videos = await api("/me/videos");
+    return videos.map((video) => ({ id: video.id, path: `example/${video.id}/video.mp4`, display: { title: video.title } }));
+  },
+
+  async open(id) {
+    return { url: (await api(`/videos/${id}`)).stream_url };
+  },
+
+  async signIn(ctx) {
+    const answer = await post(`${AUTH}/device/code`, { client_id: CLIENT, scope: "videos.read" });
+    if (answer.error) throw new Error(answer.error_description ?? answer.error);
+    return {
+      code: answer.user_code, url: answer.verification_uri,
+      expires_in: answer.expires_in, interval: answer.interval ?? 5,
+      state: { device_code: answer.device_code },
+    };
+  },
+
+  async signInPoll(state, ctx) {
+    const answer = await post(`${AUTH}/token`, {
+      client_id: CLIENT, device_code: state.device_code, grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+    });
+    if (answer.error === "authorization_pending" || answer.error === "slow_down") return { done: false };
+    if (answer.error === "access_denied") throw new Error("you said no on the website");
+    if (answer.error) throw new Error(answer.error_description ?? answer.error);
+    keep(answer);
+    return { done: true, account: (await api("/me")).email };
+  },
+
+  async signOut(ctx) {
+    storage.delete("tokens");
+  },
+};
 ```
 
 ## A repository of addons

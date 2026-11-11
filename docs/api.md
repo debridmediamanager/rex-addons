@@ -46,13 +46,13 @@ JSON in and out. It answers only this device: the socket's own peer address must
              "description": "...", "enabled": true, "repo": "github-com-debridmediamanager-rex-addons",
              "hosts": ["archive.org", "*.archive.org"],
              "state": "idle", "items": 100, "held": 0, "last_sync": 1794326938, "error": null,
-             "error_kind": null, "update_available": false, "update_hosts": null}]}
+             "error_kind": null, "update_available": false, "update_hosts": null, "sign_in": null}]}
 ```
 
 | Field | Meaning |
 |---|---|
 | `state` | `syncing`, `error` (the last sync failed: `error` says why), or `idle` |
-| `error_kind` | `would_remove` when the last sync failed because rex refused a snapshot that would remove more than half of the addon's titles (offer a forced sync), else `null` |
+| `error_kind` | `would_remove` when the last sync failed because rex refused a snapshot that would remove more than half of the addon's titles (offer a forced sync), `sign_in` when it failed because the addon needs signing in (offer that), else `null` |
 | `items` | Titles in rex from the last sync, probed |
 | `held` | Titles sent without a probe, which rex holds unshown (no ffprobe, or one that failed). A title whose probe failed is probed again after one sync interval (`refresh_minutes`), doubled for each failure after that, at most a week; new settings or a new version of the addon try them all again at the next sync |
 | `last_sync` | Unix seconds of the last sync that worked, or `null` |
@@ -60,6 +60,7 @@ JSON in and out. It answers only this device: the socket's own peer address must
 | `hosts` | The hosts its installed manifest lets it reach |
 | `update_available` | Its repository offers a higher `version` |
 | `update_hosts` | When `update_available`, the hosts that version would reach, so the app can ask before an update widens them; `null` otherwise |
+| `sign_in` | `null` for an addon that needs no account. Else `{"label": "Sign in to Example", "account": "name" or null, "pending": {"code": "ABCD-EFGH", "url": "https://example.com/device", "expires_at": 1794330057} or null, "error": "..." or null}`: `label` for the button; `account` the name it is signed in as; `pending`, while a sign-in waits, the code to show and the address to type it at, until `expires_at` (Unix seconds); `error` why the last sign-in failed or the website signed it out. An addon with `sign_in` and no `account` doesn't sync (its error is `sign in first`, kind `sign_in`) and isn't retried, and its titles answer `502` to rex. Read the addon every couple of seconds while `pending` is set: it turns `null` with `account` set once the person entered the code, or with `error` set when the sign-in failed or expired |
 
 ### `GET /api/addons/{id}`
 
@@ -107,6 +108,20 @@ attempt: if it fails for another reason, the automatic retries are not forced.
 Brings back every title deleted in a Plex app: empties the addon's deleted list, saves it, and
 starts a sync (when the addon is enabled; a disabled one gets them on its next sync). Answers the
 addon as `GET` does, with `deleted` at `0`; `404` for an addon it doesn't know.
+
+### `POST /api/addons/{id}/sign-in`
+
+Starts a sign-in through the addon's `signIn()`, replacing one still waiting, and answers `200`
+with the addon as `GET` does, `sign_in.pending` holding the code. rex-addons then checks with the
+website by itself; once the person entered the code, `sign_in.account` is set and a sync starts.
+`400` for an addon with no `sign_in`, `409` when it is disabled, `502` with the addon's message
+when `signIn()` failed. Disabling, removing or signing out the addon stops a sign-in still waiting.
+
+### `DELETE /api/addons/{id}/sign-in`
+
+Signs it out: forgets the account and any sign-in still waiting, and calls the addon's
+`signOut()`. Its titles stay in rex and its settings stay. Answers the addon as `GET` does;
+`400` for an addon with no `sign_in`.
 
 ### `POST /api/addons/{id}/enabled`
 

@@ -191,9 +191,7 @@ async function listPlaylist(id, count) {
 const WORD = /[A-Za-z_$][\w$]*/y;
 const NUMBER = /(?:0[xXoObB][\da-fA-F_]+|(?:\d[\d_]*\.?[\d_]*|\.\d[\d_]*)(?:[eE][+-]?\d+)?)n?/y;
 const SPACE = /(?:\s+|\/\/[^\n]*|\/\*[\s\S]*?\*\/)+/y;
-const STRING = /"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'/y;
 const REGEX = /\/(?:[^/\\[\n]|\\.|\[(?:[^\]\\\n]|\\.)*\])+\/[a-z]*/y;
-const TEMPLATE = /(?:[^`\\$]|\\[\s\S]|\$(?!\{))*/y;
 const PUNCT = /=>|\.\.\.|\?\.(?!\d)|[=!]==?|[<>]=|&&=?|\|\|=?|\?\?=?|\*\*=?|<<=?|>>>?=?|[-+*/%&|^]=|\+\+|--|[^\s]/y;
 const REGEX_AFTER = new Set(["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "instanceof", "yield", "await"]);
 
@@ -203,8 +201,18 @@ function tokens(src, at) {
     re.lastIndex = t.at;
     return re.exec(src) ? re.lastIndex : -1;
   };
+  // Where a string (or a template's text) that starts at `t.at` ends: a character at a time, as
+  // QuickJS's regular expressions recurse deeper on a long string than a small stack allows.
+  const skip = (ends) => {
+    let at = t.at;
+    for (let c = src[at]; !ends.includes(c); c = src[at]) {
+      if (c === undefined) throw new Error(`the player script has an unended string at ${t.start}`);
+      at += c === "\\" ? 2 : 1;
+    }
+    return at;
+  };
   const template = () => {
-    t.at = sticky(TEMPLATE);
+    for (t.at = skip("`$"); src[t.at] === "$" && src[t.at + 1] !== "{"; t.at = skip("`$")) t.at += 1;
     if (src[t.at] === "`") t.at += 1;
     else if (src.startsWith("${", t.at)) {
       t.at += 2;
@@ -224,8 +232,8 @@ function tokens(src, at) {
     } else if ((c >= "0" && c <= "9") || (c === "." && src[t.at + 1] >= "0" && src[t.at + 1] <= "9")) {
       [t.type, t.at] = ["number", sticky(NUMBER)];
     } else if (c === '"' || c === "'") {
-      if ((t.at = sticky(STRING)) < 0) throw new Error(`the player script has an unended string at ${t.start}`);
-      t.type = "string";
+      t.at += 1;
+      [t.type, t.at] = ["string", skip(c) + 1];
     } else if (c === "`") {
       [t.type, t.at] = ["string", t.at + 1];
       template();
@@ -382,12 +390,15 @@ function cut(src) {
   const found = [];
   for (const entry of candidates) {
     const keep = new Set(), names = new Set();
-    const want = (name) => {
-      names.add(name);
-      for (const i of defines.get(name) ?? []) {
-        if (!keep.has(i)) {
-          keep.add(i);
-          list[i].names.forEach(want);
+    const want = (first) => {
+      for (const todo = [first]; todo.length;) {
+        const name = todo.pop();
+        names.add(name);
+        for (const i of defines.get(name) ?? []) {
+          if (!keep.has(i)) {
+            keep.add(i);
+            todo.push(...list[i].names);
+          }
         }
       }
     };

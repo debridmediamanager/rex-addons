@@ -1,5 +1,5 @@
 {
- "_fabricated": "No account was available: the signed-in answer is assumed to be the signed-out TV playlist page's shape (recorded 2026-11-11), with these tiles.",
+ "_fabricated": "Fabricated by hand in the structure of the signed-in TV app's answer measured on 2026-11-11 (no real answer from an account is published): public videos, their real titles and channels.",
  "contents": {
   "tvBrowseRenderer": {
    "content": {
@@ -364,6 +364,11 @@
               },
               "thumbnailOverlays": [
                {
+                "thumbnailOverlayResumePlaybackRenderer": {
+                 "percentDurationWatched": 0
+                }
+               },
+               {
                 "thumbnailOverlayTimeStatusRenderer": {
                  "text": {
                   "accessibility": {
@@ -544,6 +549,11 @@
               },
               "thumbnailOverlays": [
                {
+                "thumbnailOverlayResumePlaybackRenderer": {
+                 "percentDurationWatched": 0
+                }
+               },
+               {
                 "thumbnailOverlayTimeStatusRenderer": {
                  "text": {
                   "simpleText": "LIVE"
@@ -706,13 +716,14 @@
                  "height": 360
                 }
                ]
-              }
+              },
+              "thumbnailOverlays": []
              }
             },
             "metadata": {
              "tileMetadataRenderer": {
               "title": {
-               "simpleText": "[Private video]"
+               "simpleText": ""
               },
               "lines": [
                {
@@ -721,43 +732,7 @@
                   {
                    "lineItemRenderer": {
                     "text": {
-                     "runs": [
-                      {
-                       "text": "Blender Studio"
-                      }
-                     ]
-                    }
-                   }
-                  }
-                 ]
-                }
-               },
-               {
-                "lineRenderer": {
-                 "items": [
-                  {
-                   "lineItemRenderer": {
-                    "text": {
-                     "accessibility": {
-                      "accessibilityData": {
-                       "label": "1 million views"
-                      }
-                     },
-                     "simpleText": "1M views"
-                    }
-                   }
-                  },
-                  {
-                   "lineItemRenderer": {
-                    "text": {
-                     "simpleText": "•"
-                    }
-                   }
-                  },
-                  {
-                   "lineItemRenderer": {
-                    "text": {
-                     "simpleText": "6 years ago"
+                     "simpleText": "No views"
                     }
                    }
                   }
@@ -863,6 +838,11 @@
                ]
               },
               "thumbnailOverlays": [
+               {
+                "thumbnailOverlayResumePlaybackRenderer": {
+                 "percentDurationWatched": 0
+                }
+               },
                {
                 "thumbnailOverlayTimeStatusRenderer": {
                  "text": {

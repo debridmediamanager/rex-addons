@@ -1,14 +1,17 @@
 // Your YouTube playlists in rex: Liked videos, Watch later, your own playlists and any playlist
 // you link. Each YouTube playlist is a rex playlist in YouTube's order; each video is one episode
-// of its channel's show in the YouTube library, and plays from YouTube's own HLS stream. Nothing is
-// downloaded: rex converts (copies) the stream as it plays.
+// of its channel's show in the YouTube library. Nothing is downloaded: rex reads the video from
+// YouTube as it plays.
 //
-// Everything goes through YouTube's own app API (InnerTube), as YouTube's apps do:
-// - listing, as the TV app (TVHTML5): signed in, its OAuth token is accepted only from the TV app;
-//   a public playlist by link is listed the same way, signed out (measured 2026-11-11).
-// - playing, as the iOS app, signed out: its answer has an HLS master playlist of muxed H.264 + AAC
-//   variants up to 1080p whose segments need no token. The best variant within the resolution
-//   limit is what rex reads, and what was probed.
+// Everything goes through YouTube's TV app API (InnerTube), signed in with the TV app's own code
+// sign-in, as a TV does. For an ordinary video, YouTube now hands the TV app one plain file: the
+// 360p MP4 with picture and sound together (itag 18); everything sharper comes only as YouTube's
+// own streaming protocol (SABR), which nothing outside YouTube's apps plays. That file's link works
+// only once its `n` parameter (and, for some videos, its signature) is transformed by a function in
+// YouTube's player script, as the player does in a browser. The addon downloads that script when
+// YouTube changes it, cuts out the function, keeps it in storage, and runs it for each link
+// (measured 2026-11-11). Where YouTube offers an HLS stream instead, the best variant within the
+// resolution setting is used.
 
 const YT = "https://www.youtube.com";
 const OAUTH = {
@@ -17,35 +20,28 @@ const OAUTH = {
   client_secret: "SboVhoG9s0rNafixCSGGKXAT",
   scope: "http://gdata.youtube.com https://www.googleapis.com/auth/youtube",
 };
-const CLIENTS = {
-  tv: { id: 7, ua: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version", context: { clientName: "TVHTML5", clientVersion: "7.20260311.12.00" } },
-  ios: {
-    id: 5, ua: "com.google.ios.youtube/20.10.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)",
-    context: { clientName: "IOS", clientVersion: "20.10.4", deviceMake: "Apple", deviceModel: "iPhone16,2", osName: "iPhone", osVersion: "18.3.2.22D82" },
-  },
-  // Only for a video's upload date: the iOS answer has none, the web player's microformat does.
-  web: {
-    id: 1, ua: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
-    context: { clientName: "WEB", clientVersion: "2.20260205.01.00" },
-  },
+const TV = {
+  ua: "Mozilla/5.0 (ChromiumStylePlatform) Cobalt/Version",
+  // ponytail: the version measured signed in on 2026-11-11; YouTube's TV page names the current one.
+  client: { clientName: "TVHTML5", clientVersion: "7.20250923.13.00" },
 };
-// Any video's id: YouTube lists the account's playlists in its "save to playlist" answer for one.
+// Any video's id: YouTube lists the account's own playlists in its "save to playlist" answer for one.
 const ANY_VIDEO = "jNQXAC9IVRw";
 
-// A video is checked (asked about once, its stream probed once) before it reaches rex: a player
-// call, its master playlist and one segment read by ffprobe, a few MB. A sync checks this many at
-// most, within this time, pausing between them, and the rest arrive over the next hourly syncs;
-// what a check learns is kept for as long as the video stays in a playlist.
+// A video is checked (one player call, its link tried and probed, a few hundred KB) before it
+// reaches rex. A sync checks this many at most, within this time, pausing between them, and the
+// rest arrive over the next hourly syncs; what a check learns is kept while the video stays listed.
 const CHECKS_PER_SYNC = 30;
 const CHECK_BUDGET_MS = 5 * 60 * 1000;
 const CHECK_PAUSE_MS = 1500;
 // The playlists are listed again at most this often (and whenever the settings change); the
 // syncs between only check videos still waiting.
 const LISTING_MS = 6 * 60 * 60 * 1000;
-// A video that could not be checked (private, removed, no stream) is asked about again after this.
+// A video that could not be checked (private, removed, no file) is asked about again after this.
 const RETRY_MS = 24 * 60 * 60 * 1000;
+// Which player script YouTube's TV app runs is looked up again after this.
+const PLAYER_MS = 60 * 60 * 1000;
 
-const cut = (text, most) => (text && text.length > most ? `${text.slice(0, most - 3)}...` : text || undefined);
 const textOf = (node) => node?.simpleText ?? (node?.runs ?? []).map((run) => run.text).join("") ?? "";
 
 /** Every node under `node` with one of `keys`, in document order, looking inside neither them nor
@@ -60,13 +56,13 @@ function find(node, keys, skip = [], out = []) {
   }
   return out;
 }
-const VIDEOS = ["tileRenderer", "playlistVideoRenderer"];
+const VIDEOS = ["tileRenderer"];
 
 // ---------------------------------------------------------------- signing in
 
 async function oauth(path, fields) {
   const answer = await fetch(`${YT}/o/oauth2/${path}`, {
-    method: "POST", headers: { "Content-Type": "application/json", "User-Agent": CLIENTS.tv.ua }, body: JSON.stringify(fields),
+    method: "POST", headers: { "Content-Type": "application/json", "User-Agent": TV.ua }, body: JSON.stringify(fields),
   });
   if (answer.status >= 500) throw new Error(`YouTube's sign-in answered ${answer.status}`);
   return { status: answer.status, ...(await answer.json()) };
@@ -81,10 +77,10 @@ function keep(answer) {
   });
 }
 
-/** The access token, refreshed when it is about to expire (or `force`); null when signed out. */
+/** The access token, refreshed when it is about to expire (or `force`). */
 async function accessToken(force = false) {
   const tokens = storage.get("tokens");
-  if (!tokens?.refresh) return null;
+  if (!tokens?.refresh) throw new Error("SIGN_IN_REQUIRED: not signed in to YouTube");
   if (!force && tokens.access && tokens.expires_at > Date.now() + 60 * 1000) return tokens.access;
   const answer = await oauth("token", {
     client_id: OAUTH.client_id, client_secret: OAUTH.client_secret, refresh_token: tokens.refresh, grant_type: "refresh_token",
@@ -98,74 +94,72 @@ async function accessToken(force = false) {
 
 // ---------------------------------------------------------------- InnerTube
 
-/** One InnerTube call as `client`; signed in when `token` is given. The request's shape (never the
- * token) is logged, so a changed answer can be told from a changed request. */
-async function innertube(endpoint, client, body, token = null) {
-  const { id, ua, context } = CLIENTS[client];
-  console.debug(`youtubei/${endpoint} as ${context.clientName}${token ? ", signed in" : ""}: ${JSON.stringify(body).slice(0, 120)}`);
-  const headers = {
-    "Content-Type": "application/json", "User-Agent": ua,
-    "X-YouTube-Client-Name": String(id), "X-YouTube-Client-Version": context.clientVersion,
+/** One InnerTube call as the TV app, signed in, the token refreshed once when YouTube refuses it.
+ * The request's shape (never the token) is logged, so a changed answer can be told from a changed
+ * request. */
+async function innertube(endpoint, body) {
+  console.debug(`youtubei/${endpoint}: ${JSON.stringify(body).slice(0, 120)}`);
+  const call = async (token) => {
+    const answer = await fetch(`${YT}/youtubei/v1/${endpoint}?prettyPrint=false`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json", "User-Agent": TV.ua, Authorization: `Bearer ${token}`,
+        "X-YouTube-Client-Name": "7", "X-YouTube-Client-Version": TV.client.clientVersion,
+      },
+      body: JSON.stringify({ context: { client: { ...TV.client, hl: "en", gl: "US" } }, ...body }),
+    });
+    if (answer.status === 429) throw new Error("YouTube answered 429 (too many requests from this address); the next sync tries again");
+    if (answer.status === 401 || answer.status === 403) return answer.status;
+    if (!answer.ok) throw new Error(`YouTube's ${endpoint} answered ${answer.status}`);
+    return await answer.json();
   };
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const answer = await fetch(`${YT}/youtubei/v1/${endpoint}?prettyPrint=false`, {
-    method: "POST", headers, body: JSON.stringify({ context: { client: { ...context, hl: "en", gl: "US" } }, ...body }),
-  });
-  if (answer.status === 429) throw new Error("YouTube answered 429 (too many requests from this address); the next sync tries again");
-  if (answer.status === 401 || answer.status === 403) return { unauthorized: answer.status };
-  if (!answer.ok) throw new Error(`YouTube's ${endpoint} answered ${answer.status}`);
-  return await answer.json();
-}
-
-/** An InnerTube call as the signed-in TV app, the token refreshed once when YouTube refuses it. */
-async function signedIn(endpoint, body) {
-  let answer = await innertube(endpoint, "tv", body, await accessToken());
-  if (answer.unauthorized) answer = await innertube(endpoint, "tv", body, await accessToken(true));
-  if (answer.unauthorized) throw new Error(`SIGN_IN_REQUIRED: YouTube answered ${answer.unauthorized} to the signed-in account`);
+  let answer = await call(await accessToken());
+  if (typeof answer === "number") answer = await call(await accessToken(true));
+  if (typeof answer === "number") throw new Error(`SIGN_IN_REQUIRED: YouTube answered ${answer} to the signed-in account`);
   return answer;
 }
 
 /** The account's own playlists, as its "save to playlist" answer lists them: [{id, title}]. */
 async function ownPlaylists() {
-  const answer = await signedIn("playlist/get_add_to_playlist", { videoIds: [ANY_VIDEO] });
-  const found = find(answer, ["playlistAddToOptionRenderer"]).map(([, option]) => ({ id: option.playlistId, title: textOf(option.title) }));
+  const answer = await innertube("playlist/get_add_to_playlist", { videoIds: [ANY_VIDEO] });
   if (!find(answer, ["addToPlaylistRenderer"]).length) throw new Error("YouTube did not list the account's playlists");
+  const found = find(answer, ["playlistAddToOptionRenderer"]).map(([, option]) => ({ id: option.playlistId, title: textOf(option.title) }));
   return found.filter((one) => one.id && !["WL", "LL"].includes(one.id));
 }
 
-/** The account's name, if YouTube says it. */
+/** The signed-in account's name: of the accounts YouTube lists (a family's, a brand account's),
+ * the one selected. */
 async function accountName() {
   try {
-    const answer = await signedIn("account/accounts_list", {});
-    const name = find(answer, ["accountName"]).map(([, node]) => textOf(node)).find(Boolean);
-    return name || "YouTube";
+    const answer = await innertube("account/accounts_list", {});
+    const accounts = find(answer, ["accountItem"]).map(([, item]) => item);
+    return textOf((accounts.find((item) => item.isSelected) ?? accounts[0])?.accountName) || "YouTube";
   } catch (error) {
     console.warn(`the account's name: ${error.message}`);
     return "YouTube";
   }
 }
 
-/** One video's id from a playlist page, or null for what is not a playable video (private, deleted, live,
- * upcoming, a short's shelf). The TV app lists tiles; the web shape is read too. */
-function entry([kind, node]) {
-  if (kind === "tileRenderer") {
-    if (node.contentType && node.contentType !== "TILE_CONTENT_TYPE_VIDEO") return null;
-    const id = node.onSelectCommand?.watchEndpoint?.videoId ?? node.contentId;
-    const overlays = (node.header?.tileHeaderRenderer?.thumbnailOverlays ?? []).map((o) => o.thumbnailOverlayTimeStatusRenderer).filter(Boolean);
-    const length = overlays.find((o) => !["LIVE", "UPCOMING"].includes(o.style))?.text;
-    // A private or deleted video's tile has no length; a live stream's says LIVE.
-    if (!id || !length || overlays.some((o) => ["LIVE", "UPCOMING"].includes(o.style))) return null;
-    return id;
-  }
-  return node.isPlayable === false || !node.lengthSeconds ? null : node.videoId ?? null;
+/** One video's tile of a playlist page as {id, title, channel, thumb}, or null for what is not a
+ * playable video: private or deleted (no length, no title), live or upcoming. */
+function entry([, node]) {
+  if (node.contentType && node.contentType !== "TILE_CONTENT_TYPE_VIDEO") return null;
+  const id = node.onSelectCommand?.watchEndpoint?.videoId ?? node.contentId;
+  const header = node.header?.tileHeaderRenderer ?? {};
+  const overlays = (header.thumbnailOverlays ?? []).map((o) => o.thumbnailOverlayTimeStatusRenderer).filter(Boolean);
+  if (!id || !overlays.some((o) => textOf(o.text)) || overlays.some((o) => ["LIVE", "UPCOMING"].includes(o.style))) return null;
+  const meta = node.metadata?.tileMetadataRenderer ?? {};
+  const thumbs = (header.thumbnail?.thumbnails ?? []).filter((t) => /^https:\/\//.test(t.url ?? ""));
+  return {
+    id, title: textOf(meta.title), channel: textOf(meta.lines?.[0]?.lineRenderer?.items?.[0]?.lineItemRenderer?.text),
+    thumb: thumbs.reduce((best, t) => (!best || (t.width ?? 0) > (best.width ?? 0) ? t : best), null)?.url?.replace(/\?.*/, ""),
+  };
 }
 
 /** The first `count` videos of a playlist, in its order, following its continuations, and its
  * title. Throws rather than answer with part of it. */
-async function listPlaylist(id, count, signed) {
-  const browse = (body) => (signed ? signedIn("browse", body) : innertube("browse", "tv", body));
-  let answer = await browse({ browseId: `VL${id}` });
-  if (answer.unauthorized) throw new Error(`playlist ${id}: YouTube answered ${answer.unauthorized}; is it private?`);
+async function listPlaylist(id, count) {
+  let answer = await innertube("browse", { browseId: `VL${id}` });
   const title = find(answer.contents ?? {}, ["entityMetadataRenderer", "playlistHeaderRenderer"], VIDEOS)
     .map(([, node]) => textOf(node.title)).find(Boolean);
   const videos = [];
@@ -178,11 +172,11 @@ async function listPlaylist(id, count, signed) {
       throw new Error(`playlist ${id}: ${alert || "YouTube answered no playlist"}`);
     }
     for (const video of entries.map(entry)) {
-      if (video && !videos.includes(video) && videos.length < count) videos.push(video);
+      if (video && !videos.some((one) => one.id === video.id) && videos.length < count) videos.push(video);
     }
     if (videos.length >= count || !next) break;
     if (page > count / 5 + 10) throw new Error(`playlist ${id}: more pages than ${count} videos fill`);
-    answer = await browse({ continuation: next });
+    answer = await innertube("browse", { continuation: next });
     if (!answer.continuationContents && !answer.onResponseReceivedActions) {
       throw new Error(`playlist ${id}: YouTube answered page ${page + 2} with nothing`);
     }
@@ -190,23 +184,283 @@ async function listPlaylist(id, count, signed) {
   return { title, videos };
 }
 
-/** The iOS app's player answer for a video, signed out; signed in only when YouTube asks for an
- * account (an age-restricted video). */
-async function player(id) {
-  const body = { videoId: id, contentCheckOk: true, racyCheckOk: true };
-  let answer = await innertube("player", "ios", body);
-  const status = answer.playabilityStatus?.status;
-  if (status === "LOGIN_REQUIRED" && !/bot/i.test(answer.playabilityStatus?.reason ?? "")) {
-    const token = await accessToken();
-    if (token) {
-      const again = await innertube("player", "ios", body, token);
-      if (!again.unauthorized) answer = again;
+// ---------------------------------------------------------------- the player script's n function
+
+// Enough of a JavaScript tokenizer to tell code from strings, comments and regular expressions, and
+// to know how deep in brackets it is.
+const WORD = /[A-Za-z_$][\w$]*/y;
+const NUMBER = /(?:0[xXoObB][\da-fA-F_]+|(?:\d[\d_]*\.?[\d_]*|\.\d[\d_]*)(?:[eE][+-]?\d+)?)n?/y;
+const SPACE = /(?:\s+|\/\/[^\n]*|\/\*[\s\S]*?\*\/)+/y;
+const STRING = /"(?:[^"\\]|\\[\s\S])*"|'(?:[^'\\]|\\[\s\S])*'/y;
+const REGEX = /\/(?:[^/\\[\n]|\\.|\[(?:[^\]\\\n]|\\.)*\])+\/[a-z]*/y;
+const TEMPLATE = /(?:[^`\\$]|\\[\s\S]|\$(?!\{))*/y;
+const PUNCT = /=>|\.\.\.|\?\.(?!\d)|[=!]==?|[<>]=|&&=?|\|\|=?|\?\?=?|\*\*=?|<<=?|>>>?=?|[-+*/%&|^]=|\+\+|--|[^\s]/y;
+const REGEX_AFTER = new Set(["return", "typeof", "case", "do", "else", "in", "of", "new", "delete", "void", "throw", "instanceof", "yield", "await"]);
+
+function tokens(src, at) {
+  const t = { at, type: "", start: 0, text: "", stack: [] };
+  const sticky = (re) => {
+    re.lastIndex = t.at;
+    return re.exec(src) ? re.lastIndex : -1;
+  };
+  const template = () => {
+    t.at = sticky(TEMPLATE);
+    if (src[t.at] === "`") t.at += 1;
+    else if (src.startsWith("${", t.at)) {
+      t.at += 2;
+      t.stack.push("`");
+    } else throw new Error(`the player script has an unended template at ${t.start}`);
+  };
+  t.next = () => {
+    const regexAllowed = t.type === "word" ? REGEX_AFTER.has(t.text) : t.type === "punct" && !")]".includes(t.text);
+    const space = sticky(SPACE);
+    if (space > 0) t.at = space;
+    t.start = t.at;
+    if (t.at >= src.length) return (t.type = "");
+    const c = src[t.at];
+    let end;
+    if ((end = sticky(WORD)) > 0) {
+      [t.type, t.text, t.at] = ["word", src.slice(t.start, end), end];
+    } else if ((c >= "0" && c <= "9") || (c === "." && src[t.at + 1] >= "0" && src[t.at + 1] <= "9")) {
+      [t.type, t.at] = ["number", sticky(NUMBER)];
+    } else if (c === '"' || c === "'") {
+      if ((t.at = sticky(STRING)) < 0) throw new Error(`the player script has an unended string at ${t.start}`);
+      t.type = "string";
+    } else if (c === "`") {
+      [t.type, t.at] = ["string", t.at + 1];
+      template();
+    } else if (c === "/" && (regexAllowed || !t.type)) {
+      if ((t.at = sticky(REGEX)) < 0) throw new Error(`the player script has an unended regular expression at ${t.start}`);
+      t.type = "string";
+    } else {
+      [t.type, t.at] = ["punct", sticky(PUNCT)];
+      t.text = src.slice(t.start, t.at);
+      if (t.text === "(" || t.text === "[" || t.text === "{") t.stack.push(t.text);
+      else if ((t.text === ")" || t.text === "]" || t.text === "}") && t.stack.pop() === "`") {
+        t.type = "string";
+        template();
+      }
     }
-  }
-  return answer;
+    return t.type;
+  };
+  return t;
 }
 
-/** Why a player answer cannot play, or null. `bot` when YouTube wants this address to sign in. */
+/** The top-level statements of the player script's one function, [{start, end, names}]: `names` are
+ * what each declares or assigns to, Closure Compiler's `A=Foo.prototype;A.bar=...` counting as Foo. */
+function statements(src) {
+  // ponytail: the TV player's shape, (function(){...}).call(this); yt-dlp also reads (function(g){...})(_yt_player).
+  const open = src.search(/^\s*\(function\s*\(\)\s*\{/);
+  if (open < 0) throw new Error("the player script is not one function");
+  const body = src.indexOf("{", open) + 1;
+  const t = tokens(src, body);
+  const list = [], aliases = new Map();
+  let current = null, part = null;
+  const add = (name) => current.names.includes(name) || current.names.push(name);
+  const close = () => {
+    if (!part?.target) return;
+    const { target, member, value } = part;
+    if (!member && value?.length > 1 && value.at(-1) === "prototype") {
+      aliases.set(target, value[0]);
+      add(value[0]);
+    } else if (member && aliases.has(target)) add(aliases.get(target));
+    else {
+      if (!member) aliases.delete(target);
+      add(target);
+    }
+  };
+  const finish = (end) => {
+    close();
+    if (current) list.push({ start: current.start, end, names: current.names });
+    current = part = null;
+  };
+  for (;;) {
+    const before = t.stack.length;
+    if (!t.next()) throw new Error("the player script ends inside its function");
+    const depth = t.stack.length;
+    const punct = t.type === "punct" ? t.text : "";
+    if (punct === "}" && before === 0) {
+      finish(t.start);
+      return { list, strict: /^\s*["']use strict["']/.test(src.slice(body, body + 20)) };
+    }
+    if (!current) {
+      if (punct === ";") continue;
+      const kind = t.type === "word" ? t.text : "";
+      current = { start: t.start, names: [], kind };
+      if (kind === "function" || kind === "class") part = { state: "name" };
+      else if (["var", "let", "const"].includes(kind)) part = { state: "name" };
+      else part = kind ? { state: "lead", name: kind } : { state: "done" };
+      continue;
+    }
+    if (before === 0 && depth === 0 && (punct === ";" || punct === ",")) {
+      if (punct === ";") finish(t.at);
+      else {
+        close();
+        part = { state: ["var", "let", "const"].includes(current.kind) ? "name" : "start" };
+      }
+      continue;
+    }
+    if (before === 1 && depth === 0 && punct === "}") {
+      // A block ends: so does a declaration, and any statement a new one follows.
+      const peek = tokens(src, t.at);
+      peek.next();
+      if (current.kind === "function" || current.kind === "class" || (peek.type === "word" && !["else", "catch", "finally", "while", "instanceof", "in", "of"].includes(peek.text))) finish(t.at);
+      else if (part) part.state = "done";
+      continue;
+    }
+    if (before > 0 && depth > 0) continue;
+    const word = t.type === "word" ? t.text : null;
+    switch (part.state) {
+      case "name":
+        if (word) add(word);
+        part.state = "done";
+        break;
+      case "start":
+        part = word ? { state: "lead", name: word } : { state: "done" };
+        break;
+      case "lead":
+        if (punct === ".") part.state = "dot";
+        else if (punct === "[" || punct === "]") part.member = true;
+        else if (punct === "=") Object.assign(part, { state: "value", target: part.name, value: [] });
+        else part.state = "done";
+        break;
+      case "dot":
+        part.member = true;
+        part.state = word ? "lead" : "done";
+        break;
+      case "value":
+        // A plain chain of names (Foo.prototype), or anything else.
+        if (word && (!part.value.length || part.dot)) {
+          part.value.push(word);
+          part.dot = false;
+        } else if (punct === "." && !part.dot && part.value.length) part.dot = true;
+        else [part.value, part.state] = [null, "assigned"];
+        break;
+    }
+  }
+}
+
+const PAGE = {
+  hash: "", host: "www.youtube.com", hostname: "www.youtube.com", href: "https://www.youtube.com/watch?v=rex",
+  origin: "https://www.youtube.com", password: "", pathname: "/watch", port: "", protocol: "https:", search: "?v=rex", username: "",
+};
+
+/** The player's URL function, out of `code`, made to transform `{n, sig}` as the player does: the
+ * link it builds is given them, and its first method that is not set, get or clone applies the
+ * transforms (yt-dlp's solver does the same). */
+function transformer(code, scope) {
+  const make = scope ? Function("scope", `with (scope) return ${code}`)(scope) : (0, eval)(code);
+  const build = make(globalThis, globalThis, Object.create(null), Object.create(null), PAGE, { prototype: {} });
+  return ({ n, sig }) => {
+    const url = build("https://youtube.com/watch?v=rex", "s", sig ? encodeURIComponent(sig) : undefined);
+    url.set("n", n);
+    const proto = Object.getPrototypeOf(url);
+    url[Object.keys(proto).concat(Object.getOwnPropertyNames(proto)).find((key) => !["constructor", "set", "get", "clone"].includes(key))]();
+    const s = url.get("s");
+    return { n: url.get("n"), sig: s ? decodeURIComponent(s) : null };
+  };
+}
+
+// An `n` and a signature to try a cut-out function on.
+const SAMPLE = { n: "rexAddonsCheck01", sig: "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz" };
+const solve = (transform) => ({ n: transform({ n: SAMPLE.n }).n, sig: transform({ sig: SAMPLE.sig }).sig });
+
+/** The small program out of a player script that transforms `n` and signatures: the function that
+ * builds a link (it sets `alr=yes`, as yt-dlp's solver finds it), and only the top-level statements
+ * running it really reaches. Those are found by running it with every name it looks up outside
+ * itself watched, adding the statements that define the names it missed, until nothing is missing:
+ * the player's code swallows its own errors, so a missing name would otherwise just leave `n` as
+ * it was. */
+function cut(src) {
+  const { list, strict } = statements(src);
+  const defines = new Map();
+  list.forEach((s, i) => s.names.forEach((name) => defines.set(name, [...(defines.get(name) ?? []), i])));
+  const candidates = new Set();
+  for (let at = src.indexOf('.set("alr","yes")'); at >= 0; at = src.indexOf('.set("alr","yes")', at + 1)) {
+    list.find((s) => s.start <= at && at < s.end)?.names.forEach((name) => candidates.add(name));
+  }
+  const found = [];
+  for (const entry of candidates) {
+    const keep = new Set(), names = new Set();
+    const want = (name) => {
+      names.add(name);
+      for (const i of defines.get(name) ?? []) {
+        if (!keep.has(i)) {
+          keep.add(i);
+          list[i].names.forEach(want);
+        }
+      }
+    };
+    want(entry);
+    for (let round = 0; round < 500; round++) {
+      const code = `(function(window,self,document,navigator,location,XMLHttpRequest){${strict ? "'use strict';" : ""}\n${[...keep].sort((a, b) => a - b)
+        .map((i) => src.slice(list[i].start, list[i].end).trim().replace(/[^;}]$/, "$&;")).join("\n")}\nreturn ${entry};})`;
+      const missing = new Set();
+      const scope = new Proxy({}, { has: (_, name) => (typeof name === "string" && defines.has(name) && !names.has(name) && missing.add(name), false) });
+      let result;
+      try {
+        result = solve(transformer(code, scope));
+      } catch (error) {
+        result = error;
+      }
+      if (missing.size) {
+        missing.forEach(want);
+        continue;
+      }
+      if (typeof result?.n === "string" && result.n !== SAMPLE.n && /^[\w-]+$/.test(result.n) && typeof result.sig === "string") found.push({ code, ...result });
+      break;
+    }
+  }
+  if (!found.length) throw new Error(`no function in the player script transforms n (tried ${[...candidates].join(", ") || "none"})`);
+  if (new Set(found.map((one) => one.n + one.sig)).size > 1) throw new Error("functions in the player script disagree on n");
+  // Run once more as it will be: strict, with nothing watched.
+  const { code, n, sig } = found[0];
+  const alone = solve(transformer(code));
+  if (alone.n !== n || alone.sig !== sig) throw new Error("the cut-out n function answers differently on its own");
+  return code;
+}
+
+/** The TV app's player script as cut down for its links: {id, sts, code, checked}. Looked up again
+ * after PLAYER_MS (or when `fresh`), downloaded and cut again only when YouTube changed it. */
+async function playerScript(fresh = false) {
+  const kept = storage.get("player");
+  if (kept && !fresh && Date.now() - kept.checked < PLAYER_MS) return kept;
+  const page = await fetch(`${YT}/tv`, { headers: { "User-Agent": TV.ua } });
+  if (!page.ok) throw new Error(`YouTube's TV page answered ${page.status}`);
+  const path = /"jsUrl":"(\/s\/player\/([\w-]+)\/[^"]+\.js)"/.exec(await page.text());
+  if (!path) throw new Error("YouTube's TV page names no player script");
+  if (kept?.id === path[2] && kept.code) {
+    storage.set("player", { ...kept, checked: Date.now() });
+    return storage.get("player");
+  }
+  const script = await fetch(`${YT}${path[1]}`, { headers: { "User-Agent": TV.ua } });
+  if (!script.ok) throw new Error(`YouTube's player script answered ${script.status}`);
+  const src = await script.text();
+  const sts = Number(/(?:signatureTimestamp|sts)\s*:\s*(\d{5})/.exec(src)?.[1]);
+  if (!sts) throw new Error(`player script ${path[2]}: no signature timestamp in it`);
+  const started = Date.now();
+  let code;
+  try {
+    code = cut(src);
+  } catch (error) {
+    throw new Error(`player script ${path[2]}: ${error.message}`);
+  }
+  console.log(`player ${path[2]}: its n function cut out (${code.length} of ${src.length} bytes) in ${Date.now() - started} ms`);
+  storage.set("player", { id: path[2], sts, code, checked: Date.now() });
+  return storage.get("player");
+}
+
+// ---------------------------------------------------------------- playing
+
+/** The TV app's player answer for a video, with the player script's signature timestamp. */
+async function player(id, script) {
+  return await innertube("player", {
+    videoId: id, contentCheckOk: true, racyCheckOk: true,
+    playbackContext: { contentPlaybackContext: { signatureTimestamp: script.sts, html5Preference: "HTML5_PREF_WANTS" } },
+  });
+}
+
+/** Why a player answer cannot play, or null. `bot` when YouTube wants proof this is no bot. */
 function refusal(answer) {
   const status = answer.playabilityStatus ?? {};
   if (status.status !== "OK") {
@@ -215,9 +469,12 @@ function refusal(answer) {
   }
   const details = answer.videoDetails ?? {};
   if (details.isLive || details.isUpcoming || details.isPostLiveDvr || !Number(details.lengthSeconds)) return { why: "a live stream" };
-  if (!answer.streamingData?.hlsManifestUrl) return { why: "YouTube offered no HLS stream", nohls: true };
+  if (!answer.streamingData?.hlsManifestUrl && !muxed(answer)) return { why: "YouTube offered no file with picture and sound together" };
   return null;
 }
+
+/** The plain file with picture and sound together, H.264 + AAC: 360p (itag 18) is the one YouTube still hands out. */
+const muxed = (answer) => (answer.streamingData?.formats ?? []).find((f) => /avc1/.test(f.mimeType) && /mp4a/.test(f.mimeType) && (f.url || f.signatureCipher));
 
 /** The variant of an HLS master playlist rex reads: picture and sound together (H.264 + AAC), the
  * highest within `most` lines, else the smallest. Returns {url, height}. */
@@ -243,17 +500,31 @@ async function variant(master, most) {
   return { url: pick.url, height: pick.height };
 }
 
-/** The upload date, from the web player's microformat; undefined when it doesn't say. */
-async function uploadDate(id) {
-  try {
-    const answer = await innertube("player", "web", { videoId: id, contentCheckOk: true, racyCheckOk: true });
-    const micro = answer.microformat?.playerMicroformatRenderer ?? {};
-    const date = String(micro.publishDate ?? micro.uploadDate ?? "").slice(0, 10);
-    return /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : undefined;
-  } catch (error) {
-    console.warn(`${id}: no upload date: ${error.message}`);
-    return undefined;
+/** What a player answer plays from: {kind: "hls", url, height} or {kind: "mp4", url, height, date},
+ * the file's link with its `n` (and signature) transformed by the player script. */
+async function playable(answer, script, most) {
+  if (answer.streamingData.hlsManifestUrl) return { kind: "hls", ...(await variant(answer.streamingData.hlsManifestUrl, most)) };
+  const format = muxed(answer);
+  const transform = transformer(script.code);
+  let url;
+  if (format.url) url = new URL(format.url);
+  else {
+    const cipher = new URLSearchParams(format.signatureCipher);
+    url = new URL(cipher.get("url"));
+    url.searchParams.set(cipher.get("sp") || "signature", transform({ sig: cipher.get("s") }).sig);
   }
+  const n = url.searchParams.get("n");
+  if (n) url.searchParams.set("n", transform({ n }).n);
+  // The file's last change (microseconds), the day it was put up as near as YouTube says.
+  const changed = Number(format.lastModified) / 1000;
+  const date = changed > 0 ? new Date(changed).toISOString().slice(0, 10) : undefined;
+  return { kind: "mp4", url: url.href, height: format.height, date };
+}
+
+/** Whether YouTube serves a link: a one-byte read. */
+async function serves(url) {
+  const answer = await fetch(url, { headers: { Range: "bytes=0-0" } });
+  return answer.status === 206 || answer.status === 200;
 }
 
 function settings(config) {
@@ -270,19 +541,17 @@ function settings(config) {
   };
 }
 
-/** Every playlist the settings name, each with its first videos: [{title, videos}]. */
+/** Every playlist the settings name, each with its first videos: [{title, videos: [{id, title, channel, thumb}]}]. */
 async function listAll(wanted) {
-  const signed = Boolean(storage.get("tokens")?.refresh);
   const sources = [];
-  if (signed && wanted.liked) sources.push({ id: "LL", title: "Liked videos" });
-  if (signed && wanted.later) sources.push({ id: "WL", title: "Watch later" });
-  if (signed && wanted.own) sources.push(...(await ownPlaylists()));
-  // A playlist by link is anyone's, listed signed out; one the account has is listed as its own.
-  sources.push(...wanted.links.filter((id) => !sources.some((one) => one.id === id)).map((id) => ({ id, link: true })));
+  if (wanted.liked) sources.push({ id: "LL", title: "Liked videos" });
+  if (wanted.later) sources.push({ id: "WL", title: "Watch later" });
+  if (wanted.own) sources.push(...(await ownPlaylists()));
+  sources.push(...wanted.links.filter((id) => !sources.some((one) => one.id === id)).map((id) => ({ id })));
   const lists = [];
   const titles = new Set();
   for (const source of sources) {
-    const listed = await listPlaylist(source.id, wanted.count, signed && !source.link);
+    const listed = await listPlaylist(source.id, wanted.count);
     const named = source.title || listed.title;
     if (!named) throw new Error(`playlist ${source.id}: YouTube answered no title`);
     let title = named;
@@ -294,20 +563,28 @@ async function listAll(wanted) {
   return lists;
 }
 
-/** What a check of one video learns: its details, the variant within `most` and that variant's probe. */
-async function check(id, most) {
-  const answer = await player(id);
+/** What a check of one video learns: the listing's details, and the link that plays and its probe.
+ * `sync.looked` once the player script was looked up again this sync. */
+async function check(listed, most, sync) {
+  let script = await playerScript();
+  const answer = await player(listed.id, script);
   const refused = refusal(answer);
   if (refused) return { refused };
-  const details = answer.videoDetails;
-  const chosen = await variant(answer.streamingData.hlsManifestUrl, most);
-  const probe = await ffprobe(chosen.url);
-  const thumbs = (details.thumbnail?.thumbnails ?? []).filter((t) => /^https:\/\//.test(t.url ?? ""));
+  let link = await playable(answer, script, most);
+  if (link.kind === "mp4" && !(await serves(link.url))) {
+    // YouTube may have moved to another player script since it was looked up.
+    if (sync.looked) throw new Error("YouTube refuses the file's link");
+    sync.looked = true;
+    script = await playerScript(true);
+    link = await playable(await player(listed.id, script), script, most);
+    if (!(await serves(link.url))) throw new Error("YouTube refuses the file's link, also with the newest player script");
+  }
+  const probe = await ffprobe(link.url);
   return {
     video: {
-      title: details.title, summary: cut(details.shortDescription, 2000), date: await uploadDate(id),
-      thumb: thumbs.reduce((best, t) => (!best || (t.width ?? 0) > (best.width ?? 0) ? t : best), null)?.url,
-      channel: details.author, channel_id: details.channelId, height: chosen.height, most, probe,
+      title: listed.title, channel: listed.channel || answer.videoDetails.author || "YouTube", channel_id: answer.videoDetails.channelId,
+      thumb: listed.thumb ?? `https://i.ytimg.com/vi/${listed.id}/hqdefault.jpg`, date: link.date,
+      kind: link.kind, height: link.height, ...(link.kind === "hls" ? { most } : {}), probe,
     },
   };
 }
@@ -315,8 +592,7 @@ async function check(id, most) {
 export default {
   async items(ctx) {
     const wanted = settings(ctx.config);
-    const signed = Boolean(storage.get("tokens")?.refresh);
-    const key = JSON.stringify([wanted.count, wanted.liked, wanted.later, wanted.own, wanted.links, signed]);
+    const key = JSON.stringify([wanted.count, wanted.liked, wanted.later, wanted.own, wanted.links]);
     let listing = storage.get("listing");
     if (!listing || listing.key !== key || Date.now() - listing.at > LISTING_MS) {
       listing = { key, at: Date.now(), lists: await listAll(wanted) };
@@ -326,21 +602,21 @@ export default {
     // Each video once, with its place in every playlist it is in.
     const places = new Map();
     for (const list of listing.lists) {
-      list.videos.forEach((id, at) => {
-        if (!places.has(id)) places.set(id, {});
-        places.get(id)[list.title] = at + 1;
+      list.videos.forEach((video, at) => {
+        if (!places.has(video.id)) places.set(video.id, { video, at: {} });
+        places.get(video.id).at[list.title] = at + 1;
       });
     }
 
-    // Check what is new (or was checked for another resolution limit), a bounded number a sync.
+    // Check what is new (or an HLS stream checked for another resolution limit), a bounded number a sync.
     const numbers = storage.get("numbers") ?? {};
     const until = Date.now() + CHECK_BUDGET_MS;
-    // Three videos in a row without an HLS stream: YouTube offers none to this address for now.
-    let checks = 0, noHls = 0, waiting = 0, halted = false;
-    for (const id of places.keys()) {
+    let checks = 0, waiting = 0, halted = false;
+    const sync = { looked: false };
+    for (const [id, { video: listed }] of places) {
       const known = storage.get(`v:${id}`);
       const skipped = storage.get(`skip:${id}`);
-      if ((known && known.most === wanted.most) || (skipped && skipped.until > Date.now())) continue;
+      if ((known && (known.kind === "mp4" || known.most === wanted.most)) || (skipped && skipped.until > Date.now())) continue;
       if (checks >= CHECKS_PER_SYNC || Date.now() > until || halted) {
         waiting += 1;
         continue;
@@ -348,28 +624,25 @@ export default {
       if (checks++) await sleep(CHECK_PAUSE_MS);
       let checked;
       try {
-        checked = await check(id, wanted.most);
+        checked = await check(listed, wanted.most, sync);
       } catch (error) {
-        if (/^YouTube answered 429|ffprobe\(\) is not available/.test(error.message)) throw error;
+        if (/^(SIGN_IN_REQUIRED|YouTube answered 429|player script|YouTube's TV page|YouTube's player script)|ffprobe\(\) is not available/.test(error.message)) throw error;
         console.warn(`${id}: ${error.message}`);
         storage.set(`skip:${id}`, { until: Date.now() + RETRY_MS, why: error.message });
         continue;
       }
       if (checked.refused) {
-        const { why, bot, nohls } = checked.refused;
+        const { why, bot } = checked.refused;
         if (bot) {
           // Asking on would only make it worse: what is ready goes to rex, the rest waits.
-          console.warn(`YouTube asks this address to prove it is not a bot (${why}); checks stop until the next sync`);
+          console.warn(`YouTube asks this account to prove it is not a bot (${why}); checks stop until the next sync`);
           halted = true;
           continue;
         }
-        noHls = nohls ? noHls + 1 : 0;
-        halted = noHls >= 3;
         console.warn(`${id}: ${why}`);
-        storage.set(`skip:${id}`, { until: Date.now() + (nohls ? LISTING_MS : RETRY_MS), why });
+        storage.set(`skip:${id}`, { until: Date.now() + RETRY_MS, why });
         continue;
       }
-      noHls = 0;
       const video = checked.video;
       // Episodes are numbered per channel in the order they arrive, so no number ever moves.
       video.episode = known?.episode ?? (numbers[video.channel_id] = (numbers[video.channel_id] ?? 0) + 1);
@@ -379,19 +652,17 @@ export default {
     if (waiting) console.log(`${waiting} videos wait to be checked; they arrive over the next syncs`);
 
     const ready = [...places.keys()].map((id) => [id, storage.get(`v:${id}`)]).filter(([, video]) => video);
-    // A show's poster: the picture of its channel's first video here, the same on every push.
-    const posters = {};
-    for (const [, video] of [...ready].sort(([, a], [, b]) => a.episode - b.episode)) posters[video.channel_id] ??= video.thumb;
+    // A show's name and poster: its channel's first video's here, the same on every push (a
+    // video made with another channel names both).
+    const shows = {};
+    for (const [, video] of [...ready].sort(([, a], [, b]) => a.episode - b.episode)) shows[video.channel_id] ??= { title: video.channel, poster: video.thumb };
     const items = ready.map(([id, video]) => ({
       id: `yt-${id}`,
-      path: `youtube/${video.channel_id}/${id}.m3u8`,
+      path: `youtube/${video.channel_id}/${id}.${video.kind === "hls" ? "m3u8" : "mp4"}`,
       kind: "episode", season: 1, episode: video.episode,
-      name: video.channel, release: `youtube:${video.channel_id}`,
-      display: {
-        title: video.title, summary: video.summary, date: video.date, thumb: video.thumb,
-        show: { title: video.channel, poster: posters[video.channel_id] },
-      },
-      playlists: places.get(id),
+      name: shows[video.channel_id].title, release: `youtube:${video.channel_id}`,
+      display: { title: video.title, date: video.date, thumb: video.thumb, show: shows[video.channel_id] },
+      playlists: places.get(id).at,
       media_info: video.probe,
     }));
 
@@ -408,12 +679,14 @@ export default {
 
   async open(id, ctx) {
     const vid = id.replace(/^yt-/, "");
-    const answer = await player(vid);
+    const known = storage.get(`v:${vid}`);
+    const script = await playerScript();
+    const answer = await player(vid, script);
     const refused = refusal(answer);
     if (refused) throw new Error(`${vid} does not play: ${refused.why}`);
-    // The variant it was probed at, so what plays is what rex was told about.
-    const most = storage.get(`v:${vid}`)?.height ?? settings(ctx.config).most;
-    return { url: (await variant(answer.streamingData.hlsManifestUrl, most)).url };
+    // An HLS stream at the variant it was probed at, so what plays is what rex was told about. A
+    // file's link lives six hours, so a fresh one is asked for at each play.
+    return { url: (await playable(answer, script, known?.height ?? settings(ctx.config).most)).url };
   },
 
   async signIn() {

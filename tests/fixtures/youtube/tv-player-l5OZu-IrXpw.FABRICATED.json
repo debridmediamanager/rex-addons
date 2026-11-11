@@ -1,0 +1,67 @@
+{
+ "_fabricated": "Fabricated by hand in the structure of the TV app's signed-in player answer for this public video, measured on 2026-11-11 (no real answer from an account is published): one muxed 360p file whose link carries an n challenge, the adaptive formats with neither url nor signatureCipher (SABR only), and videoDetails without title, author or description, as the TV app's answer has them. {BASE} and {N} are filled in by the tests.",
+ "responseContext": {
+  "visitorData": "FABRICATED"
+ },
+ "playabilityStatus": {
+  "status": "OK",
+  "playableInEmbed": true
+ },
+ "streamingData": {
+  "expiresInSeconds": "21540",
+  "formats": [
+   {
+    "itag": 18,
+    "url": "{BASE}/videoplayback?expire=1794404000&id=o-FABRICATED&itag=18&source=youtube&mime=video%2Fmp4&ratebypass=yes&dur=391.024&lmt=1778474710517978&n={N}&sparams=expire%2Cid%2Citag%2Csource%2Cmime%2Cratebypass%2Cdur%2Clmt&sig=FABRICATED",
+    "mimeType": "video/mp4; codecs=\"avc1.42001E, mp4a.40.2\"",
+    "bitrate": 559436,
+    "width": 640,
+    "height": 268,
+    "lastModified": "1778474710517978",
+    "contentLength": "27339503",
+    "quality": "medium",
+    "fps": 24,
+    "qualityLabel": "360p",
+    "projectionType": "RECTANGULAR",
+    "averageBitrate": 559341,
+    "audioQuality": "AUDIO_QUALITY_LOW",
+    "approxDurationMs": "391024",
+    "audioSampleRate": "44100",
+    "audioChannels": 2,
+    "qualityOrdinal": "QUALITY_ORDINAL_360P"
+   }
+  ],
+  "adaptiveFormats": [
+   {
+    "itag": 137,
+    "mimeType": "video/mp4; codecs=\"avc1.640028\"",
+    "bitrate": 4400000,
+    "width": 1920,
+    "height": 804,
+    "qualityLabel": "1080p",
+    "approxDurationMs": "391000"
+   },
+   {
+    "itag": 140,
+    "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"",
+    "bitrate": 130000,
+    "audioQuality": "AUDIO_QUALITY_MEDIUM",
+    "approxDurationMs": "391024"
+   }
+  ],
+  "serverAbrStreamingUrl": "{BASE}/videoplayback?expire=1794404000&id=o-FABRICATED&source=youtube&sabr=1"
+ },
+ "videoDetails": {
+  "videoId": "l5OZu-IrXpw",
+  "lengthSeconds": "391",
+  "channelId": "UCz75RVbH8q2jdBJ4SnwuZZQ",
+  "isOwnerViewing": false,
+  "isCrawlable": true,
+  "allowRatings": true,
+  "isPrivate": false,
+  "isUnpluggedCorpus": false,
+  "isLiveContent": false,
+  "isTvfilmVideo": false
+ },
+ "trackingParams": "FABRICATED"
+}

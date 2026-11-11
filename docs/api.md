@@ -8,17 +8,18 @@ that).
 ## The command
 
 ```
-rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [--ffprobe <path>] [--bundled <dir>] [--default-repo <url>]...
+rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [--ffprobe <path>] [--bundled <dir>] [--default-repo <url>]... [--device-name <name>]
 ```
 
 | Flag | Default | Meaning |
 |---|---|---|
 | `--listen` | `127.0.0.1:32410` | Where the API and the byte paths answer. This address is also what each addon registers with rex as its byte URL (`0.0.0.0` registers as `127.0.0.1`) |
 | `--rex` | `http://127.0.0.1:32400` | rex. rex-addons waits for it: nothing syncs, and nothing counts as failed, until it answers |
-| `--data` | `./rex-addons-data` | `<dir>/addons/<id>/` holds each installed addon: `manifest.json`, `main.js`, `config.json`, `storage.json`, and the host's own `state.json`, `probes.json`, `probe_failures.json`, `index.json`. `<dir>/repos/<repo id>/` holds each repository's fetched files, `<dir>/repos.json` the list. `<dir>/removed.json` lists bundled addons the person removed |
+| `--data` | `./rex-addons-data` | `<dir>/addons/<id>/` holds each installed addon: `manifest.json`, `main.js`, `config.json`, `storage.json`, and the host's own `state.json`, `probes.json`, `probe_failures.json`, `index.json`, and for a Spotify addon `spotify-credentials.json` (the sign-in, mode 600, never served or given to the addon). `<dir>/repos/<repo id>/` holds each repository's fetched files, `<dir>/repos.json` the list. `<dir>/removed.json` lists bundled addons the person removed |
 | `--ffprobe` | none | The ffprobe behind addons' `ffprobe()` and the host's own check of a title that arrives without `media_info`. Without it `ffprobe()` fails, those titles reach rex unprobed, and rex holds unprobed titles without showing them |
 | `--bundled` | none | Addon folders installed on the first start, and updated whenever the bundled `version` is higher. A person can remove one; it then stays removed. Installing the same addon from a repository later makes it that repository's |
 | `--default-repo` | none | A repository added the first time it is given, and fetched in the background; repeat it for several. One the person removed is never added again |
+| `--device-name` | `rex` | The name this device shows in the Spotify app while a Spotify addon pairs ([below](#spotify-pairing)) |
 
 `--version` and `--help` print and exit. Logs go to stdout (info) and stderr (`WARN`, `ERROR`),
 one line each, tagged `[host]`, `[<addon id>]` or `[addon <id>]` for what the addon itself printed.
@@ -46,7 +47,7 @@ JSON in and out. It answers only this device: the socket's own peer address must
              "description": "...", "enabled": true, "repo": "github-com-debridmediamanager-rex-addons",
              "hosts": ["archive.org", "*.archive.org"],
              "state": "idle", "items": 100, "held": 0, "last_sync": 1794326938, "error": null,
-             "error_kind": null, "update_available": false, "update_hosts": null, "sign_in": null}]}
+             "error_kind": null, "update_available": false, "update_hosts": null, "sign_in": null, "requires": []}]}
 ```
 
 | Field | Meaning |
@@ -60,7 +61,8 @@ JSON in and out. It answers only this device: the socket's own peer address must
 | `hosts` | The hosts its installed manifest lets it reach |
 | `update_available` | Its repository offers a higher `version` |
 | `update_hosts` | When `update_available`, the hosts that version would reach, so the app can ask before an update widens them; `null` otherwise |
-| `sign_in` | `null` for an addon that needs no account. Else `{"label": "Sign in to Example", "account": "name" or null, "pending": {"code": "ABCD-EFGH", "url": "https://example.com/device", "expires_at": 1794330057} or null, "error": "..." or null}`: `label` for the button; `account` the name it is signed in as; `pending`, while a sign-in waits, the code to show and the address to type it at, until `expires_at` (Unix seconds); `error` why the last sign-in failed or the website signed it out. An addon with `sign_in` and no `account` doesn't sync (its error is `sign in first`, kind `sign_in`) and isn't retried, and its titles answer `502` to rex. Read the addon every couple of seconds while `pending` is set: it turns `null` with `account` set once the person entered the code, or with `error` set when the sign-in failed or expired |
+| `requires` | One entry per addon its manifest `requires`: `{"id": "youtube", "ok": true, "reason": null}`, or `ok: false` with `reason` `"not installed"`, `"disabled"` or `"sign in needed"`, for the app to say what to do first. `[]` for an addon that requires none |
+| `sign_in` | `null` for an addon that needs no account. Else `{"label": "Sign in to Example", "kind": "code", "account": "name" or null, "pending": {"code": "ABCD-EFGH", "url": "https://example.com/device", "expires_at": 1794330057} or null, "error": "..." or null}`: `label` for the button; `kind` how it signs in, `code` or `spotify`; `account` the name it is signed in as (for Spotify the account's display name, else its username); `pending`, while a sign-in waits, the code to show and the address to type it at, until `expires_at` (Unix seconds), or for `spotify` `{"device": "rex", "expires_at": ...}`: the name to pick in the Spotify app ([below](#spotify-pairing)); `error` why the last sign-in failed or the website signed it out. An addon with `sign_in` and no `account` doesn't sync (its error is `sign in first`, kind `sign_in`) and isn't retried, and its titles answer `502` to rex. Read the addon every couple of seconds while `pending` is set: it turns `null` with `account` set once the person entered the code, or with `error` set when the sign-in failed or expired |
 
 ### `GET /api/addons/{id}`
 
@@ -117,10 +119,17 @@ website by itself; once the person entered the code, `sign_in.account` is set an
 `400` for an addon with no `sign_in`, `409` when it is disabled, `502` with the addon's message
 when `signIn()` failed. Disabling, removing or signing out the addon stops a sign-in still waiting.
 
+For a `spotify` addon there is no code: this device becomes discoverable on the local network for
+10 minutes and `sign_in.pending` is `{"device": "<--device-name>", "expires_at": ...}`. Tell the
+person to open Spotify on a phone on the same Wi-Fi, tap the devices button (the speaker icon) and
+pick that name. Once they do, `pending` turns `null` with `account` set and a sync starts; if
+nobody does, `pending` turns `null` with `error` `nobody picked rex in the Spotify app in time`.
+`502` when the device cannot be announced on the network.
+
 ### `DELETE /api/addons/{id}/sign-in`
 
-Signs it out: forgets the account and any sign-in still waiting, and calls the addon's
-`signOut()`. Its titles stay in rex and its settings stay. Answers the addon as `GET` does;
+Signs it out: forgets the account and any sign-in still waiting (a pairing stops), a Spotify
+addon's saved sign-in, and calls the addon's `signOut()` if it has one. Its titles stay in rex and its settings stay. Answers the addon as `GET` does;
 `400` for an addon with no `sign_in`.
 
 ### `POST /api/addons/{id}/enabled`
@@ -182,6 +191,43 @@ Its addons, as in `GET /api/repos`.
 ### `DELETE /api/repos/{id}`
 
 Removes it and its files: `{"removed": true}`. Addons installed from it stay, with no more updates.
+
+## Spotify pairing
+
+Spotify has no code to type; it signs a device in when the person picks it in the Spotify app,
+which is Spotify Connect's zeroconf pairing. While a Spotify addon's sign-in is pending
+(at most 10 minutes), rex-addons:
+
+- answers HTTP on **all interfaces, IPv6 and IPv4, on a free TCP port** (`getInfo` and `addUser`
+  at `/`, nothing else). This is apart from the API, which stays on `--listen`, this device only.
+- announces `_spotify-connect._tcp` over **mDNS with a responder of its own** (UDP 5353, the
+  multicast groups 224.0.0.251 and ff02::fb, on every interface), named `--device-name`, its host
+  `rex-<12 hex>.local`. The app does not advertise anything itself.
+- stops both, and withdraws the record, when the pairing ends, however it ends (a Mac browsing
+  with `dns-sd` dropped it within about a second).
+
+It is never a player: it registers no Connect device with Spotify, so once paired it is in no
+device list, and a play command has nothing to reach. Its `getInfo` says `accountReq: PREMIUM`,
+as librespot's does; whether a free account can pick it is untested.
+
+What an Android app has to do for this:
+
+- Hold a `WifiManager.MulticastLock` (permission `CHANGE_WIFI_MULTICAST_STATE`) from the
+  `POST .../sign-in` until `pending` turns `null`. Without one held by some app, Android may
+  filter the mDNS queries the Spotify app sends, so the device is announced but its record is
+  never answered for again.
+- Keep `INTERNET` (already needed). The HTTP endpoint and 5353 need no other permission. The
+  mDNS sockets are opened with address and port reuse, which should let them share 5353 with
+  Android's own mDNS service.
+- Show the device name and say: same Wi-Fi as the phone, open Spotify, tap the devices button,
+  pick it. Keep reading the addon every couple of seconds while `pending` is set.
+- Measured on 2026-11-11 with the binary run from `adb shell`, not inside an app: on a Pixel 6
+  (Android 16, arm64-v8a) and a Fire TV (Android 9, armeabi-v7a) the record was announced, a fresh
+  mDNS query from another machine was answered, `getInfo` answered over the network, and
+  cancelling withdrew the record within about 2 s and closed the endpoint. Not measured: inside
+  the app (its sandbox, with and without the lock), and whether newer Android's local-network
+  permission is needed. Android names every device `localhost`, which is why the host name is
+  `rex-<12 hex>.local` rather than the system's.
 
 ## What rex reads
 

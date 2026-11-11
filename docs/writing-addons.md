@@ -31,9 +31,11 @@ You write plain JavaScript (an ES module). There's no npm and no build step.
 | `hosts` | The websites `fetch()` may reach, and that `open()` links may point at: `example.com` exactly, `*.example.com` for anything under it, or `*` for any public website. Addresses on the device or the home network are never reachable through `*` |
 | `config` | The settings the app shows. Each has a `key`, a `label`, a `type` (`text`, `secret`, `bool`, `number` or `list`, a list of text), and optionally a `default` and `required: true`. A `secret` is shown masked; a `list` with `secret: true` shows only each link's website, for links that carry a key |
 | `refresh_minutes` | How often `items()` runs. Default 360, at least 5 |
-| `host` | Optional: the lowest rex-addons version your addon needs, numbers and dots, such as `"0.2"`. From 0.2 on, an older rex-addons refuses to install it and greys it out in a repository's list (0.1 doesn't know the field). Using `sleep`, `atob`, `btoa`, `URL`, `URLSearchParams`, `hash`, `hmac`, `bytes()` or a binary `body` needs `"host": "0.2"`; `sign_in` needs `"host": "0.3"`; playlists from `open()` or for `ffprobe()` need `"host": "0.4"` |
+| `host` | Optional: the lowest rex-addons version your addon needs, numbers and dots, such as `"0.2"`. From 0.2 on, an older rex-addons refuses to install it and greys it out in a repository's list (0.1 doesn't know the field). Using `sleep`, `atob`, `btoa`, `URL`, `URLSearchParams`, `hash`, `hmac`, `bytes()` or a binary `body` needs `"host": "0.2"`; `sign_in` needs `"host": "0.3"`; playlists from `open()` or for `ffprobe()` need `"host": "0.4"`; `"kind": "spotify"`, `exports` and `requires` need `"host": "0.5"` |
 | `directories` | Optional: libraries of the addon's own, in rex's [`directories`](https://github.com/debridmediamanager/rex/blob/main/docs/feed-api.md#libraries-a-source-declares) shape, such as `[{"name": "youtube", "shows": "YouTube"}]`: titles whose `path` starts with `youtube/` go to a TV library called YouTube instead of your Movies or TV Shows. rex-addons sends it when the addon registers |
-| `sign_in` | Optional: `{"label": "Sign in to Example"}` for an addon that needs the person's account on a website ([below](#signing-in-with-a-code)). `label` is what the app's button says, `Sign in to <name>` without it |
+| `sign_in` | Optional: `{"label": "Sign in to Example"}` for an addon that needs the person's account on a website ([below](#signing-in-with-a-code)). `label` is what the app's button says, `Sign in to <name>` without it. `kind` is `"code"` (the default: your `signIn()`) or `"spotify"` ([Spotify pairing](#signing-in-with-spotify)) |
+| `exports` | Optional: functions of your default export that other addons may call, such as `["findAudio"]` ([below](#calling-another-addon)) |
+| `requires` | Optional: ids of addons whose `exports` yours calls, such as `["youtube"]`. The app shows whether each is installed, enabled and signed in |
 
 ## main.js
 
@@ -123,6 +125,8 @@ Plain JavaScript, plus these:
 | `new URL(link, base)`, `URLSearchParams` | Links, as in browsers but smaller: `new URL(link, base)` resolves a relative link, a URL has `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin` and `searchParams`, and `URLSearchParams` has `get`, `getAll`, `has`, `set`, `append`, `delete`, `toString` and `entries`. Changing `searchParams` changes the URL |
 | `hash(algorithm, text)`, `hmac(algorithm, key, text)` | A digest of the text (as UTF-8) in lowercase hex, for signing an API request. `algorithm` is `sha1`, `sha256` or `sha512`; there's no `md5` |
 | `await sleep(ms)` | Waits, for backing off when a website answers 429. The wait doesn't count as JavaScript time, and a sleep past the end of the call fails at once |
+| `spotify.user()`, `await spotify.get(path)`, `await spotify.post(path, body)` | Only with `"sign_in": {"kind": "spotify"}`: the person's Spotify library ([below](#signing-in-with-spotify)) |
+| `await addons.call(id, name, ...args)` | Only with `requires`: another addon's exported function ([below](#calling-another-addon)) |
 
 There's nothing else: no timers (`setTimeout`, use `sleep`), no `require` or `import`, no
 `TextEncoder`, no file access. Each call starts fresh, so keep anything you want to remember
@@ -136,7 +140,7 @@ Limits, per call:
 | JavaScript time | 30 s for `items()`, 10 s for `open()`. Time spent waiting on `fetch`, `ffprobe` or `sleep` doesn't count |
 | Whole call | 20 minutes for `items()`, 90 s for `open()`. A `fetch` or body read still waiting then fails |
 
-`signIn()`, `signInPoll()` and `signOut()` get `open()`'s limits.
+`signIn()`, `signInPoll()`, `signOut()` and functions other addons call get `open()`'s limits.
 | A fetched body | 16 MB |
 | `storage` | 16 MB in all, written to disk when the call ends |
 
@@ -301,6 +305,122 @@ export default {
   },
 };
 ```
+
+## Signing in with Spotify
+
+A Spotify addon lists the person's Spotify library (playlists, liked songs, saved albums) in
+rex. Nobody types anything and no Spotify developer app is needed: rex-addons pairs with the
+Spotify app the way a speaker does. The person opens Spotify on a phone on the same network,
+taps the devices button and picks this device (`rex`, or whatever `--device-name` says). rex-addons
+keeps the sign-in to itself; your code never sees it.
+
+```json
+"host": "0.5",
+"hosts": ["www.youtube.com"],
+"sign_in": {"kind": "spotify", "label": "Connect Spotify"}
+```
+
+There's no `signIn()` or `signInPoll()` to write. Signing out forgets the sign-in and calls your
+`signOut()` if you export one. **Spotify's audio is out of reach**: Spotify no longer hands it to
+clients like this one for many accounts, and rex-addons doesn't try. Play what you list from
+somewhere else, such as YouTube ([calling another addon](#calling-another-addon)).
+
+Your code gets a `spotify` global, talking to Spotify's own API (`spclient`) as Spotify's
+desktop app does, with the person's session. It is Spotify's own, undocumented API: paths can
+change without notice, so throw (and keep what rex has) when an answer isn't what you expect.
+
+| Call | What it does |
+|---|---|
+| `spotify.user()` | The account's Spotify username, which the paths below take |
+| `await spotify.get(path)` | `GET` the path, answered as JSON |
+| `await spotify.post(path, body)` | `POST` `body` as JSON, answered as JSON |
+
+`path` starts with `/` and is on Spotify's host only. A failure throws: `Spotify answered 404 to
+/metadata/4/track/...`, or, when Spotify no longer takes the sign-in, an error starting with
+`SIGN_IN_REQUIRED`, which signs the addon out if you let it through. librespot, which talks to
+Spotify for rex-addons, waits out a `429` by itself when Spotify asks for 10 seconds or less.
+
+What lists a library (measured 2026-11-11 with a Premium account; each answered in 40 to 260 ms
+and 20 track lookups in a row at 4 a second were all answered):
+
+| Path | Gives |
+|---|---|
+| `GET /playlist/v2/user/{user}/rootlist?decorate=revision,length,attributes,timestamp,owner` | The person's playlists: `contents.items[].uri` (`spotify:playlist:<id>`, plus folder markers), and in `contents.metaItems[]` each one's `attributes.name`, `attributes.picture` and `length` |
+| `GET /playlist/v2/playlist/{id}?decorate=length,attributes` | One playlist: `attributes.name`, `length`, and `contents.items[].uri` (tracks, episodes) with `attributes.timestamp`, when it was added. `contents.truncated` says when it holds only part (not seen with 82 tracks; untested past that) |
+| `POST /collection/v2/paging` `{"username": user, "set": "collection", "limit": 300}` | Liked songs (`spotify:track:` uris) and saved albums (`spotify:album:` uris) together, with `added_at`, and a `sync_token`. Past `limit` the answer should carry a `next_page_token` to send back as `pagination_token` (librespot's protocol says so; untested). `"set": "artist"` lists followed artists |
+| `GET /metadata/4/track/{gid}?market=from_token` | A track: `name`, `artist[].name`, `album` (`name`, `artist`, `date.year`, `cover_group.image[].file_id`), `number`, `disc_number`, `duration` (ms), `external_id` (`{"type": "isrc", "id": ...}`) |
+| `GET /metadata/4/album/{gid}?market=from_token` | An album: `name`, `artist`, `date`, `cover_group`, and `disc[].track[].gid` |
+
+A cover is `https://i.scdn.co/image/<file_id>`. `gid` is the id in hex; the uris carry it in
+base 62:
+
+```js
+const B62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
+const gid = (uri) => {
+  let n = 0n;
+  for (const c of uri.split(":").pop()) n = n * 62n + BigInt(B62.indexOf(c));
+  return n.toString(16).padStart(32, "0");
+};
+
+export default {
+  async items(ctx) {
+    const user = spotify.user();
+    const library = await spotify.post("/collection/v2/paging", { username: user, set: "collection", limit: 300 });
+    const items = [];
+    for (const liked of library.items.filter((item) => item.uri.startsWith("spotify:track:"))) {
+      // A track doesn't change: look it up once.
+      let track = storage.get(liked.uri);
+      if (!track) {
+        track = await spotify.get(`/metadata/4/track/${gid(liked.uri)}?market=from_token`);
+        storage.set(liked.uri, { name: track.name, artist: track.artist[0].name, album: track.album.name, duration: track.duration });
+        track = storage.get(liked.uri);
+      }
+      items.push(/* a rex music track, played from wherever you find it */);
+    }
+    return items;
+  },
+  // ...
+};
+```
+
+Spotify's public Web API (`api.spotify.com`) is not offered: it wants a developer app of the
+person's own, and the session's tokens don't work there (measured: the old token service answers
+`Invalid client`, and a login5 token gets `429` from its first call).
+
+## Calling another addon
+
+An addon can let others call some of its functions, so a Spotify addon can ask the YouTube addon
+to find and play a song with the person's YouTube sign-in, instead of signing in to YouTube
+itself. The one that offers lists them:
+
+```json
+"host": "0.5",
+"exports": ["findAudio"]
+```
+
+and the one that calls says whose it needs:
+
+```json
+"host": "0.5",
+"requires": ["youtube"]
+```
+
+```js
+const found = await addons.call("youtube", "findAudio", { artist: "...", title: "...", duration: 213 });
+```
+
+- The function runs in **the other addon's own sandbox**: its `hosts`, settings, `storage` and
+  sign-in, with `open()`'s limits, and `ctx` as its last argument as usual. Arguments and the
+  result are JSON. Its time counts as waiting for yours, not as your JavaScript time.
+- What it throws, you get thrown: `YouTube: no match for ...`. So does a call that cannot be
+  made: `the addon youtube is not installed: install it and sign in to it first`,
+  `YouTube is disabled: enable it first`, `sign in to YouTube first`, or `YouTube exports no find()`.
+  Show these to the person. When the other addon's website ended its session it is signed out,
+  and you get `sign in to YouTube again: ...`; you are not signed out.
+- One level: an addon called by another cannot call a third.
+- A link it returns that your `open()` returns must be on **your** `hosts`, as always.
+
+Installing checks that `main.js` exports each function `exports` names.
 
 ## A repository of addons
 

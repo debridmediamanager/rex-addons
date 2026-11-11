@@ -1,0 +1,351 @@
+{
+ "continuationContents": {
+  "playlistVideoListContinuation": {
+   "contents": [
+    {
+     "tileRenderer": {
+      "style": "TILE_STYLE_YTLR_VERTICAL_LIST",
+      "header": {
+       "tileHeaderRenderer": {
+        "thumbnail": {
+         "thumbnails": [
+          {
+           "url": "https://i.ytimg.com/vi/YE7VzlLtp-4/hqdefault.jpg?sqp=-oaymwEmCOADEOgC8quKqQMa8AEB-AH-CYAC0AWKAgwIABABGGUgWyhSMA8=&rs=AOn4CLBAOnxR3guKtAJtPR1i7vK2sVQdyQ",
+           "width": 480,
+           "height": 360
+          }
+         ]
+        },
+        "thumbnailOverlays": [
+         {
+          "thumbnailOverlayTimeStatusRenderer": {
+           "text": {
+            "accessibility": {
+             "accessibilityData": {
+              "label": "9 minutes, 57 seconds"
+             }
+            },
+            "simpleText": "9:57"
+           },
+           "style": "DEFAULT"
+          }
+         }
+        ]
+       }
+      },
+      "metadata": {
+       "tileMetadataRenderer": {
+        "title": {
+         "simpleText": "Big Buck Bunny"
+        },
+        "lines": [
+         {
+          "lineRenderer": {
+           "items": [
+            {
+             "lineItemRenderer": {
+              "text": {
+               "runs": [
+                {
+                 "text": "Blender"
+                }
+               ]
+              }
+             }
+            }
+           ]
+          }
+         },
+         {
+          "lineRenderer": {
+           "items": [
+            {
+             "lineItemRenderer": {
+              "text": {
+               "accessibility": {
+                "accessibilityData": {
+                 "label": "9 million views"
+                }
+               },
+               "simpleText": "9M views"
+              }
+             }
+            },
+            {
+             "lineItemRenderer": {
+              "text": {
+               "simpleText": "•"
+              }
+             }
+            },
+            {
+             "lineItemRenderer": {
+              "text": {
+               "simpleText": "18 years ago"
+              }
+             }
+            }
+           ]
+          }
+         }
+        ]
+       }
+      },
+      "onSelectCommand": {
+       "watchEndpoint": {
+        "videoId": "YE7VzlLtp-4",
+        "playlistId": "PL6B3937A5D230E335",
+        "playerParams": "iAQB"
+       }
+      },
+      "contentId": "YE7VzlLtp-4",
+      "contentType": "TILE_CONTENT_TYPE_VIDEO",
+      "customData": {
+       "playlistPageTileData": {
+        "setThumbnailAsAppBackground": true
+       }
+      },
+      "onLongPressCommand": {
+       "showMenuCommand": {
+        "contentId": "YE7VzlLtp-4",
+        "thumbnail": {
+         "thumbnails": [
+          {
+           "url": "https://i.ytimg.com/vi/YE7VzlLtp-4/hqdefault.jpg?sqp=-oaymwEmCOADEOgC8quKqQMa8AEB-AH-CYAC0AWKAgwIABABGGUgWyhSMA8=&rs=AOn4CLBAOnxR3guKtAJtPR1i7vK2sVQdyQ",
+           "width": 480,
+           "height": 360
+          }
+         ]
+        },
+        "title": {
+         "simpleText": "Big Buck Bunny"
+        },
+        "subtitle": {
+         "simpleText": "Blender • @BlenderOfficial"
+        },
+        "menu": {
+         "menuRenderer": {
+          "items": [
+           {
+            "menuNavigationItemRenderer": {
+             "text": {
+              "runs": [
+               {
+                "text": "Play"
+               }
+              ]
+             },
+             "navigationEndpoint": {
+              "watchEndpoint": {
+               "videoId": "YE7VzlLtp-4",
+               "playlistId": "PL6B3937A5D230E335",
+               "playerParams": "iAQB"
+              }
+             }
+            }
+           },
+           {
+            "menuNavigationItemRenderer": {
+             "text": {
+              "runs": [
+               {
+                "text": "Go to channel"
+               }
+              ]
+             },
+             "navigationEndpoint": {
+              "browseEndpoint": {
+               "browseId": "UCSMOQeBJ2RAnuFungnQOxLg"
+              }
+             }
+            }
+           }
+          ],
+          "accessibility": {
+           "accessibilityData": {
+            "label": "Action menu"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    },
+    {
+     "tileRenderer": {
+      "style": "TILE_STYLE_YTLR_VERTICAL_LIST",
+      "header": {
+       "tileHeaderRenderer": {
+        "thumbnail": {
+         "thumbnails": [
+          {
+           "url": "https://i.ytimg.com/vi/TLkA0RELQ1g/hqdefault.jpg?sqp=-oaymwEmCOADEOgC8quKqQMa8AEB-AH-CYAC0AWKAgwIABABGHIgWSg5MA8=&rs=AOn4CLDSu4stmcIy6LFmekQp3h7GSGtc2A",
+           "width": 480,
+           "height": 360
+          }
+         ]
+        },
+        "thumbnailOverlays": [
+         {
+          "thumbnailOverlayTimeStatusRenderer": {
+           "text": {
+            "accessibility": {
+             "accessibilityData": {
+              "label": "10 minutes, 55 seconds"
+             }
+            },
+            "simpleText": "10:55"
+           },
+           "style": "DEFAULT"
+          }
+         }
+        ]
+       }
+      },
+      "metadata": {
+       "tileMetadataRenderer": {
+        "title": {
+         "simpleText": "Elephants Dream"
+        },
+        "lines": [
+         {
+          "lineRenderer": {
+           "items": [
+            {
+             "lineItemRenderer": {
+              "text": {
+               "runs": [
+                {
+                 "text": "Blender"
+                }
+               ]
+              }
+             }
+            }
+           ]
+          }
+         },
+         {
+          "lineRenderer": {
+           "items": [
+            {
+             "lineItemRenderer": {
+              "text": {
+               "accessibility": {
+                "accessibilityData": {
+                 "label": "450 thousand views"
+                }
+               },
+               "simpleText": "450K views"
+              }
+             }
+            },
+            {
+             "lineItemRenderer": {
+              "text": {
+               "simpleText": "•"
+              }
+             }
+            },
+            {
+             "lineItemRenderer": {
+              "text": {
+               "simpleText": "17 years ago"
+              }
+             }
+            }
+           ]
+          }
+         }
+        ]
+       }
+      },
+      "onSelectCommand": {
+       "watchEndpoint": {
+        "videoId": "TLkA0RELQ1g",
+        "playlistId": "PL6B3937A5D230E335",
+        "playerParams": "iAQB"
+       }
+      },
+      "contentId": "TLkA0RELQ1g",
+      "contentType": "TILE_CONTENT_TYPE_VIDEO",
+      "customData": {
+       "playlistPageTileData": {
+        "setThumbnailAsAppBackground": true
+       }
+      },
+      "onLongPressCommand": {
+       "showMenuCommand": {
+        "contentId": "TLkA0RELQ1g",
+        "thumbnail": {
+         "thumbnails": [
+          {
+           "url": "https://i.ytimg.com/vi/TLkA0RELQ1g/hqdefault.jpg?sqp=-oaymwEmCOADEOgC8quKqQMa8AEB-AH-CYAC0AWKAgwIABABGHIgWSg5MA8=&rs=AOn4CLDSu4stmcIy6LFmekQp3h7GSGtc2A",
+           "width": 480,
+           "height": 360
+          }
+         ]
+        },
+        "title": {
+         "simpleText": "Elephants Dream"
+        },
+        "subtitle": {
+         "simpleText": "Blender • @BlenderOfficial"
+        },
+        "menu": {
+         "menuRenderer": {
+          "items": [
+           {
+            "menuNavigationItemRenderer": {
+             "text": {
+              "runs": [
+               {
+                "text": "Play"
+               }
+              ]
+             },
+             "navigationEndpoint": {
+              "watchEndpoint": {
+               "videoId": "TLkA0RELQ1g",
+               "playlistId": "PL6B3937A5D230E335",
+               "playerParams": "iAQB"
+              }
+             }
+            }
+           },
+           {
+            "menuNavigationItemRenderer": {
+             "text": {
+              "runs": [
+               {
+                "text": "Go to channel"
+               }
+              ]
+             },
+             "navigationEndpoint": {
+              "browseEndpoint": {
+               "browseId": "UCSMOQeBJ2RAnuFungnQOxLg"
+              }
+             }
+            }
+           }
+          ],
+          "accessibility": {
+           "accessibilityData": {
+            "label": "Action menu"
+           }
+          }
+         }
+        }
+       }
+      }
+     }
+    }
+   ],
+   "playlistId": "PL6B3937A5D230E335",
+   "isEditable": false,
+   "targetId": "PL6B3937A5D230E335"
+  }
+ }
+}

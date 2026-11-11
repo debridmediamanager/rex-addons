@@ -12,6 +12,8 @@ mod sandbox;
 mod server;
 #[cfg(test)]
 mod sign_in_tests;
+#[cfg(test)]
+mod youtube_tests;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

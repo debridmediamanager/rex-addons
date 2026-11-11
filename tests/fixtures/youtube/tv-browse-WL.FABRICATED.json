@@ -1,0 +1,533 @@
+{
+ "_fabricated": "No account was available: the signed-in answer is assumed to be the signed-out TV playlist page's shape (recorded 2026-11-11), with these tiles.",
+ "contents": {
+  "tvBrowseRenderer": {
+   "content": {
+    "tvSurfaceContentRenderer": {
+     "content": {
+      "twoColumnRenderer": {
+       "leftColumn": {
+        "entityMetadataRenderer": {
+         "title": {
+          "simpleText": "Watch later"
+         },
+         "buttons": [
+          {
+           "buttonRenderer": {
+            "isDisabled": false,
+            "text": {
+             "simpleText": "Information"
+            },
+            "icon": {
+             "iconType": "INFO_OUTLINE"
+            },
+            "accessibilityData": {
+             "accessibilityData": {
+              "label": "Information"
+             }
+            },
+            "command": {
+             "openPopupAction": {
+              "popup": {
+               "overlaySectionRenderer": {
+                "dismissalCommand": {
+                 "signalAction": {
+                  "signal": "POPUP_BACK"
+                 }
+                }
+               }
+              },
+              "popupType": "MODAL"
+             }
+            }
+           }
+          },
+          {
+           "buttonRenderer": {
+            "isDisabled": false,
+            "text": {
+             "simpleText": "Repeat"
+            },
+            "icon": {
+             "iconType": "LOOP"
+            },
+            "navigationEndpoint": {
+             "watchEndpoint": {
+              "videoId": "l5OZu-IrXpw",
+              "playlistId": "PL6B3937A5D230E335",
+              "params": "GAM%3D"
+             }
+            },
+            "accessibilityData": {
+             "accessibilityData": {
+              "label": "Repeat"
+             }
+            }
+           }
+          },
+          {
+           "toggleButtonRenderer": {
+            "style": {
+             "styleType": "STYLE_DEFAULT"
+            },
+            "size": {
+             "sizeType": "SIZE_DEFAULT"
+            },
+            "isToggled": false,
+            "isDisabled": false,
+            "defaultIcon": {
+             "iconType": "BOOKMARK_BORDER"
+            },
+            "defaultText": {
+             "simpleText": "Save to Library"
+            },
+            "defaultServiceEndpoint": {
+             "authDeterminedCommand": {
+              "authenticatedCommand": {
+               "commandExecutorCommand": {
+                "commands": [
+                 {
+                  "likeEndpoint": {
+                   "status": "LIKE",
+                   "target": {
+                    "playlistId": "PL6B3937A5D230E335"
+                   },
+                   "likeParams": "ChQSElBMNkIzOTM3QTVEMjMwRTMzNQ%3D%3D"
+                  }
+                 },
+                 {
+                  "openPopupAction": {
+                   "popup": {
+                    "overlayMessageRenderer": {
+                     "title": {
+                      "runs": [
+                       {
+                        "text": "Saved to Library"
+                       }
+                      ]
+                     },
+                     "style": "OVERLAY_MESSAGE_STYLE_TOAST"
+                    }
+                   },
+                   "popupType": "TOAST"
+                  }
+                 }
+                ]
+               }
+              },
+              "unauthenticatedCommand": {
+               "authRequiredCommand": {
+                "identityActionContext": {
+                 "eventTrigger": "ACCOUNT_EVENT_TRIGGER_LIKE_DISLIKE",
+                 "nextEndpoint": {
+                  "commandExecutorCommand": {
+                   "commands": [
+                    {
+                     "signalAction": {
+                      "signal": "CLOSE_POPUP"
+                     }
+                    },
+                    {
+                     "commandExecutorCommand": {
+                      "commands": [
+                       {
+                        "likeEndpoint": {
+                         "status": "LIKE",
+                         "target": {
+                          "playlistId": "PL6B3937A5D230E335"
+                         },
+                         "likeParams": "ChQSElBMNkIzOTM3QTVEMjMwRTMzNQ%3D%3D"
+                        }
+                       },
+                       {
+                        "openPopupAction": {
+                         "popup": {
+                          "overlayMessageRenderer": {
+                           "title": {
+                            "runs": [
+                             {
+                              "text": "Saved to Library"
+                             }
+                            ]
+                           },
+                           "style": "OVERLAY_MESSAGE_STYLE_TOAST"
+                          }
+                         },
+                         "popupType": "TOAST"
+                        }
+                       }
+                      ]
+                     }
+                    }
+                   ]
+                  }
+                 }
+                }
+               }
+              }
+             }
+            },
+            "toggledIcon": {
+             "iconType": "BOOKMARK"
+            },
+            "toggledText": {
+             "simpleText": "Remove from Library"
+            },
+            "toggledServiceEndpoint": {
+             "authDeterminedCommand": {
+              "authenticatedCommand": {
+               "commandExecutorCommand": {
+                "commands": [
+                 {
+                  "likeEndpoint": {
+                   "status": "INDIFFERENT",
+                   "target": {
+                    "playlistId": "PL6B3937A5D230E335"
+                   },
+                   "removeLikeParams": "ChQSElBMNkIzOTM3QTVEMjMwRTMzNQ%3D%3D"
+                  }
+                 },
+                 {
+                  "openPopupAction": {
+                   "popup": {
+                    "overlayMessageRenderer": {
+                     "title": {
+                      "runs": [
+                       {
+                        "text": "Removed from Library"
+                       }
+                      ]
+                     },
+                     "style": "OVERLAY_MESSAGE_STYLE_TOAST"
+                    }
+                   },
+                   "popupType": "TOAST"
+                  }
+                 }
+                ]
+               }
+              },
+              "unauthenticatedCommand": {
+               "authRequiredCommand": {
+                "identityActionContext": {
+                 "eventTrigger": "ACCOUNT_EVENT_TRIGGER_LIKE_DISLIKE",
+                 "nextEndpoint": {
+                  "commandExecutorCommand": {
+                   "commands": [
+                    {
+                     "signalAction": {
+                      "signal": "CLOSE_POPUP"
+                     }
+                    },
+                    {
+                     "commandExecutorCommand": {
+                      "commands": [
+                       {
+                        "likeEndpoint": {
+                         "status": "INDIFFERENT",
+                         "target": {
+                          "playlistId": "PL6B3937A5D230E335"
+                         },
+                         "removeLikeParams": "ChQSElBMNkIzOTM3QTVEMjMwRTMzNQ%3D%3D"
+                        }
+                       },
+                       {
+                        "openPopupAction": {
+                         "popup": {
+                          "overlayMessageRenderer": {
+                           "title": {
+                            "runs": [
+                             {
+                              "text": "Removed from Library"
+                             }
+                            ]
+                           },
+                           "style": "OVERLAY_MESSAGE_STYLE_TOAST"
+                          }
+                         },
+                         "popupType": "TOAST"
+                        }
+                       }
+                      ]
+                     }
+                    }
+                   ]
+                  }
+                 }
+                }
+               }
+              }
+             }
+            },
+            "toggledStyle": {
+             "styleType": "STYLE_DEFAULT"
+            },
+            "accessibilityData": {
+             "accessibilityData": {
+              "label": "Save to Library"
+             }
+            },
+            "toggledAccessibilityData": {
+             "accessibilityData": {
+              "label": "Remove from Library"
+             }
+            }
+           }
+          }
+         ],
+         "buttonLayout": "ENTITY_METADATA_BUTTON_LAYOUT_HORIZONTAL",
+         "bylines": [
+          {
+           "lineRenderer": {
+            "items": [
+             {
+              "lineItemRenderer": {
+               "badge": {
+                "metadataBadgeRenderer": {
+                 "icon": {
+                  "iconType": "PRIVACY_PUBLIC"
+                 },
+                 "style": "BADGE_STYLE_TYPE_VERIFIED"
+                }
+               }
+              }
+             },
+             {
+              "lineItemRenderer": {
+               "text": {
+                "simpleText": "Blender"
+               }
+              }
+             },
+             {
+              "lineItemRenderer": {
+               "text": {
+                "simpleText": "•"
+               }
+              }
+             },
+             {
+              "lineItemRenderer": {
+               "text": {
+                "runs": [
+                 {
+                  "text": "17"
+                 },
+                 {
+                  "text": " videos"
+                 }
+                ]
+               }
+              }
+             },
+             {
+              "lineItemRenderer": {
+               "text": {
+                "simpleText": "•"
+               }
+              }
+             },
+             {
+              "lineItemRenderer": {
+               "text": {
+                "accessibility": {
+                 "accessibilityData": {
+                  "label": "929 thousand views"
+                 }
+                },
+                "simpleText": "929K views"
+               }
+              }
+             }
+            ]
+           }
+          }
+         ]
+        }
+       },
+       "rightColumn": {
+        "playlistVideoListRenderer": {
+         "contents": [
+          {
+           "tileRenderer": {
+            "style": "TILE_STYLE_YTLR_VERTICAL_LIST",
+            "header": {
+             "tileHeaderRenderer": {
+              "thumbnail": {
+               "thumbnails": [
+                {
+                 "url": "https://i.ytimg.com/vi/u9lj-c29dxI/hqdefault.jpg",
+                 "width": 480,
+                 "height": 360
+                }
+               ]
+              },
+              "thumbnailOverlays": [
+               {
+                "thumbnailOverlayTimeStatusRenderer": {
+                 "text": {
+                  "accessibility": {
+                   "accessibilityData": {
+                    "label": "3 minutes, 58 seconds"
+                   }
+                  },
+                  "simpleText": "3:58"
+                 },
+                 "style": "DEFAULT"
+                }
+               }
+              ]
+             }
+            },
+            "metadata": {
+             "tileMetadataRenderer": {
+              "title": {
+               "simpleText": "WING IT! - Blender Open Movie"
+              },
+              "lines": [
+               {
+                "lineRenderer": {
+                 "items": [
+                  {
+                   "lineItemRenderer": {
+                    "text": {
+                     "runs": [
+                      {
+                       "text": "Blender Studio"
+                      }
+                     ]
+                    }
+                   }
+                  }
+                 ]
+                }
+               },
+               {
+                "lineRenderer": {
+                 "items": [
+                  {
+                   "lineItemRenderer": {
+                    "text": {
+                     "accessibility": {
+                      "accessibilityData": {
+                       "label": "1.1 million views"
+                      }
+                     },
+                     "simpleText": "1.1M views"
+                    }
+                   }
+                  },
+                  {
+                   "lineItemRenderer": {
+                    "text": {
+                     "simpleText": "•"
+                    }
+                   }
+                  },
+                  {
+                   "lineItemRenderer": {
+                    "text": {
+                     "simpleText": "3 years ago"
+                    }
+                   }
+                  }
+                 ]
+                }
+               }
+              ]
+             }
+            },
+            "onSelectCommand": {
+             "watchEndpoint": {
+              "videoId": "u9lj-c29dxI",
+              "playlistId": "PL6B3937A5D230E335",
+              "playerParams": "iAQB"
+             }
+            },
+            "contentId": "u9lj-c29dxI",
+            "contentType": "TILE_CONTENT_TYPE_VIDEO",
+            "customData": {
+             "playlistPageTileData": {
+              "setThumbnailAsAppBackground": true
+             }
+            },
+            "onLongPressCommand": {
+             "showMenuCommand": {
+              "contentId": "u9lj-c29dxI",
+              "thumbnail": {
+               "thumbnails": [
+                {
+                 "url": "https://i.ytimg.com/vi/u9lj-c29dxI/hqdefault.jpg",
+                 "width": 480,
+                 "height": 360
+                }
+               ]
+              },
+              "title": {
+               "simpleText": "WING IT! - Blender Open Movie"
+              },
+              "subtitle": {
+               "simpleText": "Blender Studio • @BlenderStudio"
+              },
+              "menu": {
+               "menuRenderer": {
+                "items": [
+                 {
+                  "menuNavigationItemRenderer": {
+                   "text": {
+                    "runs": [
+                     {
+                      "text": "Play"
+                     }
+                    ]
+                   },
+                   "navigationEndpoint": {
+                    "watchEndpoint": {
+                     "videoId": "u9lj-c29dxI",
+                     "playlistId": "PL6B3937A5D230E335",
+                     "playerParams": "iAQB"
+                    }
+                   }
+                  }
+                 },
+                 {
+                  "menuNavigationItemRenderer": {
+                   "text": {
+                    "runs": [
+                     {
+                      "text": "Go to channel"
+                     }
+                    ]
+                   },
+                   "navigationEndpoint": {
+                    "browseEndpoint": {
+                     "browseId": "UCz75RVbH8q2jdBJ4SnwuZZQ"
+                    }
+                   }
+                  }
+                 }
+                ],
+                "accessibility": {
+                 "accessibilityData": {
+                  "label": "Action menu"
+                 }
+                }
+               }
+              }
+             }
+            }
+           }
+          }
+         ],
+         "playlistId": "PL6B3937A5D230E335",
+         "isEditable": false,
+         "targetId": "PL6B3937A5D230E335"
+        }
+       }
+      }
+     }
+    }
+   }
+  }
+ }
+}

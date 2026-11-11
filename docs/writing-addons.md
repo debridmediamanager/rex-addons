@@ -34,7 +34,7 @@ You write plain JavaScript (an ES module). There's no npm and no build step.
 | `host` | Optional: the lowest rex-addons version your addon needs, numbers and dots, such as `"0.2"`. From 0.2 on, an older rex-addons refuses to install it and greys it out in a repository's list (0.1 doesn't know the field). Using `sleep`, `atob`, `btoa`, `URL`, `URLSearchParams`, `hash`, `hmac`, `bytes()` or a binary `body` needs `"host": "0.2"`; `sign_in` needs `"host": "0.3"`; playlists from `open()` or for `ffprobe()` need `"host": "0.4"`; `"kind": "spotify"`, `exports` and `requires` need `"host": "0.5"` |
 | `directories` | Optional: libraries of the addon's own, in rex's [`directories`](https://github.com/debridmediamanager/rex/blob/main/docs/feed-api.md#libraries-a-source-declares) shape, such as `[{"name": "youtube", "shows": "YouTube"}]`: titles whose `path` starts with `youtube/` go to a TV library called YouTube instead of your Movies or TV Shows. rex-addons sends it when the addon registers |
 | `sign_in` | Optional: `{"label": "Sign in to Example"}` for an addon that needs the person's account on a website ([below](#signing-in-with-a-code)). `label` is what the app's button says, `Sign in to <name>` without it. `kind` is `"code"` (the default: your `signIn()`) or `"spotify"` ([Spotify pairing](#signing-in-with-spotify)) |
-| `exports` | Optional: functions of your default export that other addons may call, such as `["findAudio"]` ([below](#calling-another-addon)) |
+| `exports` | Optional: functions of your default export that other addons may call, such as `["findSong"]` ([below](#calling-another-addon)) |
 | `requires` | Optional: ids of addons whose `exports` yours calls, such as `["youtube"]`. The app shows whether each is installed, enabled and signed in |
 
 ## main.js
@@ -316,7 +316,7 @@ keeps the sign-in to itself; your code never sees it.
 
 ```json
 "host": "0.5",
-"hosts": ["www.youtube.com"],
+"hosts": ["*.googlevideo.com"],
 "sign_in": {"kind": "spotify", "label": "Connect Spotify"}
 ```
 
@@ -395,7 +395,7 @@ itself. The one that offers lists them:
 
 ```json
 "host": "0.5",
-"exports": ["findAudio"]
+"exports": ["findSong", "songAudio"]
 ```
 
 and the one that calls says whose it needs:
@@ -406,7 +406,7 @@ and the one that calls says whose it needs:
 ```
 
 ```js
-const found = await addons.call("youtube", "findAudio", { artist: "...", title: "...", duration: 213 });
+const found = await addons.call("youtube", "findSong", { title: "...", artists: ["..."], duration_ms: 213000 });
 ```
 
 - The function runs in **the other addon's own sandbox**: its `hosts`, settings, `storage` and
@@ -414,13 +414,21 @@ const found = await addons.call("youtube", "findAudio", { artist: "...", title: 
   result are JSON. Its time counts as waiting for yours, not as your JavaScript time.
 - What it throws, you get thrown: `YouTube: no match for ...`. So does a call that cannot be
   made: `the addon youtube is not installed: install it and sign in to it first`,
-  `YouTube is disabled: enable it first`, `sign in to YouTube first`, or `YouTube exports no find()`.
+  `YouTube is disabled: enable it first`, `sign in to YouTube first`, or `YouTube exports no findSong()`.
   Show these to the person. When the other addon's website ended its session it is signed out,
   and you get `sign in to YouTube again: ...`; you are not signed out.
 - One level: an addon called by another cannot call a third.
 - A link it returns that your `open()` returns must be on **your** `hosts`, as always.
 
 Installing checks that `main.js` exports each function `exports` names.
+
+The [YouTube addon](../addons/youtube/main.js) exports two, which the
+[Spotify addon](../addons/spotify/main.js) plays its songs with:
+
+| Function | What it does |
+|---|---|
+| `findSong({title, artists, album, duration_ms, isrc})` | A recording of the song on YouTube, or `null`: `{video_id, title, channel, duration_ms, kind, score, via, size, bitrate, mime, sample_rate, channels}`. `kind` is `song` for YouTube Music's own recording, `video` for an upload; the length, size and rates are its AAC file's, from one player call. A search and one or two player calls; ask for each song once and keep the answer |
+| `songAudio(video_id)` | Its AAC file to play now: `{url, mime, bitrate, duration_ms, size}`, a plain file read with `Range`, its link good for six hours. One player call |
 
 ## A repository of addons
 

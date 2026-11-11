@@ -29,6 +29,7 @@ it again updates it with your settings kept.
 | Internet Archive | Public domain feature films from archive.org: silents, classics, noir, B-movies. No setup, and it comes with the app |
 | Stremio addons | Films and series from your Stremio addons' catalogs, played from your stream addons' links |
 | YouTube | Your YouTube playlists (Liked videos, Watch later, your own) and any playlist you link, each a playlist in Plex, played from YouTube up to 1080p |
+| Spotify | Your Spotify library (Liked Songs, your playlists, saved albums) as music in Plexamp and the Plex apps, each song played as its recording on YouTube |
 
 ## YouTube
 
@@ -56,6 +57,34 @@ are the newest; 200 by default) and which of yours to take.
   hours.
 - **Limits:** private, deleted, members-only and live videos are left out. No descriptions: YouTube's
   TV app is not given them. A video's links last six hours, so each play asks YouTube for fresh ones.
+
+## Spotify
+
+Your Spotify library becomes music in Plexamp and every Plex app, in a music library called
+Spotify: Liked Songs, your playlists (and those you follow) and your saved albums, each song
+with Spotify's title, album, artist, track number, release date and cover, under its album and its
+album's artist. Each Spotify playlist, and Liked Songs, is a playlist in Plex in Spotify's order. A
+song in several playlists is there once.
+
+- **The sound comes from YouTube.** Spotify doesn't let apps like this one play its music, so each
+  song plays as its recording on YouTube, through the YouTube addon: YouTube Music's own recording
+  of it where YouTube has one, else an upload of it at the same length. Now and
+  then that is another version than Spotify's (another master, a single edit, an upload with a few
+  seconds more), and a song YouTube has no recording of at its length is left out. On a library of
+  38 songs we checked, 36 were found, 24 of them YouTube Music's own recordings. Plex apps play the
+  sound as it is (AAC, about 128 kbit/s); nothing is downloaded until you play it.
+- **The YouTube addon is needed, signed in.** The Spotify addon asks it to find each song and to
+  play it, with its YouTube sign-in. Install it and sign in first; the app says when it isn't ready.
+- **Connecting Spotify:** press Connect Spotify, then on a phone on the same Wi-Fi open Spotify,
+  tap the devices button (the speaker icon) and pick `rex`. It is Spotify's own pairing, as a
+  speaker uses; no password is typed, and the addon reads your library only.
+- **A few songs at a time.** A song is looked for on YouTube once, before it shows: a sync looks for
+  30 (a setting), an hour apart, so a big library fills in over a day or two. A song YouTube has
+  none of is looked for again a week later. Playlists are read again when Spotify says they changed.
+- **Limits:** no podcasts and no local files; artists are shown by Spotify's names and pictures,
+  not Plex's, so there are no artist bios or similar artists; a song shows
+  under its album's first artist; lyrics aren't brought. Playlists you follow that went private are
+  left out.
 
 ## Running it yourself
 

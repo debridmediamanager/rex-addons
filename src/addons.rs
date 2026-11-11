@@ -48,6 +48,10 @@ pub struct Manifest {
     pub host: Option<String>,
     /// When it needs the person's account on a website.
     pub sign_in: Option<SignIn>,
+    /// Functions of its default export other addons may call (`addons.call`).
+    pub exports: Vec<String>,
+    /// Addons whose exports it calls.
+    pub requires: Vec<String>,
     pub raw: Json,
 }
 
@@ -155,7 +159,23 @@ impl Manifest {
             }),
             Some(_) => return Err("manifest: sign_in must be an object, such as {\"label\": \"Sign in to Example\"}".into()),
         };
-
+        let names = |key: &str, valid: fn(&str) -> bool, what: &str| -> Result<Vec<String>, String> {
+            match raw.get(key) {
+                None | Some(Json::Null) => Ok(Vec::new()),
+                Some(Json::Array(list)) => list
+                    .iter()
+                    .map(|entry| entry.as_str().filter(|e| valid(e)).map(str::to_string).ok_or(format!("manifest: {key}: {entry} is no {what}")))
+                    .collect(),
+                Some(_) => Err(format!("manifest: {key} must be a list")),
+            }
+        };
+        let exports = names("exports", |name| {
+            name.len() <= 64 && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }, "function name")?;
+        let requires = names("requires", valid_id, "addon id")?;
+        if requires.contains(&id) {
+            return Err("manifest: an addon cannot require itself".into());
+        }
         // rex's own `directories` (docs/feed-api.md), passed on as they are when the addon registers.
         if raw.get("directories").is_some_and(|d| !d.is_null() && !d.is_array()) {
             return Err("manifest: directories must be a list, such as [{\"name\": \"youtube\", \"shows\": \"YouTube\"}]".into());
@@ -164,11 +184,12 @@ impl Manifest {
         if sign_in.is_some() && host.as_deref().is_none_or(|host| newer("0.3", host)) {
             return Err("manifest: sign_in needs \"host\": \"0.3\" or newer".into());
         }
-        // An older rex-addons would install it and never sign it in.
-        if sign_in.as_ref().is_some_and(SignIn::spotify) && host.as_deref().is_none_or(|host| newer("0.5", host)) {
-            return Err("manifest: sign_in kind spotify needs \"host\": \"0.5\" or newer".into());
+        // Fields an older rex-addons would install and ignore.
+        let spotify = sign_in.as_ref().is_some_and(SignIn::spotify);
+        if (spotify || !exports.is_empty() || !requires.is_empty()) && host.as_deref().is_none_or(|host| newer("0.5", host)) {
+            return Err("manifest: sign_in kind spotify, exports and requires need \"host\": \"0.5\" or newer".into());
         }
-        Ok(Manifest { id, name, version, description, hosts: Hosts(hosts), config, refresh_minutes, host, sign_in, raw: raw.clone() })
+        Ok(Manifest { id, name, version, description, hosts: Hosts(hosts), config, refresh_minutes, host, sign_in, exports, requires, raw: raw.clone() })
     }
 
     /// Installing refuses an addon that needs a newer rex-addons.
@@ -344,6 +365,12 @@ mod tests {
             (json!({"id": "a", "name": "x", "version": "1", "host": "0.2.9", "sign_in": {}}), "\"host\": \"0.3\""),
             (json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "sign_in": {"kind": "password"}}), "sign_in.kind"),
             (json!({"id": "a", "name": "x", "version": "1", "host": "0.4", "sign_in": {"kind": "spotify"}}), "\"host\": \"0.5\""),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.4", "exports": ["find"]}), "\"host\": \"0.5\""),
+            (json!({"id": "a", "name": "x", "version": "1", "requires": ["youtube"]}), "\"host\": \"0.5\""),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "exports": ["find me"]}), "function name"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "exports": "find"}), "exports must be a list"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "requires": ["YouTube"]}), "addon id"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "requires": ["a"]}), "require itself"),
         ] {
             let error = Manifest::parse(&bad).unwrap_err();
             assert!(error.contains(says), "{bad}: {error}");
@@ -356,6 +383,9 @@ mod tests {
         assert_eq!(signing(json!({"kind": "spotify", "label": "Connect Spotify"})), sign_in("Connect Spotify", "spotify"));
         assert_eq!(signing(Json::Null), None);
         assert_eq!(manifest().sign_in, None);
+        let both = Manifest::parse(&json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "exports": ["find", "_open2"], "requires": ["youtube"]})).unwrap();
+        assert_eq!((both.exports, both.requires), (vec!["find".to_string(), "_open2".into()], vec!["youtube".to_string()]));
+        assert_eq!((manifest().exports.len(), manifest().requires.len()), (0, 0));
     }
 
     #[test]

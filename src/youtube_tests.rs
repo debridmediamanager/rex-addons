@@ -326,7 +326,7 @@ impl Rig {
     }
 
     fn run(&self, source: &str, method: &str, args: &[Json]) -> Result<Json, String> {
-        let env = Env { addon: "youtube", source, hosts: &self.hosts, storage: self.storage.clone(), prober: self.app.prober.clone(), spotify: None };
+        let env = Env { addon: "youtube", source, hosts: &self.hosts, storage: self.storage.clone(), prober: self.app.prober.clone(), spotify: None, calls: None };
         sandbox::call(&env, method, args, sandbox::ITEMS)
     }
 

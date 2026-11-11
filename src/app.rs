@@ -297,11 +297,12 @@ impl App {
         let manifest = Manifest::parse(raw)?;
         manifest.check_host()?;
         let storage = Arc::new(Storage::open(PathBuf::from("/dev/null")));
-        let env = Env { addon: &manifest.id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone(), spotify: None };
+        let env = Env { addon: &manifest.id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone(), spotify: None, calls: None };
         let mut needed = vec![json!("items"), json!("open")];
         if manifest.sign_in.as_ref().is_some_and(|s| !s.spotify()) {
             needed.extend([json!("signIn"), json!("signInPoll")]);
         }
+        needed.extend(manifest.exports.iter().map(|name| json!(name)));
         sandbox::call(&env, "", &needed, sandbox::OPEN).map_err(|error| format!("main.js: {error}"))?;
         let path = dir(self, &manifest.id);
         std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
@@ -443,7 +444,7 @@ impl App {
     }
 
     fn call_open(self: &Arc<Self>, id: &str, item: &str, manifest: &Manifest, source: &str, config: &Map<String, Json>, storage: Arc<Storage>) -> Result<Opened, String> {
-        let env = self.env(id, manifest, source, storage);
+        let env = self.env(id, manifest, source, storage, true);
         let ctx = json!({"config": manifest.effective(config)});
         let answer = sandbox::call(&env, "open", &[json!(item), ctx], sandbox::OPEN)?;
         if !answer["playlist"].is_null() {
@@ -567,7 +568,7 @@ impl App {
         if let Some(label) = manifest.missing(&config) {
             return Err(format!("set {label} first"));
         }
-        let env = self.env(id, &manifest, &source, storage);
+        let env = self.env(id, &manifest, &source, storage, true);
         let returned = sandbox::call(&env, "items", &[json!({"config": manifest.effective(&config)})], sandbox::ITEMS).map_err(|error| {
             let mut addons = self.addons.lock().unwrap();
             match addons.get_mut(id).and_then(|a| Some((sign_in_required(a, &error)?, a))) {
@@ -804,7 +805,7 @@ impl App {
             let a = addons.get(id).ok_or("no such addon")?;
             (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone())
         };
-        let env = self.env(id, &manifest, &source, storage);
+        let env = self.env(id, &manifest, &source, storage, true);
         let mut args = args.to_vec();
         args.push(json!({"config": manifest.effective(&config)}));
         sandbox::call(&env, method, &args, sandbox::OPEN).map_err(|error| masked(id, &error))
@@ -915,7 +916,7 @@ impl App {
     }
 }
 
-/// Signing in with Spotify, and the global a Spotify addon gets.
+/// Signing in with Spotify, and the globals some addons get.
 impl App {
     /// `POST /api/addons/{id}/sign-in` for a Spotify addon: this device is discoverable on the
     /// local network until the person picks it in the Spotify app, for PAIRING_LIFETIME.
@@ -998,13 +999,70 @@ impl App {
         }
     }
 
-    /// The sandbox an addon's call runs in, with the globals its manifest asks for.
-    fn env<'a>(self: &Arc<Self>, id: &'a str, manifest: &'a Manifest, source: &'a str, storage: Arc<Storage>) -> Env<'a> {
+    /// `addons.call(callee, function, ...args)` from the addon `caller`: the callee's exported
+    /// function in a sandbox of its own, with its own hosts, settings, storage and sign-in and
+    /// `open()`'s limits. One level: what it calls cannot call a third.
+    pub fn call_export(self: &Arc<Self>, caller: &str, callee: &str, function: &str, args: Vec<Json>) -> Result<Json, String> {
+        let (manifest, source, config, storage) = {
+            let addons = self.addons.lock().unwrap();
+            if !addons.get(caller).is_some_and(|a| a.manifest.requires.iter().any(|r| r == callee)) {
+                return Err(format!("{callee} is not in this addon's requires"));
+            }
+            if let Some(reason) = unmet(&addons, callee) {
+                let name = addons.get(callee).map_or(callee.to_string(), |a| a.manifest.name.clone());
+                return Err(match reason {
+                    "not installed" => format!("the addon {callee} is not installed: install it and sign in to it first"),
+                    "disabled" => format!("{name} is disabled: enable it first"),
+                    _ => format!("sign in to {name} first"),
+                });
+            }
+            let a = &addons[callee];
+            if !a.manifest.exports.iter().any(|e| e == function) {
+                return Err(format!("{} exports no {function}()", a.manifest.name));
+            }
+            (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone())
+        };
+        let env = self.env(callee, &manifest, &source, storage, false);
+        let mut args = args;
+        args.push(json!({"config": manifest.effective(&config)}));
+        sandbox::call(&env, function, &args, sandbox::OPEN).map_err(|error| {
+            let mut addons = self.addons.lock().unwrap();
+            match addons.get_mut(callee).and_then(|a| Some((sign_in_required(a, &error)?, a))) {
+                // Never SIGN_IN_REQUIRED itself: that would sign the caller out.
+                Some((reason, addon)) => {
+                    signed_out(self, addon, &reason);
+                    format!("sign in to {} again: {reason}", manifest.name)
+                }
+                None => format!("{}: {}", manifest.name, first_line(&masked(callee, &error))),
+            }
+        })
+    }
+
+    /// The sandbox an addon's call runs in, with the globals its manifest asks for. `calls`:
+    /// whether `addons.call` reaches other addons (false inside a call from another one).
+    fn env<'a>(self: &Arc<Self>, id: &'a str, manifest: &'a Manifest, source: &'a str, storage: Arc<Storage>, calls: bool) -> Env<'a> {
         let spotify = manifest.sign_in.as_ref().filter(|s| s.spotify()).map(|_| {
             let (app, id) = (self.clone(), id.to_string());
             Arc::new(move |method: &str, path: &str, body: Vec<Json>| app.spotify_call(&id, method, path, body.first())) as Bridge
         });
-        Env { addon: id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone(), spotify }
+        let calls = (!manifest.requires.is_empty()).then(|| match calls {
+            true => {
+                let (app, caller) = (self.clone(), id.to_string());
+                Arc::new(move |callee: &str, function: &str, args: Vec<Json>| app.call_export(&caller, callee, function, args)) as Bridge
+            }
+            false => Arc::new(|_: &str, _: &str, _: Vec<Json>| Err("addons.call: an addon called by another cannot call a third".to_string())) as Bridge,
+        });
+        Env { addon: id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone(), spotify, calls }
+    }
+}
+
+/// Why the addon `id` cannot be called now: `not installed`, `disabled` or `sign in needed`.
+fn unmet(addons: &BTreeMap<String, Addon>, id: &str) -> Option<&'static str> {
+    match addons.get(id) {
+        None => Some("not installed"),
+        Some(a) if !a.enabled => Some("disabled"),
+        Some(a) if !a.signed_in() => Some("sign in needed"),
+        Some(_) => None,
     }
 }
 
@@ -1318,6 +1376,10 @@ impl App {
         let addons = self.addons.lock().unwrap();
         let addon = addons.get(id)?;
         let mut status = addon.status();
+        status["requires"] = addon.manifest.requires.iter().map(|r| {
+            let reason = unmet(&addons, r);
+            json!({"id": r, "ok": reason.is_none(), "reason": reason})
+        }).collect();
         let update = addon.repo.as_ref().and_then(|r| offers.get(&(r.clone(), id.to_string()))).filter(|(v, _)| newer(v, &addon.manifest.version));
         status["update_available"] = json!(update.is_some());
         status["update_hosts"] = json!(update.map(|(_, hosts)| hosts));

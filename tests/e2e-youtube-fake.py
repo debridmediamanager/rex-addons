@@ -108,6 +108,9 @@ class Handler(BaseHTTPRequestHandler):
             if body.get("continuation") == TOKEN:
                 return self.send(200, load("tv-browse-PL6B3937A5D230E335-page2.json"))
             return self.send(404, {})
+        if path == "/youtubei/v1/search":
+            # Every search finds the songs of one fabricated band (tests/e2e-spotify.sh).
+            return self.send(200, load("tv-search.FABRICATED.json"))
         if path == "/youtubei/v1/player":
             answer = player(body.get("videoId", ""))
             return self.send(200, answer) if answer else self.send(404, {})

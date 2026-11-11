@@ -545,7 +545,8 @@ impl App {
             }
             Err(error) => {
                 warn(id, &format!("sync failed: {error}"));
-                addon.error = Some(masked(id, &error));
+                // The log keeps the stack; the app shows the reason.
+                addon.error = Some(first_line(&masked(id, &error)));
             }
         }
         save_state(self, addon);
@@ -780,6 +781,22 @@ impl App {
         Ok(())
     }
 
+    /// `id` can be called again (signed in, or enabled): the addons that require it and whose
+    /// last sync failed sync now, instead of waiting for their retry.
+    fn wake_dependents(self: &Arc<Self>, id: &str) {
+        let waiting: Vec<String> = {
+            let addons = self.addons.lock().unwrap();
+            addons
+                .values()
+                .filter(|a| a.enabled && a.error.is_some() && a.manifest.requires.iter().any(|r| r == id))
+                .map(|a| a.manifest.id.clone())
+                .collect()
+        };
+        for dependent in waiting {
+            self.start_sync(&dependent, false);
+        }
+    }
+
     pub fn set_enabled(self: &Arc<Self>, id: &str, enabled: bool) -> Result<(), String> {
         let mut addons = self.addons.lock().unwrap();
         let addon = addons.get_mut(id).ok_or("no such addon")?;
@@ -791,6 +808,7 @@ impl App {
         drop(addons);
         if enabled {
             self.start_sync(id, false);
+            self.wake_dependents(id);
         }
         Ok(())
     }
@@ -886,6 +904,7 @@ impl App {
             drop(addons);
             if done {
                 self.start_sync(id, false);
+                self.wake_dependents(id);
             }
             return;
         }
@@ -978,6 +997,7 @@ impl App {
         drop(addons);
         if done {
             self.start_sync(id, false);
+            self.wake_dependents(id);
         }
     }
 

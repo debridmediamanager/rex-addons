@@ -487,6 +487,26 @@ fn unmet_requires_are_shown_and_explained() {
 }
 
 #[test]
+fn an_addon_syncs_as_soon_as_the_one_it_requires_can_be_called() {
+    let rig = rig("wake");
+    let caller = json!({"id": "caller", "name": "Caller", "version": "1.0.0", "host": "0.5", "hosts": ["tube.example"], "requires": ["tube"]});
+    let source = r#"export default { async items() { await addons.call("tube", "find", "a"); return []; }, open() {} };"#;
+    rig.app.install(&caller, source, None).unwrap();
+    rig.app.install(&callee_manifest(json!({})), CALLEE, None).unwrap();
+    signed_in(&rig, "tube", Some("someone"));
+    rig.app.set_enabled("tube", false).unwrap();
+    rig.app.start_sync("caller", false);
+    let failed = rig.until("caller", "the failed sync", |s| s["state"] == "error");
+    // The reason alone: the stack of the throw stays in the log.
+    assert_eq!(failed["error"], "Tube is disabled: enable it first");
+
+    // Nobody asks the caller to sync again: enabling what it requires does.
+    rig.app.set_enabled("tube", true).unwrap();
+    let synced = rig.until("caller", "the sync after tube came back", |s| s["state"] == "idle" && s["last_sync"].is_number());
+    assert_eq!(synced["error"], Json::Null);
+}
+
+#[test]
 fn errors_propagate_and_a_callee_signed_out_leaves_the_caller_signed_in() {
     let rig = calls_rig("errors");
     rig.app.install(&callee_manifest(json!({})), CALLEE, None).unwrap();

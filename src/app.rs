@@ -1459,12 +1459,16 @@ fn extension(format_name: &str) -> Option<&'static str> {
 }
 
 /// The probe goes with its item, and the item's path takes the extension of what was probed:
-/// an addon cannot know whether a link is Matroska or MP4 before it is read.
+/// an addon cannot know whether a link is Matroska or MP4 before it is read. An extension that is
+/// one of ffprobe's names for the format stays: a track's `.m4a` is MP4 too, and rex takes an
+/// `.mp4` for a video, never a track.
 fn attach(item: &mut Map<String, Json>, probe: Json) {
-    if let Some(ext) = probe["format"]["format_name"].as_str().and_then(extension) {
+    let format = probe["format"]["format_name"].as_str().unwrap_or_default();
+    if let Some(ext) = extension(format) {
         let path = path_of(item);
         let (folder, file) = path.rsplit_once('/').map_or(("", path.as_str()), |(d, f)| (d, f));
-        let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+        let (stem, own) = file.rsplit_once('.').unwrap_or((file, ""));
+        let ext = if format.split(',').any(|name| name.eq_ignore_ascii_case(own)) { own } else { ext };
         let renamed = if folder.is_empty() { format!("{stem}.{ext}") } else { format!("{folder}/{stem}.{ext}") };
         item.insert("path".into(), json!(renamed));
     }
@@ -1584,6 +1588,13 @@ mod tests {
         let mut item = json!({"id": "y", "path": "live/channel"}).as_object().unwrap().clone();
         attach(&mut item, json!({"format": {"format_name": "hls"}, "streams": [{}]}));
         assert_eq!(item["path"], "live/channel.m3u8");
+        // A track's .m4a is one of the format's names: it stays, and rex takes it as audio.
+        let mut item = json!({"id": "t", "path": "music/album/track.m4a"}).as_object().unwrap().clone();
+        attach(&mut item, json!({"format": {"format_name": "mov,mp4,m4a,3gp,3g2,mj2"}, "streams": [{}]}));
+        assert_eq!(item["path"], "music/album/track.m4a");
+        let mut item = json!({"id": "w", "path": "films/clip.webm"}).as_object().unwrap().clone();
+        attach(&mut item, json!({"format": {"format_name": "matroska,webm"}, "streams": [{}]}));
+        assert_eq!(item["path"], "films/clip.webm");
         assert_eq!(encode_path("films/Some Film (1950).mkv"), "films/Some%20Film%20%281950%29.mkv");
     }
 }

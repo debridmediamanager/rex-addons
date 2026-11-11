@@ -4,14 +4,20 @@
 // YouTube as it plays.
 //
 // Everything goes through YouTube's TV app API (InnerTube), signed in with the TV app's own code
-// sign-in, as a TV does. For an ordinary video, YouTube now hands the TV app one plain file: the
-// 360p MP4 with picture and sound together (itag 18); everything sharper comes only as YouTube's
-// own streaming protocol (SABR), which nothing outside YouTube's apps plays. That file's link works
-// only once its `n` parameter (and, for some videos, its signature) is transformed by a function in
-// YouTube's player script, as the player does in a browser. The addon downloads that script when
-// YouTube changes it, cuts out the function, keeps it in storage, and runs it for each link
-// (measured 2026-11-11). Where YouTube offers an HLS stream instead, the best variant within the
-// resolution setting is used.
+// sign-in, as a TV does. The playlists are listed as YouTube's current TV app lists them. A video's
+// files are asked for as an older Samsung TV's app asks, which YouTube still hands plain links to
+// every file: picture and sound apart, up to 4K, and the 360p MP4 with both together (the current
+// TV app gets only the 360p file; measured 2026-11-11). A link works only once its `n` parameter
+// (and, for some videos, its signature) is transformed by a function in YouTube's player script,
+// as the player does in a browser. The addon downloads that script when YouTube changes it, cuts
+// out the function, keeps it in storage, and runs it for each link.
+//
+// Up to 1080p a video plays from its H.264 picture and its AAC sound, which rex copies into what a
+// Plex app plays without converting either. The two are separate files, and rex reads one item at
+// one address, so the addon writes an HLS presentation for each video: a media playlist for each
+// file, its segments byte ranges of YouTube's own link read off the file's index (`sidx`), and a
+// master playlist naming both. rex-addons serves the playlists; FFmpeg reads the media from YouTube.
+// A video without that pair, or whose pair fails in any way, plays from its 360p MP4 as it is.
 
 const YT = "https://www.youtube.com";
 const OAUTH = {
@@ -25,11 +31,18 @@ const TV = {
   // ponytail: the version measured signed in on 2026-11-11; YouTube's TV page names the current one.
   client: { clientName: "TVHTML5", clientVersion: "7.20250923.13.00" },
 };
+// The client a video's files are asked for as (yt-dlp's tv_samsung): YouTube hands it a plain link
+// to every file, signed in. Its listings answer 500, so the playlists come from TV above.
+const SAMSUNG_UA = "Mozilla/5.0 (SMART-TV; Linux; Tizen 2.4.0) AppleWebKit/538.1 (KHTML, like Gecko) Version/2.4.0 TV Safari/538.1";
+const SAMSUNG = {
+  ua: SAMSUNG_UA,
+  client: { clientName: "TVHTML5", clientVersion: "5.20260707", deviceMake: "Samsung", deviceModel: "UKS9800", osName: "Tizen", osVersion: "2.4.0", userAgent: SAMSUNG_UA },
+};
 // Any video's id: YouTube lists the account's own playlists in its "save to playlist" answer for one.
 const ANY_VIDEO = "jNQXAC9IVRw";
 
-// A video is checked (one player call, its link tried and probed, a few hundred KB) before it
-// reaches rex. A sync checks this many at most, within this time, pausing between them, and the
+// A video is checked (one player call, its files' indexes read and the first two segments of each
+// probed, a few MB) before it reaches rex. A sync checks this many at most, within this time, pausing between them, and the
 // rest arrive over the next hourly syncs; what a check learns is kept while the video stays listed.
 const CHECKS_PER_SYNC = 30;
 const CHECK_BUDGET_MS = 5 * 60 * 1000;
@@ -94,19 +107,19 @@ async function accessToken(force = false) {
 
 // ---------------------------------------------------------------- InnerTube
 
-/** One InnerTube call as the TV app, signed in, the token refreshed once when YouTube refuses it.
- * The request's shape (never the token) is logged, so a changed answer can be told from a changed
- * request. */
-async function innertube(endpoint, body) {
+/** One InnerTube call as a TV app (`app`), signed in, the token refreshed once when YouTube refuses
+ * it. The request's shape (never the token) is logged, so a changed answer can be told from a
+ * changed request. */
+async function innertube(endpoint, body, app = TV) {
   console.debug(`youtubei/${endpoint}: ${JSON.stringify(body).slice(0, 120)}`);
   const call = async (token) => {
     const answer = await fetch(`${YT}/youtubei/v1/${endpoint}?prettyPrint=false`, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json", "User-Agent": TV.ua, Authorization: `Bearer ${token}`,
-        "X-YouTube-Client-Name": "7", "X-YouTube-Client-Version": TV.client.clientVersion,
+        "Content-Type": "application/json", "User-Agent": app.ua, Authorization: `Bearer ${token}`,
+        "X-YouTube-Client-Name": "7", "X-YouTube-Client-Version": app.client.clientVersion,
       },
-      body: JSON.stringify({ context: { client: { ...TV.client, hl: "en", gl: "US" } }, ...body }),
+      body: JSON.stringify({ context: { client: { ...app.client, hl: "en", gl: "US" } }, ...body }),
     });
     if (answer.status === 429) throw new Error("YouTube answered 429 (too many requests from this address); the next sync tries again");
     if (answer.status === 401 || answer.status === 403) return answer.status;
@@ -463,12 +476,13 @@ async function playerScript(fresh = false) {
 
 // ---------------------------------------------------------------- playing
 
-/** The TV app's player answer for a video, with the player script's signature timestamp. */
+/** The player answer for a video, as the Samsung TV app asks, with the player script's signature
+ * timestamp. */
 async function player(id, script) {
   return await innertube("player", {
     videoId: id, contentCheckOk: true, racyCheckOk: true,
     playbackContext: { contentPlaybackContext: { signatureTimestamp: script.sts, html5Preference: "HTML5_PREF_WANTS" } },
-  });
+  }, SAMSUNG);
 }
 
 /** Why a player answer cannot play, or null. `bot` when YouTube wants proof this is no bot. */
@@ -480,43 +494,15 @@ function refusal(answer) {
   }
   const details = answer.videoDetails ?? {};
   if (details.isLive || details.isUpcoming || details.isPostLiveDvr || !Number(details.lengthSeconds)) return { why: "a live stream" };
-  if (!answer.streamingData?.hlsManifestUrl && !muxed(answer)) return { why: "YouTube offered no file with picture and sound together" };
+  if (!muxed(answer) && !pair(answer, Infinity)) return { why: "YouTube offered neither H.264 with AAC nor a 360p file" };
   return null;
 }
 
-/** The plain file with picture and sound together, H.264 + AAC: 360p (itag 18) is the one YouTube still hands out. */
+/** The plain file with picture and sound together, H.264 + AAC: 360p (itag 18). */
 const muxed = (answer) => (answer.streamingData?.formats ?? []).find((f) => /avc1/.test(f.mimeType) && /mp4a/.test(f.mimeType) && (f.url || f.signatureCipher));
 
-/** The variant of an HLS master playlist rex reads: picture and sound together (H.264 + AAC), the
- * highest within `most` lines, else the smallest. Returns {url, height}. */
-async function variant(master, most) {
-  const answer = await fetch(master);
-  if (!answer.ok) throw new Error(`YouTube's HLS playlist answered ${answer.status}`);
-  const lines = (await answer.text()).split(/\r?\n/);
-  const variants = [];
-  lines.forEach((line, at) => {
-    if (!line.startsWith("#EXT-X-STREAM-INF:")) return;
-    const attributes = Object.fromEntries([...line.matchAll(/([A-Z0-9-]+)=("[^"]*"|[^,]*)/g)].map(([, name, value]) => [name, value.replace(/^"|"$/g, "")]));
-    const codecs = attributes.CODECS ?? "";
-    const uri = lines.slice(at + 1).find((next) => next.trim() && !next.startsWith("#"));
-    // A variant with an AUDIO group has its sound elsewhere: rex reads one playlist.
-    if (!uri || attributes.AUDIO || !/avc1/.test(codecs) || !/mp4a/.test(codecs)) return;
-    const height = Number((attributes.RESOLUTION ?? "").split("x")[1]) || 0;
-    variants.push({ url: new URL(uri.trim(), answer.url).href, height, bandwidth: Number(attributes.BANDWIDTH) || 0 });
-  });
-  if (!variants.length) throw new Error("YouTube's HLS playlist has no stream with picture and sound together");
-  const within = variants.filter((one) => one.height <= most);
-  const pick = (within.length ? within : variants.filter((one) => one.height === Math.min(...variants.map((v) => v.height))))
-    .reduce((best, one) => (one.height > best.height || (one.height === best.height && one.bandwidth > best.bandwidth) ? one : best));
-  return { url: pick.url, height: pick.height };
-}
-
-/** What a player answer plays from: {kind: "hls", url, height} or {kind: "mp4", url, height, date},
- * the file's link with its `n` (and signature) transformed by the player script. */
-async function playable(answer, script, most) {
-  if (answer.streamingData.hlsManifestUrl) return { kind: "hls", ...(await variant(answer.streamingData.hlsManifestUrl, most)) };
-  const format = muxed(answer);
-  const transform = transformer(script.code);
+/** A file's link, its `n` (and signature) transformed as the player script does. */
+function link(format, transform) {
   let url;
   if (format.url) url = new URL(format.url);
   else {
@@ -526,16 +512,127 @@ async function playable(answer, script, most) {
   }
   const n = url.searchParams.get("n");
   if (n) url.searchParams.set("n", transform({ n }).n);
-  // The file's last change (microseconds), the day it was put up as near as YouTube says.
+  return url.href;
+}
+
+/** A file's last change (its `lastModified`, in microseconds), the day it was put up as near as YouTube says. */
+function dated(format) {
   const changed = Number(format.lastModified) / 1000;
-  const date = changed > 0 ? new Date(changed).toISOString().slice(0, 10) : undefined;
-  return { kind: "mp4", url: url.href, height: format.height, date };
+  return changed > 0 ? new Date(changed).toISOString().slice(0, 10) : undefined;
+}
+
+/** The H.264 picture of most lines up to `most` (YouTube's 1080p of a 1920x804 film counts as
+ * 1080), and the AAC sound (itag 140), both with a link and an index: {video, audio}, or null.
+ * `itags` picks exactly those, as a video was checked. YouTube lists itag 140 up to three times:
+ * plain, with its loudness evened out (`isDrc`) and with voices raised (`xtags`); and once per dub
+ * (`audioTrack`). The plain one in the video's own language is taken. */
+function pair(answer, most, itags) {
+  const files = (answer.streamingData?.adaptiveFormats ?? []).filter((f) => (f.url || f.signatureCipher) && f.initRange && f.indexRange);
+  const lines = (f) => parseInt(f.qualityLabel) || Math.min(f.width, f.height);
+  const video = files
+    .filter((f) => (itags ? f.itag === itags[0] : /^video\/mp4; codecs="avc1/.test(f.mimeType) && lines(f) <= most))
+    .sort((a, b) => lines(b) - lines(a) || (b.fps ?? 0) - (a.fps ?? 0) || b.bitrate - a.bitrate)[0];
+  const audio = files
+    .filter((f) => f.itag === (itags ? itags[1] : 140) && !f.isDrc && (!f.audioTrack || f.audioTrack.audioIsDefault))
+    .sort((a, b) => Number(!!a.xtags) - Number(!!b.xtags))[0];
+  return video && audio ? { video, audio } : null;
+}
+
+/** A file's segments, out of the `sidx` box at `at` in `bytes` (ISO/IEC 14496-12, 8.16.3):
+ * [{offset, size, duration}], offsets in the file. */
+function segments(bytes, at) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (at + 32 > bytes.length || String.fromCharCode(...bytes.subarray(at + 4, at + 8)) !== "sidx") throw new Error("no index where YouTube says the file's index is");
+  const version = bytes[at + 8];
+  const timescale = view.getUint32(at + 16);
+  const big = (p) => view.getUint32(p) * 2 ** 32 + view.getUint32(p + 4);
+  let p = at + 20;
+  const first = version === 0 ? view.getUint32(p + 4) : big(p + 8);
+  p += version === 0 ? 8 : 16;
+  const count = view.getUint16(p + 2);
+  p += 4;
+  if (!timescale || !count || p + count * 12 > bytes.length) throw new Error("the file's index is cut short");
+  // The first segment starts this far after the end of the box.
+  let offset = at + view.getUint32(at) + first;
+  const list = [];
+  for (let i = 0; i < count; i++, p += 12) {
+    const reference = view.getUint32(p);
+    if (reference >>> 31) throw new Error("the file's index points at another index");
+    const size = reference & 0x7fffffff;
+    list.push({ offset, size, duration: view.getUint32(p + 4) / timescale });
+    offset += size;
+  }
+  return list;
+}
+
+// The picture's playlist says each segment starts this much before it does. FFmpeg's HLS reader
+// seeks to where the playlist says a segment starts, then drops the picture up to a keyframe whose
+// decode time is at or past that; H.264 with B-frames decodes a keyframe a frame or two before it
+// shows it, so the segment's own keyframe was dropped and, after a seek, the picture came up to
+// 5 s after the sound (FFmpeg 8.1, measured 2026-11-11). Starting the timeline a little early
+// (shortening the first segment) keeps it.
+const EARLY = 0.25;
+
+/** A media playlist of `segments` of the file at `url`, whose first `init` bytes are its header. */
+function mediaPlaylist(url, init, list) {
+  const lines = ["#EXTM3U", "#EXT-X-VERSION:7", `#EXT-X-TARGETDURATION:${Math.ceil(Math.max(...list.map((s) => s.duration)))}`,
+    "#EXT-X-PLAYLIST-TYPE:VOD", "#EXT-X-MEDIA-SEQUENCE:0", `#EXT-X-MAP:URI="${url}",BYTERANGE="${init}@0"`];
+  for (const s of list) lines.push(`#EXTINF:${s.duration.toFixed(6)},`, `#EXT-X-BYTERANGE:${s.size}@${s.offset}`, url);
+  return lines.concat("#EXT-X-ENDLIST", "").join("\n");
+}
+
+/** The HLS presentation of a picture and sound pair, as open() returns it: {playlist, playlists}.
+ * Each file's index is read (a couple of KB) to cut it into segments. */
+async function presentation(chosen, transform) {
+  const playlists = {};
+  for (const [name, format] of Object.entries(chosen)) {
+    const url = link(format, transform);
+    const answer = await fetch(url, { headers: { Range: `bytes=0-${format.indexRange.end}` } });
+    if (answer.status !== 206 && answer.status !== 200) throw new Error(`YouTube answered ${answer.status} for the ${name}'s index`);
+    const list = segments(await answer.bytes(), Number(format.indexRange.start));
+    if (name === "video") list[0].duration -= Math.min(EARLY, list[0].duration / 2);
+    playlists[`${name}.m3u8`] = mediaPlaylist(url, Number(format.initRange.end) + 1, list);
+  }
+  const { video, audio } = chosen;
+  const codecs = (format) => /codecs="([^"]+)"/.exec(format.mimeType)?.[1] ?? "";
+  const playlist = ["#EXTM3U", "#EXT-X-VERSION:7", "#EXT-X-INDEPENDENT-SEGMENTS",
+    '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="Original",DEFAULT=YES,AUTOSELECT=YES,URI="audio.m3u8"',
+    `#EXT-X-STREAM-INF:BANDWIDTH=${video.bitrate + audio.bitrate},CODECS="${codecs(video)},${codecs(audio)}",RESOLUTION=${video.width}x${video.height}${video.fps ? `,FRAME-RATE=${video.fps}` : ""},AUDIO="audio"`,
+    "video.m3u8", ""].join("\n");
+  return { playlist, playlists };
 }
 
 /** Whether YouTube serves a link: a one-byte read. */
 async function serves(url) {
   const answer = await fetch(url, { headers: { Range: "bytes=0-0" } });
   return answer.status === 206 || answer.status === 200;
+}
+
+/** What a player answer plays from, probed: {kind: "pair", itags, ...} up to `most` lines, else
+ * (or when anything on that way fails) {kind: "mp4", ...}, the 360p file; null when YouTube refuses
+ * the file's link, as for an outdated player script. */
+async function playable(id, answer, script, most) {
+  const transform = transformer(script.code);
+  if (most > 360) {
+    try {
+      const chosen = pair(answer, most);
+      if (!chosen) throw new Error(`no H.264 picture up to ${most} lines with AAC sound`);
+      const probe = await ffprobe(await presentation(chosen, transform));
+      // FFmpeg's HLS reader guesses the rates from the first segments; YouTube says them.
+      const rate = (format) => String(format.averageBitrate ?? format.bitrate);
+      probe.format.bit_rate = String(Number(rate(chosen.video)) + Number(rate(chosen.audio)));
+      for (const stream of probe.streams) stream.bit_rate = rate(stream.codec_type === "video" ? chosen.video : chosen.audio);
+      return { kind: "pair", itags: [chosen.video.itag, chosen.audio.itag], height: chosen.video.height, date: dated(chosen.video), probe };
+    } catch (error) {
+      if (/ffprobe\(\) is not available/.test(error.message)) throw error;
+      console.warn(`${id}: ${error.message}; its 360p file plays instead`);
+    }
+  }
+  const file = muxed(answer);
+  if (!file) throw new Error("YouTube offered no 360p file");
+  const url = link(file, transform);
+  if (!(await serves(url))) return null;
+  return { kind: "mp4", height: file.height, date: dated(file), probe: await ffprobe(url) };
 }
 
 function settings(config) {
@@ -547,7 +644,7 @@ function settings(config) {
     return id;
   });
   return {
-    count: number(config.count, 200, 1, 5000), most: number(config.max_height, 1080, 144, 4320),
+    count: number(config.count, 200, 1, 5000), most: number(config.max_height, 1080, 360, 1080),
     liked: config.liked !== false, later: config.watch_later !== false, own: config.own !== false, links,
   };
 }
@@ -574,28 +671,27 @@ async function listAll(wanted) {
   return lists;
 }
 
-/** What a check of one video learns: the listing's details, and the link that plays and its probe.
+/** What a check of one video learns: the listing's details, and what plays and its probe.
  * `sync.looked` once the player script was looked up again this sync. */
 async function check(listed, most, sync) {
   let script = await playerScript();
-  const answer = await player(listed.id, script);
+  let answer = await player(listed.id, script);
   const refused = refusal(answer);
   if (refused) return { refused };
-  let link = await playable(answer, script, most);
-  if (link.kind === "mp4" && !(await serves(link.url))) {
+  let found = await playable(listed.id, answer, script, most);
+  if (!found) {
     // YouTube may have moved to another player script since it was looked up.
     if (sync.looked) throw new Error("YouTube refuses the file's link");
     sync.looked = true;
     script = await playerScript(true);
-    link = await playable(await player(listed.id, script), script, most);
-    if (!(await serves(link.url))) throw new Error("YouTube refuses the file's link, also with the newest player script");
+    answer = await player(listed.id, script);
+    found = await playable(listed.id, answer, script, most);
+    if (!found) throw new Error("YouTube refuses the file's link, also with the newest player script");
   }
-  const probe = await ffprobe(link.url);
   return {
     video: {
       title: listed.title, channel: listed.channel || answer.videoDetails.author || "YouTube", channel_id: answer.videoDetails.channelId,
-      thumb: listed.thumb ?? `https://i.ytimg.com/vi/${listed.id}/hqdefault.jpg`, date: link.date,
-      kind: link.kind, height: link.height, ...(link.kind === "hls" ? { most } : {}), probe,
+      thumb: listed.thumb ?? `https://i.ytimg.com/vi/${listed.id}/hqdefault.jpg`, quality: most, ...found,
     },
   };
 }
@@ -619,7 +715,8 @@ export default {
       });
     }
 
-    // Check what is new (or an HLS stream checked for another resolution limit), a bounded number a sync.
+    // Check what is new, or was checked for another quality (or by 1.0, which kept no quality),
+    // a bounded number a sync: a video's probe is of the file it plays at that quality.
     const numbers = storage.get("numbers") ?? {};
     const until = Date.now() + CHECK_BUDGET_MS;
     let checks = 0, waiting = 0, halted = false;
@@ -627,7 +724,7 @@ export default {
     for (const [id, { video: listed }] of places) {
       const known = storage.get(`v:${id}`);
       const skipped = storage.get(`skip:${id}`);
-      if ((known && (known.kind === "mp4" || known.most === wanted.most)) || (skipped && skipped.until > Date.now())) continue;
+      if (known?.quality === wanted.most || (skipped && skipped.until > Date.now())) continue;
       if (checks >= CHECKS_PER_SYNC || Date.now() > until || halted) {
         waiting += 1;
         continue;
@@ -662,14 +759,16 @@ export default {
     }
     if (waiting) console.log(`${waiting} videos wait to be checked; they arrive over the next syncs`);
 
-    const ready = [...places.keys()].map((id) => [id, storage.get(`v:${id}`)]).filter(([, video]) => video);
+    // Until it is checked again, a video 1.0 checked plays as it did: its 360p file (1.0's YouTube
+    // HLS streams were never offered signed in, and are left out).
+    const ready = [...places.keys()].map((id) => [id, storage.get(`v:${id}`)]).filter(([, video]) => video && video.kind !== "hls");
     // A show's name and poster: its channel's first video's here, the same on every push (a
     // video made with another channel names both).
     const shows = {};
     for (const [, video] of [...ready].sort(([, a], [, b]) => a.episode - b.episode)) shows[video.channel_id] ??= { title: video.channel, poster: video.thumb };
     const items = ready.map(([id, video]) => ({
       id: `yt-${id}`,
-      path: `youtube/${video.channel_id}/${id}.${video.kind === "hls" ? "m3u8" : "mp4"}`,
+      path: `youtube/${video.channel_id}/${id}.${video.kind === "pair" ? "m3u8" : "mp4"}`,
       kind: "episode", season: 1, episode: video.episode,
       name: shows[video.channel_id].title, release: `youtube:${video.channel_id}`,
       display: { title: video.title, date: video.date, thumb: video.thumb, show: shows[video.channel_id] },
@@ -688,16 +787,24 @@ export default {
     return items;
   },
 
-  async open(id, ctx) {
+  async open(id) {
     const vid = id.replace(/^yt-/, "");
     const known = storage.get(`v:${vid}`);
     const script = await playerScript();
     const answer = await player(vid, script);
     const refused = refusal(answer);
     if (refused) throw new Error(`${vid} does not play: ${refused.why}`);
-    // An HLS stream at the variant it was probed at, so what plays is what rex was told about. A
-    // file's link lives six hours, so a fresh one is asked for at each play.
-    return { url: (await playable(answer, script, known?.height ?? settings(ctx.config).most)).url };
+    // The files it was checked with, so what plays is what rex was told about. A link lives six
+    // hours, so fresh ones are asked for at each play.
+    const transform = transformer(script.code);
+    if (known?.kind === "pair") {
+      const chosen = pair(answer, Infinity, known.itags);
+      if (!chosen) throw new Error(`${vid} does not play: YouTube no longer offers its files ${known.itags.join(" and ")}`);
+      return await presentation(chosen, transform);
+    }
+    const file = muxed(answer);
+    if (!file) throw new Error(`${vid} does not play: YouTube offered no 360p file`);
+    return { url: link(file, transform) };
   },
 
   async signIn() {

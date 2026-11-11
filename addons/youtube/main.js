@@ -485,8 +485,8 @@ async function player(id, script) {
   }, SAMSUNG);
 }
 
-/** Why a player answer cannot play, or null. `bot` when YouTube wants proof this is no bot. */
-function refusal(answer) {
+/** Why a player answer cannot play at all, or null. `bot` when YouTube wants proof this is no bot. */
+function unplayable(answer) {
   const status = answer.playabilityStatus ?? {};
   if (status.status !== "OK") {
     const why = status.reason || textOf(status.errorScreen?.playerErrorMessageRenderer?.reason) || status.status || "no answer";
@@ -494,6 +494,13 @@ function refusal(answer) {
   }
   const details = answer.videoDetails ?? {};
   if (details.isLive || details.isUpcoming || details.isPostLiveDvr || !Number(details.lengthSeconds)) return { why: "a live stream" };
+  return null;
+}
+
+/** Why a player answer cannot play as a video, or null. */
+function refusal(answer) {
+  const refused = unplayable(answer);
+  if (refused) return refused;
   if (!muxed(answer) && !pair(answer, Infinity)) return { why: "YouTube offered neither H.264 with AAC nor a 360p file" };
   return null;
 }
@@ -633,6 +640,190 @@ async function playable(id, answer, script, most) {
   const url = link(file, transform);
   if (!(await serves(url))) return null;
   return { kind: "mp4", height: file.height, date: dated(file), probe: await ffprobe(url) };
+}
+
+// ---------------------------------------------------------------- songs, for other addons
+
+// How a song is found with what this addon has, the TV app's sign-in (measured 2026-11-11): YouTube
+// Music's own search (WEB_REMIX) and the web's both answer 400 to the TV token, so songs are looked
+// for as the TV app searches, `youtubei/v1/search` with TVHTML5. Its answer mixes music videos, live
+// takes, covers and Shorts; YouTube Music's own recording of a song (its artist's "Topic" track)
+// comes as a square tile whose second line starts "Song" and has no length on it. The tiles are
+// ranked against the track, and the best is asked for as a play would (the Samsung TV client's player
+// call): that gives its true length and its AAC file, and proves it plays. Searching a recording's
+// ISRC sometimes brings that tile among unrelated videos, so it is tried when the title finds none.
+
+// A track's length and a tile's may differ by this much and still be one recording.
+const LENGTH_SLACK = (ms) => Math.max(4000, ms * 0.025);
+// Words naming a take other than the studio one. A tile with one the track's own title lacks is
+// another recording (or no recording at all), whatever else agrees.
+const OTHER_TAKE = ["live", "remix", "acoustic", "instrumental", "karaoke", "cover", "demo", "unplugged", "sped up", "slowed",
+  "reverb", "nightcore", "8d", "piano version", "orchestral", "reaction", "tutorial", "lesson", "mashup", "extended", "loop"];
+const MINOR = ["lyrics", "lyric video", "visualizer", "official video", "music video", "official music video", "video"];
+
+/** Text as compared: letters and digits of any script, accents and case off, everything else one space. */
+function fold(text) {
+  return (text ?? "").normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/&/g, " and ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+}
+
+/** A title without what is in brackets and without who it features: "Song (feat. X)" and "Song [Live]" are "Song". */
+const unbracketed = (title) => (title ?? "").replace(/\s*[([{【].*?[)\]}】]/g, " ").replace(/\s+(?:feat|ft|featuring)\.?\s.*$/i, "");
+/** A title's name without its version: "Song - Remastered 2011" is "Song" too. */
+const bare = (title) => fold(unbracketed(title).replace(/\s+[-–—]\s+.*$/, ""));
+
+/** How alike two folded texts are, 0 to 1: Dice's coefficient of their letter pairs, which works
+ * for scripts written without spaces as for those with. */
+function alike(a, b) {
+  const pairs = (s) => {
+    const list = [];
+    for (const word of s.split(" ")) for (let i = 0; i < Math.max(1, word.length - 1); i++) list.push(word.slice(i, i + 2));
+    return list;
+  };
+  if (!a || !b) return 0;
+  if (a === b) return 1;
+  const left = pairs(a), right = pairs(b);
+  let same = 0;
+  for (const pair of left) {
+    const at = right.indexOf(pair);
+    if (at >= 0) {
+      same += 1;
+      right.splice(at, 1);
+    }
+  }
+  return (2 * same) / (left.length + pairs(b).length);
+}
+
+const takes = (text, words) => words.filter((word) => ` ${fold(text)} `.includes(` ${word} `));
+
+/** One search tile as {video_id, title, channel, duration_ms (null for a song's tile), kind}, or
+ * null for what is not a video: a playlist, a mix, a film, a Short. */
+function tile([, lockup]) {
+  if (!["LOCKUP_CONTENT_TYPE_MUSIC", "LOCKUP_CONTENT_TYPE_VIDEO"].includes(lockup.contentType) || !lockup.contentId) return null;
+  const meta = lockup.metadata?.lockupMetadataViewModel ?? {};
+  const rows = (meta.metadata?.contentMetadataViewModel?.metadataRows ?? []).map((row) => (row.metadataParts ?? []).map((part) => part.text?.content ?? ""));
+  const badge = find(lockup.contentImage ?? {}, ["thumbnailBadgeViewModel"]).map(([, b]) => b.text).find((t) => /^\d+(:\d\d)+$/.test(t ?? ""));
+  const song = rows[1]?.[0] === "Song" || lockup.styling?.contentImageAspectRatio === "LOCKUP_CONTENT_IMAGE_ASPECT_RATIO_SQUARE";
+  return {
+    video_id: lockup.contentId, title: meta.title?.content ?? "", channel: rows[0]?.[0] ?? "",
+    duration_ms: badge ? badge.split(":").reduce((sum, part) => sum * 60 + Number(part), 0) * 1000 : null,
+    kind: song ? "song" : "video",
+  };
+}
+
+/** The videos of a TV search answer, each once, in its order. */
+function tiles(answer) {
+  const seen = new Set();
+  return find(answer.contents ?? {}, ["lockupViewModel"]).map(tile).filter((one) => one && !seen.has(one.video_id) && seen.add(one.video_id));
+}
+
+/** How well a tile matches a track `want` ({title, artists, duration_ms}), 0 to 1, or 0 for a tile
+ * that is no recording of it: another take, another artist's, a title too unlike, a length too far.
+ * A song tile (YouTube Music's recording) is preferred over a music video, which often has more
+ * than the song in it. */
+function scoreSong(want, one) {
+  const title = bare(want.title);
+  const artists = (want.artists ?? []).map(fold).filter(Boolean);
+  // A video's title often holds its artist ("Artist - Song (Official Video)"): of its parts, the
+  // one most like the track's title is the title.
+  const parts = (one.title ?? "").replace(/\s*[([{【].*?[)\]}】]/g, " ").split(/\s+[-–—|:]\s+|\s*\/\/\s*/).map(unbracketed).map(fold).filter(Boolean);
+  // Or it is somewhere inside it, word for word ("ARTIST「Song」Official Video").
+  const inside = title && ` ${fold(one.title)} `.includes(` ${title} `) ? 0.9 : 0;
+  const named = Math.max(inside, ...parts.map((part) => alike(title, part)));
+  if (named < 0.75) return 0;
+  const channel = fold((one.channel ?? "").replace(/\s*-\s*topic$/i, "").replace(/vevo$/i, "").replace(/\bofficial\b/i, ""));
+  const where = ` ${channel} ${fold(one.title)} `;
+  const byArtist = artists.length === 0 || artists.some((artist) => where.includes(` ${artist} `) || alike(artist, channel) >= 0.8);
+  if (!byArtist) return 0;
+  // Another take: a word the tile has and the track has not. A take the track is (its own
+  // "Live") that the tile does not say is a weaker mismatch: song tiles often leave it off.
+  if (takes(one.title, OTHER_TAKE).some((word) => !takes(want.title, OTHER_TAKE).includes(word))) return 0;
+  const missing = takes(want.title, OTHER_TAKE).filter((word) => !takes(one.title, OTHER_TAKE).includes(word)).length;
+  // A song tile shows no length; YouTube Music's recording is nearly always the track's, and the
+  // player call checks it before it counts.
+  let length = one.kind === "song" ? 0.8 : 0.5;
+  if (one.duration_ms != null && want.duration_ms) {
+    const off = Math.abs(one.duration_ms - want.duration_ms);
+    if (off > 4 * LENGTH_SLACK(want.duration_ms)) return 0;
+    length = off <= LENGTH_SLACK(want.duration_ms) ? 1 - off / (2 * LENGTH_SLACK(want.duration_ms)) : 0.1;
+  }
+  const kind = one.kind === "song" ? 1 : /official audio|audio oficial|\baudio\b/i.test(one.title) ? 0.8 : takes(one.title, MINOR).length ? 0.4 : 0.6;
+  const score = 0.4 * named + 0.3 * length + 0.3 * kind - 0.2 * missing;
+  return Math.max(0, Math.min(1, Math.round(score * 1000) / 1000));
+}
+
+// A tile scoring under this is no match.
+const SONG_FLOOR = 0.6;
+
+/** The AAC file (itag 140) of a player answer: plain, not evened out, in the video's own language. */
+const aac = (answer) => (answer.streamingData?.adaptiveFormats ?? [])
+  .filter((f) => f.itag === 140 && (f.url || f.signatureCipher) && !f.isDrc && (!f.audioTrack || f.audioTrack.audioIsDefault))
+  .sort((a, b) => Number(!!a.xtags) - Number(!!b.xtags))[0];
+
+/** What a play of an AAC file reads: its length, size and rates, from the player answer. */
+function audioOf(format) {
+  return {
+    mime: format.mimeType.split(";")[0], duration_ms: Number(format.approxDurationMs), size: Number(format.contentLength),
+    bitrate: Number(format.averageBitrate ?? format.bitrate), sample_rate: Number(format.audioSampleRate) || 44100,
+    channels: Number(format.audioChannels) || 2,
+  };
+}
+
+/** The best of `found` (already scored, best first) that plays and whose true length agrees, with
+ * its file's details; at most `tries` player calls. */
+async function verified(want, found, tries) {
+  for (const one of found.slice(0, tries)) {
+    const answer = await innertube("player", { videoId: one.video_id, contentCheckOk: true, racyCheckOk: true }, SAMSUNG);
+    const refused = unplayable(answer);
+    if (refused?.bot) throw new Error(`YouTube asks this account to prove it is not a bot (${refused.why})`);
+    const format = aac(answer);
+    if (refused || !format) {
+      console.warn(`${one.video_id}: ${refused?.why ?? "no AAC file"}; trying the next`);
+      continue;
+    }
+    const audio = audioOf(format);
+    if (want.duration_ms && Math.abs(audio.duration_ms - want.duration_ms) > LENGTH_SLACK(want.duration_ms)) continue;
+    const scored = scoreSong(want, { ...one, duration_ms: audio.duration_ms });
+    if (scored >= SONG_FLOOR) return { ...one, ...audio, score: scored };
+  }
+  return null;
+}
+
+/** A recording on YouTube of the track `want` ({title, artists, album, duration_ms, isrc}): its
+ * artist and title searched, the tiles ranked, and the best ones asked for until one plays at the
+ * track's length; failing that, its ISRC searched. {video_id, title, channel, duration_ms, kind,
+ * score, via, size, bitrate, mime, sample_rate, channels}, or null when YouTube has none. */
+async function findSong(want) {
+  if (!want?.title) throw new Error("findSong() needs at least a title");
+  const ranked = (answer) => tiles(answer).map((one) => ({ ...one, score: scoreSong(want, one) }))
+    .filter((one) => one.score >= SONG_FLOOR).sort((a, b) => b.score - a.score);
+  // "Song - Remastered 2011" is searched as "Artist Song": YouTube's titles rarely say the remaster.
+  // "Song - Live at Wembley" keeps its take.
+  const version = /\s+[-–—]\s+(.*)$/.exec(want.title);
+  const title = version && !takes(version[1], OTHER_TAKE).length ? want.title.slice(0, version.index) : want.title;
+  const query = [(want.artists ?? [])[0], title].filter(Boolean).join(" ");
+  const hit = await verified(want, ranked(await innertube("search", { query })), 2);
+  if (hit) return { ...hit, via: "title" };
+  // An ISRC search brought a track the title search missed for 2 of 35 tracks of a real library
+  // (2026-11-11), so it is the fallback, not the first try.
+  if (!/^[A-Z]{2}[A-Z0-9]{3}\d{7}$/.test(want.isrc ?? "")) return null;
+  await sleep(1000);
+  const byIsrc = await verified(want, ranked(await innertube("search", { query: want.isrc })), 1);
+  return byIsrc ? { ...byIsrc, via: "isrc" } : null;
+}
+
+/** The AAC file of a video to play now: {url, mime, bitrate, duration_ms, size}. A link lives six
+ * hours, so ask again for each play. */
+async function songAudio(id) {
+  if (!/^[\w-]{11}$/.test(id ?? "")) throw new Error(`songAudio() needs a video id, not ${JSON.stringify(id)}`);
+  const script = await playerScript();
+  const answer = await player(id, script);
+  const refused = unplayable(answer);
+  if (refused) throw new Error(`${id} does not play: ${refused.why}`);
+  const format = aac(answer);
+  if (!format) throw new Error(`${id} does not play: YouTube offered no AAC file`);
+  const { mime, bitrate, duration_ms, size } = audioOf(format);
+  return { url: link(format, transformer(script.code)), mime, bitrate, duration_ms, size };
 }
 
 function settings(config) {
@@ -806,6 +997,10 @@ export default {
     if (!file) throw new Error(`${vid} does not play: YouTube offered no 360p file`);
     return { url: link(file, transform) };
   },
+
+  // For other addons (manifest `exports`), such as the Spotify addon.
+  findSong,
+  songAudio,
 
   async signIn() {
     const device = Array.from({ length: 32 }, () => Math.floor(Math.random() * 16).toString(16)).join("");

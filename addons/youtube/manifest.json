@@ -1,9 +1,10 @@
 {
   "id": "youtube",
   "name": "YouTube",
-  "version": "1.1.0",
-  "description": "Your YouTube playlists (Liked videos, Watch later and your own) and any playlist you link, each a playlist in Plex. Sign in with a code. Videos play from YouTube up to 1080p, H.264 with AAC, which every Plex app plays; rex joins picture and sound without converting either. Nothing is downloaded.",
-  "host": "0.4",
+  "version": "1.2.0",
+  "description": "Your YouTube playlists (Liked videos, Watch later and your own) and any playlist you link, each a playlist in Plex. Sign in with a code. Videos play from YouTube up to 1080p, H.264 with AAC, which every Plex app plays; rex joins picture and sound without converting either. Nothing is downloaded. Other addons (Spotify) can find songs on YouTube and play their sound through it.",
+  "host": "0.5",
+  "exports": ["findSong", "songAudio"],
   "sign_in": {"label": "Sign in to YouTube"},
   "hosts": ["www.youtube.com", "*.googlevideo.com"],
   "directories": [{"name": "youtube", "shows": "YouTube"}],

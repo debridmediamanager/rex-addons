@@ -1,0 +1,25 @@
+{"contents": {"sectionListRenderer": {"contents": [
+  {"shelfRenderer": {"headerRenderer": {"shelfHeaderRenderer": {"title": {"simpleText": "Search results for Rex Band First Light"}}}, "content": {"horizontalListRenderer": {"items": [
+    {"lockupViewModel": {"contentId": "u9lj-c29dxI", "contentType": "LOCKUP_CONTENT_TYPE_MUSIC",
+      "contentImage": {"thumbnailViewModel": {"image": {"sources": [{"url": "https://i.ytimg.com/vi/u9lj-c29dxI/hqdefault.jpg", "width": 320, "height": 180}]},
+        "overlays": [{"thumbnailBottomOverlayViewModel": {"badges": [{"thumbnailBadgeViewModel": {"icon": {"sources": [{"clientResource": {"imageName": "AUDIO"}}]}, "text": "6:40", "badgeStyle": "THUMBNAIL_OVERLAY_BADGE_STYLE_DEFAULT"}}]}}]}},
+      "metadata": {"lockupMetadataViewModel": {"title": {"content": "Rex Band - First Light (Official Video)"}, "metadata": {"contentMetadataViewModel": {"metadataRows": [
+        {"metadataParts": [{"text": {"content": "Rex Band"}}]}, {"metadataParts": [{"text": {"content": "2.1M views"}}, {"text": {"content": "3 years ago"}}]}], "delimiter": " • "}}}},
+      "styling": {"layout": "LOCKUP_LAYOUT_VERTICAL"}}},
+    {"lockupViewModel": {"contentId": "RDu9lj-c29dxI", "contentType": "LOCKUP_CONTENT_TYPE_PLAYLIST",
+      "metadata": {"lockupMetadataViewModel": {"title": {"content": "Rex Band - First Light (Official Video)"}, "metadata": {"contentMetadataViewModel": {"metadataRows": [{"metadataParts": [{"text": {"content": "Updated today"}}]}]}}}}}},
+    {"lockupViewModel": {"contentId": "PVGeM40dABA", "contentType": "LOCKUP_CONTENT_TYPE_MUSIC",
+      "contentImage": {"thumbnailViewModel": {"overlays": [{"thumbnailBottomOverlayViewModel": {"badges": [{"thumbnailBadgeViewModel": {"text": "8:02"}}]}}]}},
+      "metadata": {"lockupMetadataViewModel": {"title": {"content": "Rex Band - First Light (Live at the Roundhouse)"}, "metadata": {"contentMetadataViewModel": {"metadataRows": [
+        {"metadataParts": [{"text": {"content": "Rex Band"}}]}, {"metadataParts": [{"text": {"content": "90K views"}}]}]}}}}}},
+    {"lockupViewModel": {"contentId": "l5OZu-IrXpw", "contentType": "LOCKUP_CONTENT_TYPE_MUSIC",
+      "contentImage": {"thumbnailViewModel": {"image": {"sources": [{"url": "https://yt3.googleusercontent.com/FABRICATED=s576", "width": 576, "height": 576}]}}},
+      "metadata": {"lockupMetadataViewModel": {"title": {"content": "First Light"}, "metadata": {"contentMetadataViewModel": {"metadataRows": [
+        {"metadataParts": [{"text": {"content": "Rex Band"}}]}, {"metadataParts": [{"text": {"content": "Song"}}, {"text": {"content": "640K views"}}]}]}}}},
+      "styling": {"layout": "LOCKUP_LAYOUT_VERTICAL", "contentImageAspectRatio": "LOCKUP_CONTENT_IMAGE_ASPECT_RATIO_SQUARE"}}}
+  ]}}}},
+  {"shelfRenderer": {"headerRenderer": {"shelfHeaderRenderer": {"title": {"simpleText": "Shorts"}}}, "content": {"horizontalListRenderer": {"items": [
+    {"lockupViewModel": {"contentId": "_cMxraX_5RE", "contentType": "LOCKUP_CONTENT_TYPE_SHORT",
+      "metadata": {"lockupMetadataViewModel": {"title": {"content": "First Light #shorts"}}}}}
+  ]}}}}
+]}}}

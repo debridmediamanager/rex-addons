@@ -45,6 +45,8 @@ const BROKEN_PAIR: &str = "PVGeM40dABA";
 const FILES: [(&str, &str, bool); 4] = [("l5OZu-IrXpw", N[0].0, false), ("u9lj-c29dxI", N[1].0, true), (NO_PAIR, N[0].0, false), (BROKEN_PAIR, N[0].0, false)];
 /// A video whose answer has no file at all.
 const NO_FILE: &str = "SkVqJ1SGeL0";
+/// The ISRC the fabricated search answer is for.
+const SONG_ISRC: &str = "GBREX2600001";
 /// What the fabricated answer says of the 1080p picture and the sound: their average rates.
 const RATES: (u64, u64) = (2_050_537, 128_227);
 
@@ -154,6 +156,8 @@ struct Site {
     refuse_files: bool,
     /// Access tokens handed out; the newest is the one accepted.
     issued: u32,
+    /// A search by artist and title finds nothing.
+    no_title_results: bool,
 }
 
 struct Rig {
@@ -193,6 +197,12 @@ fn answer(site: &Mutex<Site>, base: &str, root: &Path, url: &str, range: Option<
                 _ => json(404, json!({})),
             }
         }
+        // A song looked for: its artist and title find its tiles (unless `no_title_results`), as does
+        // its fabricated ISRC; any other ISRC finds nothing.
+        "/youtubei/v1/search" => match body["query"].as_str().unwrap_or("") {
+            query if query == SONG_ISRC || (query.contains(' ') && !site.no_title_results) => json(200, serde_json::from_str(include_str!("../tests/fixtures/youtube/tv-search.FABRICATED.json")).unwrap()),
+            _ => json(200, json!({"contents": {"sectionListRenderer": {"contents": []}}})),
+        },
         "/youtubei/v1/player" => match player_answer(base, root, body["videoId"].as_str().unwrap_or("")) {
             Some(player) => json(200, player),
             None => json(404, json!({})),
@@ -285,7 +295,7 @@ fn serve(name: &str) -> Option<Rig> {
             let path = url.split('?').next().unwrap_or("").to_string();
             let value = |name: &'static str| request.headers().iter().find(|h| h.field.equiv(name)).map(|h| h.value.to_string());
             let itag = url::form_urlencoded::parse(url.split_once('?').map_or("", |(_, q)| q).as_bytes()).find(|(k, _)| k == "itag").map(|(_, v)| v.into_owned());
-            let what = ["browseId", "videoId", "grant_type"].iter().find_map(|k| body[k].as_str().map(str::to_string))
+            let what = ["browseId", "videoId", "grant_type", "query"].iter().find_map(|k| body[k].as_str().map(str::to_string))
                 .or(body.get("continuation").map(|_| "continuation".to_string()))
                 .or(itag)
                 .unwrap_or_default();
@@ -705,4 +715,129 @@ fn signing_in_with_a_code_keeps_the_tokens_and_names_the_selected_account() {
     rig.call("signOut", &[ctx]).unwrap();
     assert_eq!(rig.stored("tokens"), Json::Null);
     assert_eq!(rig.hits().iter().map(|h| h.path.as_str()).collect::<Vec<_>>(), ["/o/oauth2/revoke"]);
+}
+
+/// `js` run inside the youtube addon's module, with nothing to reach: for its pure functions.
+fn pure(js: &str) -> Json {
+    let source = include_str!("../addons/youtube/main.js").replace("export default {", "const addon = {")
+        + &format!("\nexport default {{ async items() {{ {js} }}, open() {{}} }};");
+    let env = Env {
+        addon: "youtube", source: &source, hosts: &Hosts::default(), storage: Arc::new(Storage::open(PathBuf::from("/dev/null"))),
+        prober: Arc::new(crate::probe::Prober::new(None, "127.0.0.1:9".parse().unwrap())), spotify: None, calls: None,
+    };
+    sandbox::call(&env, "items", &[], sandbox::ITEMS).unwrap()
+}
+
+/// How a search tile scores against a track, FABRICATED tiles of public catalogue songs in the
+/// shapes the TV search gave on 2026-11-11: YouTube Music's recording first, then the artist's own
+/// upload at the track's length; never another take (live, cover, karaoke, a piano version),
+/// another artist's or a length far off; remasters, "feat." and titles in other scripts found.
+#[test]
+fn songs_are_scored_by_title_artist_take_and_length() {
+    let scored = |want: Json, tiles: Json| -> Vec<f64> {
+        let got = pure(&format!("const want = {want}; return {tiles}.map((t) => scoreSong(want, t));"));
+        got.as_array().unwrap().iter().map(|s| s.as_f64().unwrap()).collect()
+    };
+    let tile = |title: &str, channel: &str, seconds: Option<u64>, kind: &str| json!({"video_id": "x", "title": title, "channel": channel, "duration_ms": seconds.map(|s| s * 1000), "kind": kind});
+
+    let remaster = json!({"title": "Bohemian Rhapsody - Remastered 2011", "artists": ["Queen"], "duration_ms": 354_320});
+    let got = scored(remaster, json!([
+        tile("Bohemian Rhapsody", "Queen", None, "song"),
+        tile("Queen – Bohemian Rhapsody (Official Video Remastered)", "Queen", Some(360), "video"),
+        tile("Queen - Bohemian Rhapsody (Lyrics)", "7clouds Rock", Some(355), "video"),
+        tile("Queen - Bohemian Rhapsody (Live Aid 1985)", "Live Aid and Queen Official", Some(165), "video"),
+        tile("Marc Martel - Bohemian Rhapsody (Queen cover)", "Marc Martel", Some(362), "video"),
+        tile("Queen - Bohemian Rhapsody (Karaoke Version)", "Sing King", Some(375), "video"),
+        tile("Bohemian Rhapsody", "Panic! At The Disco", None, "song"),
+        tile("Queen - Bohemian Rhapsody 2018 Full Concert", "someone", Some(1316), "video"),
+    ]));
+    assert!(got[0] > got[1] && got[1] > 0.6 && got[2] > 0.6, "{got:?}");
+    assert_eq!(&got[3..], [0.0; 5], "{got:?}");
+
+    // The track's own take is preferred, and its studio recording is not refused out of hand.
+    let live = json!({"title": "Bohemian Rhapsody - Live Aid", "artists": ["Queen"], "duration_ms": 165_000});
+    let got = scored(live, json!([tile("Queen - Bohemian Rhapsody (Live Aid 1985)", "Queen", Some(165), "video"), tile("Bohemian Rhapsody", "Queen", None, "song")]));
+    assert!(got[0] > got[1] && got[1] >= 0.6, "{got:?}");
+
+    let featuring = json!({"title": "Get Lucky (feat. Pharrell Williams & Nile Rodgers) - Radio Edit", "artists": ["Daft Punk", "Pharrell Williams", "Nile Rodgers"], "duration_ms": 248_000});
+    let got = scored(featuring, json!([
+        tile("Get Lucky (feat. Pharrell Williams & Nile Rodgers) [Radio Edit]", "Daft Punk", None, "song"),
+        tile("Daft Punk - Get Lucky (Official Audio) ft. Pharrell Williams, Nile Rodgers", "Daft Punk", Some(249), "video"),
+        tile("Daft Punk - Get Lucky (Full Video) ft. Pharrell Williams, Nile Rodgers", "Daft Punk", Some(369), "video"),
+        tile("Get Lucky - Daft Punk (Sped Up)", "nightcore hub", Some(200), "video"),
+    ]));
+    assert!(got[0] > 0.9 && got[1] > 0.8, "{got:?}");
+    assert_eq!(&got[2..], [0.0; 2], "{got:?}");
+
+    let japanese = json!({"title": "夜に駆ける", "artists": ["YOASOBI"], "duration_ms": 261_000});
+    let got = scored(japanese, json!([
+        tile("夜に駆ける", "YOASOBI", None, "song"),
+        tile("YOASOBI「夜に駆ける」Official Music Video", "Ayase / YOASOBI", Some(261), "video"),
+        tile("夜に駆ける (Piano Version)", "Animenz", Some(262), "video"),
+        tile("アイドル", "YOASOBI", None, "song"),
+    ]));
+    assert!(got[0] > got[1] && got[1] >= 0.6, "{got:?}");
+    assert_eq!(&got[2..], [0.0; 2], "{got:?}");
+
+    // Accents and case aside, a Cyrillic title as it is.
+    let cyrillic = json!({"title": "Кукушка", "artists": ["Кино"], "duration_ms": 397_000});
+    let got = scored(cyrillic, json!([tile("Кино - Кукушка", "Кино", Some(397), "video"), tile("Кино - Группа крови", "Кино", Some(397), "video")]));
+    assert!(got[0] > 0.8 && got[1] == 0.0, "{got:?}");
+}
+
+/// A song is found by its artist and title with one search and one player call, and by its ISRC
+/// when the title finds nothing. The search's tiles are read off the TV answer (a Short and a mix
+/// left out), and what is returned is the recording's true length, size and rates from its player
+/// answer. A song whose only recording is too long or short is none.
+#[test]
+fn find_song_searches_the_title_then_the_isrc_and_checks_the_length_by_playing() {
+    let Some(rig) = serve("find-song") else { return eprintln!("{SKIP}") };
+    rig.sign_in();
+    let read = pure(&format!("return tiles({});", include_str!("../tests/fixtures/youtube/tv-search.FABRICATED.json")));
+    let ids: Vec<(&str, &str, &Json)> = read.as_array().unwrap().iter().map(|t| (t["video_id"].as_str().unwrap(), t["kind"].as_str().unwrap(), &t["duration_ms"])).collect();
+    assert_eq!(ids, [("u9lj-c29dxI", "video", &json!(400_000)), ("PVGeM40dABA", "video", &json!(482_000)), ("l5OZu-IrXpw", "song", &Json::Null)]);
+
+    // The version suffix is left out of the search, its ISRC never asked.
+    let size = std::fs::metadata(rig.root.join("dash-audio.mp4")).unwrap().len();
+    let want = json!({"title": "First Light - 2024 Remaster", "artists": ["Rex Band"], "album": "Dawn", "duration_ms": 391_000, "isrc": SONG_ISRC});
+    let found = rig.call("findSong", &[want, config(json!({}))]).unwrap();
+    assert_eq!(found, json!({"video_id": "l5OZu-IrXpw", "title": "First Light", "channel": "Rex Band", "duration_ms": 391_024, "kind": "song",
+        "mime": "audio/mp4", "size": size, "bitrate": 128_227, "sample_rate": 44_100, "channels": 2, "score": 1, "via": "title"}));
+    let hits = rig.hits();
+    let asked: Vec<(&str, &str)> = hits.iter().map(|h| (h.path.as_str(), h.what.as_str())).collect();
+    assert_eq!(asked, [("/youtubei/v1/search", "Rex Band First Light"), ("/youtubei/v1/player", "l5OZu-IrXpw")]);
+    assert!(hits.iter().all(|h| h.auth.as_deref() == Some("Bearer access-1")));
+    assert_eq!(hits[0].client, "TVHTML5 7.20250923.13.00");
+    assert_eq!(hits[1].client, "TVHTML5 5.20260707");
+
+    // The title finds nothing: then its ISRC.
+    rig.site.lock().unwrap().no_title_results = true;
+    let want = json!({"title": "First Light", "artists": ["Rex Band"], "duration_ms": 391_000, "isrc": SONG_ISRC});
+    let found = rig.call("findSong", &[want, config(json!({}))]).unwrap();
+    assert_eq!((&found["video_id"], &found["via"]), (&json!("l5OZu-IrXpw"), &json!("isrc")));
+    let asked: Vec<String> = rig.hits().iter().map(|h| h.what.clone()).collect();
+    assert_eq!(asked, ["Rex Band First Light", SONG_ISRC, "l5OZu-IrXpw"]);
+    rig.site.lock().unwrap().no_title_results = false;
+
+    // Only a recording far off the track's length, and no ISRC: none, after one player call.
+    let short = json!({"title": "First Light", "artists": ["Rex Band"], "duration_ms": 200_000});
+    assert_eq!(rig.call("findSong", &[short, config(json!({}))]).unwrap(), Json::Null);
+    assert_eq!(rig.hits().iter().filter(|h| h.path == "/youtubei/v1/player").count(), 1);
+}
+
+/// A song's sound to play: the plain AAC file (not the evened-out or voice-raised copies), its
+/// link's n unlocked so YouTube serves it, and what it is.
+#[test]
+fn song_audio_is_the_plain_aac_file_with_its_link_unlocked() {
+    let Some(rig) = serve("song-audio") else { return eprintln!("{SKIP}") };
+    rig.sign_in();
+    let audio = rig.call("songAudio", &["l5OZu-IrXpw".into(), config(json!({}))]).unwrap();
+    let size = std::fs::metadata(rig.root.join("dash-audio.mp4")).unwrap().len();
+    assert_eq!((&audio["mime"], &audio["size"], &audio["bitrate"], &audio["duration_ms"]), (&json!("audio/mp4"), &json!(size), &json!(128_227), &json!(391_024)));
+    let url = audio["url"].as_str().unwrap();
+    assert!(url.contains("itag=140") && url.contains(&format!("n={}", N[0].1)), "{url}");
+    let answer = ureq::get(url).set("Range", "bytes=0-99").call().unwrap();
+    assert_eq!(answer.status(), 206);
+    let error = rig.call("songAudio", &["not an id".into(), config(json!({}))]).unwrap_err();
+    assert!(error.contains("needs a video id"), "{error}");
 }

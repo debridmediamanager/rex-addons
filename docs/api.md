@@ -188,9 +188,14 @@ Removes it and its files: `{"removed": true}`. Addons installed from it stay, wi
 Each addon registers with rex as the source `addon-<id>` with the byte URL
 `http://<listen>/bytes/<id>`, and pushes its titles over rex's feed API. rex reads a title at
 `GET /bytes/<id>/<path>`: rex-addons asks the addon's `open()` and answers `302` to the link, or,
-when the link needs headers, relays it with the client's `Range`. rex's `DELETE` on the same path
+when the link needs headers, relays it with the client's `Range`. When `open()` wrote HLS
+playlists, the path answers the master playlist, which names each media playlist as
+`<file name>/<name>.m3u8`, served at `GET /bytes/<id>/<path>/<name>.m3u8`; their links point
+straight at the addon's hosts. rex's `DELETE` on the same path
 (a person deleting the title in a Plex app) answers `204`, and the title is never pushed again.
 The byte paths answer this device and private networks only, as rex's feed does.
 
 `/relay/<token>/...` is what ffprobe reads while an addon's `ffprobe()` runs: the link fetched
-through that addon's sandboxed client. It answers this device only, and only during that probe.
+through that addon's sandboxed client, or the playlists the addon wrote (`master.m3u8` and each
+by its name), their links pointed through the relay. It answers this device only, and only during
+that probe.

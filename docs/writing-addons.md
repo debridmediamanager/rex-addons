@@ -31,7 +31,7 @@ You write plain JavaScript (an ES module). There's no npm and no build step.
 | `hosts` | The websites `fetch()` may reach, and that `open()` links may point at: `example.com` exactly, `*.example.com` for anything under it, or `*` for any public website. Addresses on the device or the home network are never reachable through `*` |
 | `config` | The settings the app shows. Each has a `key`, a `label`, a `type` (`text`, `secret`, `bool`, `number` or `list`, a list of text), and optionally a `default` and `required: true`. A `secret` is shown masked; a `list` with `secret: true` shows only each link's website, for links that carry a key |
 | `refresh_minutes` | How often `items()` runs. Default 360, at least 5 |
-| `host` | Optional: the lowest rex-addons version your addon needs, numbers and dots, such as `"0.2"`. From 0.2 on, an older rex-addons refuses to install it and greys it out in a repository's list (0.1 doesn't know the field). Using `sleep`, `atob`, `btoa`, `URL`, `URLSearchParams`, `hash`, `hmac`, `bytes()` or a binary `body` needs `"host": "0.2"`; `sign_in` needs `"host": "0.3"` |
+| `host` | Optional: the lowest rex-addons version your addon needs, numbers and dots, such as `"0.2"`. From 0.2 on, an older rex-addons refuses to install it and greys it out in a repository's list (0.1 doesn't know the field). Using `sleep`, `atob`, `btoa`, `URL`, `URLSearchParams`, `hash`, `hmac`, `bytes()` or a binary `body` needs `"host": "0.2"`; `sign_in` needs `"host": "0.3"`; playlists from `open()` or for `ffprobe()` need `"host": "0.4"` |
 | `directories` | Optional: libraries of the addon's own, in rex's [`directories`](https://github.com/debridmediamanager/rex/blob/main/docs/feed-api.md#libraries-a-source-declares) shape, such as `[{"name": "youtube", "shows": "YouTube"}]`: titles whose `path` starts with `youtube/` go to a TV library called YouTube instead of your Movies or TV Shows. rex-addons sends it when the addon registers |
 | `sign_in` | Optional: `{"label": "Sign in to Example"}` for an addon that needs the person's account on a website ([below](#signing-in-with-a-code)). `label` is what the app's button says, `Sign in to <name>` without it |
 
@@ -79,9 +79,35 @@ Called when rex reads a title, and once before that when it's checked. Return wh
 - `{ url }`: rex is sent straight there.
 - `{ url, headers }`: for a link that needs headers (a `Referer`, a token). rex-addons then
   passes the bytes through itself, `Range` and all.
+- `{ playlist, playlists }`: an HLS presentation you wrote, for a title made of files a player
+  reads together, such as a picture and its sound kept apart ([below](#playlists-you-write)).
+  Needs `"host": "0.4"`.
 
 The link must be on one of your `hosts`. An answer is reused for 10 minutes, so `open()` isn't
 called for every seek.
+
+### Playlists you write
+
+`playlist` is the text of an HLS master playlist, and `playlists` the media playlists it names,
+each by a plain name (`video.m3u8`: letters, digits, `-` and `_`, ending in `.m3u8`):
+
+```js
+return {
+  playlist: '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Original",DEFAULT=YES,URI="audio.m3u8"\n' +
+    '#EXT-X-STREAM-INF:BANDWIDTH=3400000,CODECS="avc1.640028,mp4a.40.2",AUDIO="a"\nvideo.m3u8\n',
+  playlists: { "video.m3u8": videoPlaylist, "audio.m3u8": audioPlaylist },
+};
+```
+
+rex-addons serves the master at the title's own path and each media playlist under it, so rex
+(FFmpeg, really) reads the media straight from the links in them; nothing passes through
+rex-addons. Every link in them must be an absolute `http(s)` link on your `hosts`; the master may
+also name your media playlists. Anything else (a relative link, another scheme, a name you did
+not give) fails the play with a clear message, as do more than 8 MB of playlists in all. Give
+the title a path ending in `.m3u8` and probe it by passing the same object to `ffprobe()`. rex
+plays such a title through its conversion, copying what it can. The
+[YouTube addon](../addons/youtube/main.js) writes one for each video, its segments byte ranges
+(`EXT-X-BYTERANGE`) of YouTube's files.
 
 ## What your code can use
 
@@ -90,7 +116,7 @@ Plain JavaScript, plus these:
 | Global | What it does |
 |---|---|
 | `fetch(url, {method, headers, body})` | Returns `{status, ok, headers, url, text(), json(), bytes()}`, `bytes()` giving a `Uint8Array`. `headers` is a plain object with lowercase names, `url` is where redirects ended. Only `hosts` are reachable, and every redirect is checked again. `body` is text, a `Uint8Array` or an `ArrayBuffer`. The body is read only when you call `text()`, `json()` or `bytes()`, once, so a `Range: bytes=0-0` check costs nothing. Fetches run one at a time: `Promise.all` over several waits for each in turn |
-| `ffprobe(url, {headers})` | ffprobe's JSON of a video (`format`, `streams`, `chapters`), for `media_info`. rex-addons reads the link itself, for ffprobe, so the same `hosts` rule applies as for `fetch`; an HLS playlist works too. It fails with a clear message when rex-addons runs without ffprobe. Up to 2 minutes, which don't count as JavaScript time |
+| `ffprobe(url, {headers})` | ffprobe's JSON of a video (`format`, `streams`, `chapters`), for `media_info`. rex-addons reads the link itself, for ffprobe, so the same `hosts` rule applies as for `fetch`; an HLS playlist works too. `ffprobe({playlist, playlists})` probes [playlists you wrote](#playlists-you-write), checked as `open()`'s are (`"host": "0.4"`). It fails with a clear message when rex-addons runs without ffprobe. Up to 2 minutes, which don't count as JavaScript time |
 | `console.log`, `console.warn`, `console.error` | Into rex-addons' log, tagged `[addon <id>]`, with your secret settings' values (6 characters or more) shown as `********` |
 | `storage.get(key)`, `storage.set(key, value)`, `storage.delete(key)` | Your addon's own saved values, any JSON. They survive restarts and updates |
 | `atob(text)`, `btoa(text)` | Base64, as in browsers: text whose characters are bytes (0 to 255) |

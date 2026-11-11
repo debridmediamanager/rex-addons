@@ -28,9 +28,9 @@ it again updates it with your settings kept.
 |---|---|
 | Internet Archive | Public domain feature films from archive.org: silents, classics, noir, B-movies. No setup, and it comes with the app |
 | Stremio addons | Films and series from your Stremio addons' catalogs, played from your stream addons' links |
-| YouTube (360p) | Your YouTube playlists (Liked videos, Watch later, your own) and any playlist you link, each a playlist in Plex, played from YouTube at 360p |
+| YouTube | Your YouTube playlists (Liked videos, Watch later, your own) and any playlist you link, each a playlist in Plex, played from YouTube up to 1080p |
 
-## YouTube (360p)
+## YouTube
 
 Sign in, and your Liked videos, Watch later and your own playlists show up in a library called
 YouTube: each channel is a show, each video one of its episodes with YouTube's title, date and
@@ -42,17 +42,20 @@ are the newest; 200 by default) and which of yours to take.
 - **Signing in is required.** The app shows a code; enter it at google.com/device on your phone.
   It is YouTube's TV sign-in, and the addon talks to YouTube as YouTube's TV app does. Signing out
   in the app revokes it.
-- **360p.** YouTube now hands out one plain file per video, the 360p MP4 with picture and sound
-  together; every sharper version comes only through YouTube's own streaming protocol, which only
-  YouTube's apps play. So videos play at 360p. Where YouTube offers an HLS stream instead (rare),
-  the best one up to the resolution in the settings plays.
-- **Nothing is downloaded.** rex reads the file from YouTube when you press play. To make YouTube's
+- **Up to 1080p.** A video plays from YouTube's H.264 picture and AAC sound, which every Plex app
+  plays; YouTube keeps them as two files, and rex joins them as it plays without converting
+  either, so rex needs FFmpeg ([rex's setup](https://github.com/debridmediamanager/rex/blob/main/docs/setup.md#transcoding)).
+  The highest quality is a setting: 1080 (the default), 720, 480 or 360. At 360, and for a video
+  without that pair, it plays YouTube's 360p MP4 as it is. Changing the setting checks every video
+  again, a sync's worth at a time.
+- **Nothing is downloaded.** rex reads the files from YouTube when you press play. To make YouTube's
   links work, the addon fetches YouTube's player script (about 2.5 MB) when YouTube changes it and
-  keeps the small part of it that unlocks a link. Each video is checked once (about 0.3 MB) before
-  it shows; a sync checks up to 30, an hour apart, so a long list fills in over a few hours.
-  Playlists are read again every six hours.
+  keeps the small part of it that unlocks a link. Each video is checked once (one request to
+  YouTube for its files, then up to a few hundred KB of them) before it shows; a sync checks up to
+  30, an hour apart, so a long list fills in over a few hours. Playlists are read again every six
+  hours.
 - **Limits:** private, deleted, members-only and live videos are left out. No descriptions: YouTube's
-  TV app is not given them. A video's link lasts six hours, so each play asks YouTube for a fresh one.
+  TV app is not given them. A video's links last six hours, so each play asks YouTube for fresh ones.
 
 ## Running it yourself
 

@@ -10,6 +10,8 @@ mod probe;
 mod repos;
 mod sandbox;
 mod server;
+#[cfg(test)]
+mod sign_in_tests;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;

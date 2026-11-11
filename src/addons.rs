@@ -30,6 +30,8 @@ pub struct Manifest {
     pub refresh_minutes: u64,
     /// The lowest rex-addons it needs, if it says.
     pub host: Option<String>,
+    /// What its sign-in button says, when it needs the person's account on a website.
+    pub sign_in: Option<String>,
     pub raw: Json,
 }
 
@@ -121,7 +123,20 @@ impl Manifest {
             None | Some(Json::Null) => 360,
             Some(value) => value.as_u64().filter(|m| *m >= 5).ok_or("manifest: refresh_minutes must be a whole number, 5 or more")?,
         };
-        Ok(Manifest { id, name, version, description, hosts: Hosts(hosts), config, refresh_minutes, host, raw: raw.clone() })
+        let sign_in = match raw.get("sign_in") {
+            None | Some(Json::Null) => None,
+            Some(Json::Object(sign_in)) => Some(match sign_in.get("label") {
+                None | Some(Json::Null) => format!("Sign in to {name}"),
+                Some(Json::String(label)) if !label.trim().is_empty() => label.clone(),
+                Some(_) => return Err("manifest: sign_in.label must be text".into()),
+            }),
+            Some(_) => return Err("manifest: sign_in must be an object, such as {\"label\": \"Sign in to Example\"}".into()),
+        };
+        // An older rex-addons would install it and never sign it in.
+        if sign_in.is_some() && host.as_deref().is_none_or(|host| newer("0.3", host)) {
+            return Err("manifest: sign_in needs \"host\": \"0.3\" or newer".into());
+        }
+        Ok(Manifest { id, name, version, description, hosts: Hosts(hosts), config, refresh_minutes, host, sign_in, raw: raw.clone() })
     }
 
     /// Installing refuses an addon that needs a newer rex-addons.
@@ -291,11 +306,20 @@ mod tests {
             (json!({"id": "a", "name": "x", "version": "1", "refresh_minutes": 1}), "refresh_minutes"),
             (json!({"id": "a", "name": "x", "version": "1", "host": "v0.2"}), "host"),
             (json!({"id": "a", "name": "x", "version": "1", "host": 2}), "host"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.3", "sign_in": true}), "sign_in"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.3", "sign_in": {"label": 5}}), "sign_in.label"),
+            (json!({"id": "a", "name": "x", "version": "1", "sign_in": {}}), "\"host\": \"0.3\""),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.2.9", "sign_in": {}}), "\"host\": \"0.3\""),
         ] {
             let error = Manifest::parse(&bad).unwrap_err();
             assert!(error.contains(says), "{bad}: {error}");
         }
         assert_eq!(manifest().refresh_minutes, 360);
+        let signing = |sign_in: Json| Manifest::parse(&json!({"id": "a", "name": "Example", "version": "1", "host": "0.3", "sign_in": sign_in})).unwrap().sign_in;
+        assert_eq!(signing(json!({})).as_deref(), Some("Sign in to Example"));
+        assert_eq!(signing(json!({"label": "Use your Google account"})).as_deref(), Some("Use your Google account"));
+        assert_eq!(signing(Json::Null), None);
+        assert_eq!(manifest().sign_in, None);
     }
 
     #[test]
@@ -364,12 +388,12 @@ mod tests {
 
     #[test]
     fn host_version() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.2.0");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.3.0");
         let needing = |host: &str| Manifest::parse(&json!({"id": "a", "name": "x", "version": "1", "host": host})).unwrap();
-        for fits in ["0.2", "0.2.0", "0.1.9", "0"] {
+        for fits in ["0.3", "0.3.0", "0.2", "0.1.9", "0"] {
             assert_eq!(needing(fits).check_host(), Ok(()), "{fits}");
         }
-        for too_new in ["0.2.1", "0.3", "1"] {
+        for too_new in ["0.3.1", "0.4", "1"] {
             assert_eq!(needing(too_new).check_host().unwrap_err(), format!("this addon needs rex-addons {too_new} or newer"));
         }
         assert_eq!(manifest().host, None);

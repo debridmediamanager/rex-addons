@@ -2,6 +2,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -28,13 +29,23 @@ const PROBE_BACKOFF_MAX: u64 = 7 * 86400;
 const REPO_REFRESH: u64 = 24 * 3600;
 /// ...and, while fetches fail, no more often than this.
 const REPO_RETRY: u64 = 3600;
+/// How often a pending sign-in is polled, at least and at most, whatever the addon asks...
+const SIGN_IN_INTERVAL: (u64, u64) = (2, 60);
+/// ...and how long its code may live.
+const SIGN_IN_LIFETIME: u64 = 3600;
+/// Each sign-in started gets the next number: a poll whose sign-in was replaced or cancelled stops.
+static SIGN_INS: AtomicU64 = AtomicU64::new(0);
 
 /// Each addon's secret setting values: every line logged for it, its own console output
 /// included, has them masked, as does the error its status keeps.
 static SECRETS: Mutex<BTreeMap<String, Vec<String>>> = Mutex::new(BTreeMap::new());
 
 fn remember_secrets(addon: &Addon) {
-    SECRETS.lock().unwrap().insert(addon.manifest.id.clone(), addon.manifest.secrets(&addon.config));
+    let mut secrets = addon.manifest.secrets(&addon.config);
+    // The code a person types to sign in is theirs to see, not the log's.
+    secrets.extend(addon.pending.as_ref().map(|pending| pending.code.clone()));
+    secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
+    SECRETS.lock().unwrap().insert(addon.manifest.id.clone(), secrets);
 }
 
 /// `text` with the secret settings of the addon `tag` masked.
@@ -75,6 +86,18 @@ pub struct Opened {
     pub headers: Vec<(String, String)>,
 }
 
+/// A sign-in waiting for the person to enter its code. Never saved.
+pub struct Pending {
+    pub code: String,
+    pub url: String,
+    pub expires_at: u64,
+    expires: Instant,
+    interval: Duration,
+    /// What the addon needs to finish it: it never leaves the host and is never logged.
+    state: Json,
+    number: u64,
+}
+
 pub struct Addon {
     pub manifest: Arc<Manifest>,
     pub source: Arc<String>,
@@ -105,6 +128,11 @@ pub struct Addon {
     pub opened: HashMap<String, (Opened, Instant)>,
     /// The `open()` running for each item: callers for the same item wait for it and share it.
     pub opening: HashMap<String, Arc<OnceLock<Result<Opened, String>>>>,
+    /// The account it is signed in with, for an addon whose manifest has `sign_in`.
+    pub account: Option<String>,
+    /// Why the last sign-in failed, or why the website signed it out.
+    pub sign_in_error: Option<String>,
+    pub pending: Option<Pending>,
 }
 
 impl Addon {
@@ -116,7 +144,16 @@ impl Addon {
             "state": if self.syncing { "syncing" } else if self.error.is_some() { "error" } else { "idle" },
             "items": self.items, "held": self.held, "last_sync": self.last_sync, "error": self.error,
             "error_kind": self.error_kind,
+            "sign_in": m.sign_in.as_ref().map(|label| json!({
+                "label": label, "account": self.account, "error": self.sign_in_error,
+                "pending": self.pending.as_ref().map(|p| json!({"code": p.code, "url": p.url, "expires_at": p.expires_at})),
+            })),
         })
+    }
+
+    /// Whether it may sync and play: it needs no account, or is signed in.
+    fn signed_in(&self) -> bool {
+        self.manifest.sign_in.is_none() || self.account.is_some()
     }
 }
 
@@ -233,7 +270,11 @@ impl App {
         manifest.check_host()?;
         let storage = Arc::new(Storage::open(PathBuf::from("/dev/null")));
         let env = Env { addon: &manifest.id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone() };
-        sandbox::call(&env, "", &[], sandbox::OPEN).map_err(|error| format!("main.js: {error}"))?;
+        let mut needed = vec![json!("items"), json!("open")];
+        if manifest.sign_in.is_some() {
+            needed.extend([json!("signIn"), json!("signInPoll")]);
+        }
+        sandbox::call(&env, "", &needed, sandbox::OPEN).map_err(|error| format!("main.js: {error}"))?;
         let path = dir(self, &manifest.id);
         std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
         write_atomic(&path.join("main.js"), source.as_bytes()).map_err(|e| e.to_string())?;
@@ -339,6 +380,9 @@ impl App {
         let (slot, manifest, source, config, storage) = {
             let mut addons = self.addons.lock().unwrap();
             let addon = addons.get_mut(id).ok_or("no such addon")?;
+            if !addon.signed_in() {
+                return Err("sign in first".into());
+            }
             if let Some((opened, at)) = addon.opened.get(item) {
                 if at.elapsed() < OPEN_TTL {
                     return Ok(opened.clone());
@@ -351,8 +395,15 @@ impl App {
         if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
             if addon.opening.get(item).is_some_and(|s| Arc::ptr_eq(s, &slot)) {
                 addon.opening.remove(item);
-                if let Ok(opened) = &result {
-                    addon.opened.insert(item.to_string(), (opened.clone(), Instant::now()));
+                match &result {
+                    Ok(opened) => {
+                        addon.opened.insert(item.to_string(), (opened.clone(), Instant::now()));
+                    }
+                    Err(error) => {
+                        if let Some(reason) = sign_in_required(addon, error) {
+                            signed_out(self, addon, &reason);
+                        }
+                    }
                 }
             }
         }
@@ -416,7 +467,8 @@ impl App {
         let addons = self.addons.lock().unwrap();
         addons
             .values()
-            .filter(|a| a.enabled && !a.syncing)
+            // One waiting to be signed in is synced by the sign-in.
+            .filter(|a| a.enabled && !a.syncing && a.signed_in())
             .filter(|a| match (a.error.is_some(), a.attempted, a.last_sync) {
                 (true, Some(at), _) => at.elapsed() >= RETRY,
                 // A failure from before a restart is tried again at once.
@@ -465,15 +517,29 @@ impl App {
 
     fn run_sync(&self, id: &str, force: bool) -> Result<(usize, usize), String> {
         let (manifest, source, config, storage, deleted) = {
-            let addons = self.addons.lock().unwrap();
-            let a = addons.get(id).ok_or("removed")?;
+            let mut addons = self.addons.lock().unwrap();
+            let a = addons.get_mut(id).ok_or("removed")?;
+            if !a.signed_in() {
+                a.error_kind = Some("sign_in".into());
+                return Err("sign in first".into());
+            }
             (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone(), a.deleted.clone())
         };
         if let Some(label) = manifest.missing(&config) {
             return Err(format!("set {label} first"));
         }
         let env = Env { addon: id, source: &source, hosts: &manifest.hosts, storage, prober: self.prober.clone() };
-        let returned = sandbox::call(&env, "items", &[json!({"config": manifest.effective(&config)})], sandbox::ITEMS)?;
+        let returned = sandbox::call(&env, "items", &[json!({"config": manifest.effective(&config)})], sandbox::ITEMS).map_err(|error| {
+            let mut addons = self.addons.lock().unwrap();
+            match addons.get_mut(id).and_then(|a| Some((sign_in_required(a, &error)?, a))) {
+                Some((reason, addon)) => {
+                    signed_out(self, addon, &reason);
+                    addon.error_kind = Some("sign_in".into());
+                    format!("sign in again: {reason}")
+                }
+                None => error,
+            }
+        })?;
         let mut items = checked_items(id, returned, &deleted)?;
         let name = source_name(id);
         let (status, answer) = self.feed_call(id, "PUT", &format!("/rex/sources/{name}"), &json!({"url": self.byte_base(id)}))?;
@@ -674,6 +740,9 @@ impl App {
         let mut addons = self.addons.lock().unwrap();
         let addon = addons.get_mut(id).ok_or("no such addon")?;
         addon.enabled = enabled;
+        if !enabled && addon.pending.take().is_some() {
+            remember_secrets(addon);
+        }
         save_state(self, addon);
         drop(addons);
         if enabled {
@@ -681,6 +750,179 @@ impl App {
         }
         Ok(())
     }
+}
+
+/// Signing an addon in to its website with a code typed on another device.
+impl App {
+    /// The addon's `method(...args, ctx)`, with `open()`'s limits. Its error has secrets masked.
+    fn call_addon(&self, id: &str, method: &str, args: &[Json]) -> Result<Json, String> {
+        let (manifest, source, config, storage) = {
+            let addons = self.addons.lock().unwrap();
+            let a = addons.get(id).ok_or("no such addon")?;
+            (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone())
+        };
+        let env = Env { addon: id, source: &source, hosts: &manifest.hosts, storage, prober: self.prober.clone() };
+        let mut args = args.to_vec();
+        args.push(json!({"config": manifest.effective(&config)}));
+        sandbox::call(&env, method, &args, sandbox::OPEN).map_err(|error| masked(id, &error))
+    }
+
+    /// `POST /api/addons/{id}/sign-in`: the addon's `signIn()` starts one, which replaces any
+    /// pending, and a thread of its own polls it.
+    pub fn sign_in(self: &Arc<Self>, id: &str) -> Result<(), (u16, String)> {
+        match self.addons.lock().unwrap().get(id) {
+            None => return Err((404, "no such addon".into())),
+            Some(a) if a.manifest.sign_in.is_none() => return Err((400, "this addon has no sign-in".into())),
+            Some(a) if !a.enabled => return Err((409, "the addon is disabled".into())),
+            Some(_) => {}
+        }
+        let started = self.call_addon(id, "signIn", &[]).map_err(|error| first_line(&error));
+        let pending = started.and_then(|answer| pending_of(&answer)).map_err(|error| {
+            warn(id, &format!("sign-in failed to start: {error}"));
+            (502, error)
+        })?;
+        let number = pending.number;
+        let mut addons = self.addons.lock().unwrap();
+        let addon = addons.get_mut(id).ok_or((404, "no such addon".to_string()))?;
+        if !addon.enabled {
+            return Err((409, "the addon is disabled".into()));
+        }
+        log(id, &format!("sign-in started at {}, for {} s", pending.url, pending.expires_at.saturating_sub(now())));
+        addon.pending = Some(pending);
+        addon.sign_in_error = None;
+        remember_secrets(addon);
+        save_state(self, addon);
+        drop(addons);
+        let (app, id) = (self.clone(), id.to_string());
+        std::thread::spawn(move || app.poll_sign_in(&id, number));
+        Ok(())
+    }
+
+    /// Polls the sign-in numbered `number` every interval until it is done, fails or expires,
+    /// or is replaced or cancelled, or its addon removed or disabled.
+    fn poll_sign_in(self: &Arc<Self>, id: &str, number: u64) {
+        let current = |a: &Addon| a.pending.as_ref().is_some_and(|p| p.number == number);
+        loop {
+            let wait = match self.addons.lock().unwrap().get(id).and_then(|a| a.pending.as_ref()).filter(|p| p.number == number) {
+                Some(p) => p.interval.min(p.expires.saturating_duration_since(Instant::now())),
+                None => return,
+            };
+            std::thread::sleep(wait);
+            let state = {
+                let mut addons = self.addons.lock().unwrap();
+                let Some(addon) = addons.get_mut(id).filter(|a| current(a)) else { return };
+                let pending = addon.pending.as_ref().unwrap();
+                if Instant::now() >= pending.expires {
+                    end_sign_in(self, addon, Err("the code expired before it was entered".into()));
+                    return;
+                }
+                pending.state.clone()
+            };
+            let polled = self.call_addon(id, "signInPoll", &[state]);
+            let mut addons = self.addons.lock().unwrap();
+            let Some(addon) = addons.get_mut(id).filter(|a| current(a)) else { return };
+            let outcome = match polled {
+                Ok(answer) if answer["done"] != json!(true) => continue,
+                Ok(answer) => answer["account"]
+                    .as_str()
+                    .filter(|account| !account.trim().is_empty())
+                    .map(str::to_string)
+                    .ok_or_else(|| "signInPoll() said done but returned no account".to_string()),
+                Err(error) => Err(first_line(&error)),
+            };
+            let done = outcome.is_ok();
+            end_sign_in(self, addon, outcome);
+            drop(addons);
+            if done {
+                self.start_sync(id, false);
+            }
+            return;
+        }
+    }
+
+    /// `DELETE /api/addons/{id}/sign-in`: the account and any pending sign-in are forgotten, and
+    /// the addon's `signOut()` forgets its tokens. Its titles, settings and storage stay.
+    pub fn sign_out(&self, id: &str) -> Result<(), (u16, String)> {
+        {
+            let mut addons = self.addons.lock().unwrap();
+            let addon = addons.get_mut(id).ok_or((404, "no such addon".to_string()))?;
+            if addon.manifest.sign_in.is_none() {
+                return Err((400, "this addon has no sign-in".into()));
+            }
+            addon.account = None;
+            addon.pending = None;
+            addon.sign_in_error = None;
+            addon.opened.clear();
+            remember_secrets(addon);
+            save_state(self, addon);
+        }
+        match self.call_addon(id, "signOut", &[]) {
+            Err(error) if error != "main.js exports no signOut()" => warn(id, &format!("signOut() failed: {error}")),
+            _ => log(id, "signed out"),
+        }
+        Ok(())
+    }
+}
+
+/// What `signIn()` returned, as a pending sign-in: its interval and lifetime kept within bounds.
+fn pending_of(answer: &Json) -> Result<Pending, String> {
+    let code = answer["code"].as_str().filter(|code| !code.trim().is_empty()).ok_or("signIn() returned no code")?;
+    let url = answer["url"].as_str().filter(|url| url::Url::parse(url).is_ok_and(|url| url.scheme() == "https"));
+    let url = url.ok_or("signIn() returned no https url")?;
+    let seconds = |key: &str| answer[key].as_f64().ok_or(format!("signIn() returned no {key} in seconds"));
+    let lifetime = seconds("expires_in")?.clamp(0.0, SIGN_IN_LIFETIME as f64) as u64;
+    let interval = seconds("interval")?.clamp(SIGN_IN_INTERVAL.0 as f64, SIGN_IN_INTERVAL.1 as f64) as u64;
+    Ok(Pending {
+        code: code.into(),
+        url: url.into(),
+        expires_at: now() + lifetime,
+        expires: Instant::now() + Duration::from_secs(lifetime),
+        interval: Duration::from_secs(interval),
+        state: answer["state"].clone(),
+        number: SIGN_INS.fetch_add(1, Ordering::Relaxed),
+    })
+}
+
+/// A pending sign-in ends: signed in with the account named, or failed for the reason given,
+/// which leaves any account it had.
+fn end_sign_in(app: &App, addon: &mut Addon, outcome: Result<String, String>) {
+    let id = addon.manifest.id.clone();
+    match outcome {
+        Ok(account) => {
+            log(&id, &format!("signed in as {account}"));
+            addon.account = Some(account);
+            addon.sign_in_error = None;
+        }
+        Err(error) => {
+            warn(&id, &format!("sign-in failed: {error}"));
+            addon.sign_in_error = Some(error);
+        }
+    }
+    // The code stays masked in the lines above; from here on it means nothing.
+    addon.pending = None;
+    remember_secrets(addon);
+    save_state(app, addon);
+}
+
+/// The website's reason, when an addon that signs in threw `SIGN_IN_REQUIRED...`.
+fn sign_in_required(addon: &Addon, error: &str) -> Option<String> {
+    let rest = error.strip_prefix("SIGN_IN_REQUIRED").filter(|_| addon.manifest.sign_in.is_some())?;
+    let reason = first_line(rest).trim_start_matches([':', ' ']).trim().to_string();
+    Some(if reason.is_empty() { "signed out by the website".into() } else { reason })
+}
+
+/// The website ended the session: the addon signs in again before it syncs or plays. Its
+/// titles stay in rex.
+fn signed_out(app: &App, addon: &mut Addon, reason: &str) {
+    warn(&addon.manifest.id, &format!("signed out by the website: {reason}"));
+    addon.account = None;
+    addon.sign_in_error = Some(reason.to_string());
+    addon.opened.clear();
+    save_state(app, addon);
+}
+
+fn first_line(text: &str) -> String {
+    text.lines().next().unwrap_or_default().to_string()
 }
 
 /// Addon repositories, and what is installed from them.
@@ -1037,6 +1279,9 @@ fn load(path: &Path) -> Result<Addon, String> {
         attempted: None,
         opened: HashMap::new(),
         opening: HashMap::new(),
+        account: state["account"].as_str().map(str::to_string),
+        sign_in_error: state["sign_in_error"].as_str().map(str::to_string),
+        pending: None,
     };
     remember_secrets(&addon);
     // An error saved by an older host may still hold a secret.
@@ -1048,6 +1293,7 @@ fn save_state(app: &App, addon: &Addon) {
     let state = json!({
         "enabled": addon.enabled, "last_sync": addon.last_sync, "items": addon.items, "held": addon.held,
         "error": addon.error, "error_kind": addon.error_kind, "deleted": addon.deleted, "repo": addon.repo,
+        "account": addon.account, "sign_in_error": addon.sign_in_error,
     });
     let _ = write_atomic(&dir(app, &addon.manifest.id).join("state.json"), state.to_string().as_bytes());
 }

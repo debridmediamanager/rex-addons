@@ -163,6 +163,14 @@ fn api(app: &Arc<App>, method: &Method, path: &str, body: &str) -> Answer {
             app.restore(id).map_err(|e| (404, e))?;
             detail(app, id)
         }
+        (Method::Post, ["addons", id, "sign-in"]) => {
+            app.sign_in(id)?;
+            detail(app, id)
+        }
+        (Method::Delete, ["addons", id, "sign-in"]) => {
+            app.sign_out(id)?;
+            detail(app, id)
+        }
         (Method::Post, ["addons", id, "enabled"]) => {
             let enabled = parse(body)?["enabled"].as_bool().ok_or((400, "give enabled: true or false".to_string()))?;
             app.set_enabled(id, enabled).map_err(|e| (404, e))?;

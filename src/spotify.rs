@@ -297,6 +297,40 @@ impl Spotify for Librespot {
     }
 }
 
+/// For end-to-end tests only: Spotify's API answered by a server of the test's own
+/// (`REX_ADDONS_SPOTIFY_STUB`), a request's path appended to its address. A saved sign-in is taken
+/// as it is, its `username` the account's; pairing is refused.
+pub struct Stub {
+    pub url: String,
+}
+
+impl Spotify for Stub {
+    fn pair(&self, _: &str, _: Duration, _: Box<dyn FnOnce(Result<Json, String>) + Send>) -> Result<Pairing, String> {
+        Err("pairing is off: REX_ADDONS_SPOTIFY_STUB is set".into())
+    }
+
+    fn connect(&self, _: &str, credentials: &Json) -> Result<Signed, String> {
+        let username = credentials["username"].as_str().ok_or("SIGN_IN_REQUIRED: the saved sign-in has no username")?.to_string();
+        Ok(Signed { account: username.clone(), username, credentials: credentials.clone() })
+    }
+
+    fn request(&self, _: &str, method: &str, path: &str, body: Option<&Json>) -> Result<Json, String> {
+        let url = format!("{}{path}", self.url.trim_end_matches('/'));
+        let answer = match body {
+            Some(body) => ureq::request(method, &url).send_string(&body.to_string()),
+            None => ureq::request(method, &url).call(),
+        };
+        let route = path.split('?').next().unwrap_or(path);
+        match answer {
+            Ok(answer) => serde_json::from_str(&answer.into_string().map_err(|e| e.to_string())?).map_err(|_| format!("Spotify's answer to {route} is not JSON")),
+            Err(ureq::Error::Status(status, _)) => Err(format!("Spotify answered {status} to {route}")),
+            Err(error) => Err(format!("Spotify is not reachable: {error}")),
+        }
+    }
+
+    fn forget(&self, _: &str) {}
+}
+
 /// The JSON a stub stands in for librespot's credentials with, in tests.
 #[cfg(test)]
 pub fn fake_credentials(username: &str, secret: &str) -> Json {
@@ -316,6 +350,32 @@ mod tests {
         for bad in ["@evil.example/x", "//evil.example/x", "evil", "/a b", "/a\r\nHost: x", ""] {
             assert!(!valid_path(bad), "{bad:?}");
         }
+    }
+
+    /// The end-to-end tests' stand-in: requests go to its server as they are, its refusals are
+    /// Spotify's, and it never pairs.
+    #[test]
+    fn the_stub_answers_from_the_tests_server() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        std::thread::spawn(move || {
+            for mut request in server.incoming_requests() {
+                let mut body = String::new();
+                let _ = request.as_reader().read_to_string(&mut body);
+                let status = if request.url().starts_with("/missing") { 404 } else { 200 };
+                let answer = json!({"method": request.method().to_string(), "url": request.url(), "body": body});
+                let _ = request.respond(tiny_http::Response::from_string(answer.to_string()).with_status_code(status));
+            }
+        });
+        let stub = Stub { url };
+        let signed = stub.connect("a", &fake_credentials("someone", "x")).unwrap();
+        assert_eq!((signed.username.as_str(), signed.account.as_str()), ("someone", "someone"));
+        assert!(stub.connect("a", &json!({})).is_err_and(|e| e.starts_with("SIGN_IN_REQUIRED")));
+        assert_eq!(stub.request("a", "GET", "/metadata/4/track/ab?market=from_token", None).unwrap(),
+            json!({"method": "GET", "url": "/metadata/4/track/ab?market=from_token", "body": ""}));
+        assert_eq!(stub.request("a", "POST", "/collection/v2/paging", Some(&json!({"set": "collection"}))).unwrap()["body"], "{\"set\":\"collection\"}");
+        assert_eq!(stub.request("a", "GET", "/missing?x=1", None).unwrap_err(), "Spotify answered 404 to /missing");
+        assert!(stub.pair("rex", Duration::from_secs(1), Box::new(|_| {})).is_err());
     }
 
     #[test]

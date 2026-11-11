@@ -81,7 +81,15 @@ fn main() {
         eprintln!("cannot listen on {listen}: {e}");
         std::process::exit(1)
     });
-    let app = app::App::with_spotify(data, rex, listen, ffprobe, bundled.as_deref(), device_name, std::sync::Arc::new(spotify::Librespot::default()));
+    // Test-only: Spotify's API answered by an end-to-end test's own server.
+    let spotify: std::sync::Arc<dyn spotify::Spotify> = match std::env::var("REX_ADDONS_SPOTIFY_STUB") {
+        Ok(url) if !url.is_empty() => {
+            eprintln!("WARN [host] REX_ADDONS_SPOTIFY_STUB: Spotify is answered by {url}, for tests");
+            std::sync::Arc::new(spotify::Stub { url })
+        }
+        _ => std::sync::Arc::new(spotify::Librespot::default()),
+    };
+    let app = app::App::with_spotify(data, rex, listen, ffprobe, bundled.as_deref(), device_name, spotify);
     app::log("host", &format!("rex-addons {} on {listen}, rex at {}, {} addons", env!("CARGO_PKG_VERSION"), app.rex, app.addons.lock().unwrap().len()));
     app.start_repos(&defaults);
     if app.prober.bin.is_none() {

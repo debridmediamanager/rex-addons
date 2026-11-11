@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """YouTube's answers for tests/e2e-youtube.sh with FAKE_YOUTUBE=1, the same routes src/youtube_tests.rs
-serves: the recorded playlist pages in tests/fixtures/youtube, the TV player's answer (fabricated, in
-the measured shape) whose file links answer only once their n (and signature) are transformed as the
-TV player script f5321ed3 transforms them, that script and the file from MEDIA_DIR (made by the test),
-on this machine's network address, as the sandbox never fetches loopback. Every InnerTube call must
-carry the test's token.
+serves: the recorded playlist pages in tests/fixtures/youtube, the Samsung TV client's player answer
+(fabricated, in the measured shape) whose file links answer only once their n (and signature) are
+transformed as the TV player script f5321ed3 transforms them, that script, and the files from
+MEDIA_DIR (made by the test: the 360p file muxed.mp4, and the picture and sound apart,
+dash-video.mp4 and dash-audio.mp4, with their indexes), on this machine's network address, as the
+sandbox never fetches loopback. Every InnerTube call must carry the test's token.
 
     python3 tests/e2e-youtube-fake.py <port> <media dir>     # prints its base URL, then serves
 """
 import json
 import os
 import socket
+import struct
 import sys
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -45,18 +47,35 @@ TOKEN = PAGE1["contents"]["tvBrowseRenderer"]["content"]["tvSurfaceContentRender
     "rightColumn"]["playlistVideoListRenderer"]["continuations"][0]["nextContinuationData"]["continuation"]
 
 
+def ranges(name):
+    """A file's index box (sidx): where it starts and how long it is, and the file's length."""
+    with open(os.path.join(MEDIA, name), "rb") as handle:
+        data = handle.read()
+    at = 0
+    while at + 8 <= len(data):
+        size, kind = struct.unpack(">I4s", data[at:at + 8])
+        if kind == b"sidx":
+            return at, size, len(data)
+        at += size
+    raise SystemExit("%s has no index" % name)
+
+
 def player(video):
     if video not in FILES:
         return None
     challenge, ciphered = FILES[video]
-    with open(os.path.join(FIXTURES, "tv-player-l5OZu-IrXpw.FABRICATED.json")) as handle:
+    with open(os.path.join(FIXTURES, "tv-samsung-player-l5OZu-IrXpw.FABRICATED.json")) as handle:
         text = handle.read().replace("{BASE}", BASE).replace("{N}", challenge).replace("o-FABRICATED", "o-" + video)
+    for kind, name in (("V", "dash-video.mp4"), ("A", "dash-audio.mp4")):
+        at, size, total = ranges(name)
+        for key, value in (("INIT_END", at - 1), ("INDEX_START", at), ("INDEX_END", at + size - 1), ("LEN", total)):
+            text = text.replace("{%s%s}" % (kind, key), str(value))
     answer = json.loads(text)
     answer["videoDetails"]["videoId"] = video
-    file = answer["streamingData"]["formats"][0]
     if ciphered:
-        url = file.pop("url").replace("&sig=FABRICATED", "")
-        file["signatureCipher"] = urllib.parse.urlencode({"s": SIG[0], "sp": "sig", "url": url})
+        for file in answer["streamingData"]["formats"] + answer["streamingData"]["adaptiveFormats"]:
+            url = file.pop("url").replace("&sig=FABRICATED", "")
+            file["signatureCipher"] = urllib.parse.urlencode({"s": SIG[0], "sp": "sig", "url": url})
     return answer
 
 
@@ -111,7 +130,8 @@ class Handler(BaseHTTPRequestHandler):
             challenge, ciphered = FILES.get(video, (None, False))
             if not challenge or params.get("n") != N[challenge] or (ciphered and params.get("sig") != SIG[1]):
                 return self.send(403, b"", "text/plain")
-            with open(os.path.join(MEDIA, "video.mp4"), "rb") as handle:
+            name = {"18": "muxed.mp4", "140": "dash-audio.mp4", "251": "dash-audio.mp4"}.get(params.get("itag"), "dash-video.mp4")
+            with open(os.path.join(MEDIA, name), "rb") as handle:
                 data = handle.read()
             asked = self.headers.get("Range", "")
             if not asked.startswith("bytes="):

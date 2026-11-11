@@ -336,10 +336,10 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
     host.set(
         "log",
         Function::new(ctx.clone(), move |level: String, text: String| {
-            let line = format!("[addon {addon}] {text}");
+            let line = format!("[addon {addon}] {}", crate::app::masked(&addon, &text));
             match level.as_str() {
-                "info" => println!("{line}"),
-                _ => eprintln!("{} {line}", level.to_uppercase()),
+                "info" => crate::app::emit(&line, false),
+                _ => crate::app::emit(&format!("{} {line}", level.to_uppercase()), true),
             }
         })?,
     )?;

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value as Json};
 
-use crate::addons::{newer, read_json, write_atomic, Manifest};
+use crate::addons::{newer, read_json, write_atomic, Manifest, MASK};
 use crate::net;
 use crate::probe::{self, Prober};
 use crate::repos::{self, Repo};
@@ -29,12 +29,40 @@ const REPO_REFRESH: u64 = 24 * 3600;
 /// ...and, while fetches fail, no more often than this.
 const REPO_RETRY: u64 = 3600;
 
+/// Each addon's secret setting values: every line logged for it, its own console output
+/// included, has them masked, as does the error its status keeps.
+static SECRETS: Mutex<BTreeMap<String, Vec<String>>> = Mutex::new(BTreeMap::new());
+
+fn remember_secrets(addon: &Addon) {
+    SECRETS.lock().unwrap().insert(addon.manifest.id.clone(), addon.manifest.secrets(&addon.config));
+}
+
+/// `text` with the secret settings of the addon `tag` masked.
+pub fn masked(tag: &str, text: &str) -> String {
+    let secrets = SECRETS.lock().unwrap();
+    secrets.get(tag).into_iter().flatten().fold(text.to_string(), |text, secret| text.replace(secret.as_str(), MASK))
+}
+
+/// Writes a log line: stdout, or stderr for a warning or an error.
+pub fn emit(line: &str, problem: bool) {
+    #[cfg(test)]
+    LOGGED.lock().unwrap().push(line.to_string());
+    if problem {
+        eprintln!("{line}");
+    } else {
+        println!("{line}");
+    }
+}
+
+#[cfg(test)]
+pub static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 pub fn log(tag: &str, message: &str) {
-    println!("[{tag}] {message}");
+    emit(&format!("[{tag}] {}", masked(tag, message)), false);
 }
 
 pub fn warn(tag: &str, message: &str) {
-    eprintln!("WARN [{tag}] {message}");
+    emit(&format!("WARN [{tag}] {}", masked(tag, message)), true);
 }
 
 pub fn now() -> u64 {
@@ -222,6 +250,7 @@ impl App {
                 if repo.is_some() {
                     addon.repo = repo.map(str::to_string);
                 }
+                remember_secrets(addon);
                 save_state(self, addon);
             }
             None => {
@@ -327,7 +356,8 @@ impl App {
                 }
             }
         }
-        result
+        // Answered to rex and logged: no secret setting in it.
+        result.map_err(|error| masked(id, &error))
     }
 
     fn call_open(&self, id: &str, item: &str, manifest: &Manifest, source: &str, config: &Map<String, Json>, storage: Arc<Storage>) -> Result<Opened, String> {
@@ -423,7 +453,7 @@ impl App {
             }
             Err(error) => {
                 warn(id, &format!("sync failed: {error}"));
-                addon.error = Some(error);
+                addon.error = Some(masked(id, &error));
             }
         }
         save_state(self, addon);
@@ -610,6 +640,7 @@ impl App {
         let mut addons = self.addons.lock().unwrap();
         let addon = addons.get_mut(id).ok_or("no such addon")?;
         addon.config = addon.manifest.apply(&addon.config, patch)?;
+        remember_secrets(addon);
         write_atomic(&dir(self, id).join("config.json"), Json::Object(addon.config.clone()).to_string().as_bytes())
             .map_err(|e| e.to_string())?;
         addon.opened.clear();
@@ -984,7 +1015,7 @@ fn load(path: &Path) -> Result<Addon, String> {
         _ => Map::new(),
     };
     let paths = object("index.json").into_iter().filter_map(|(k, v)| Some((k, v.as_str()?.to_string()))).collect();
-    Ok(Addon {
+    let addon = Addon {
         manifest: Arc::new(manifest),
         source: Arc::new(source),
         config: object("config.json"),
@@ -1006,7 +1037,11 @@ fn load(path: &Path) -> Result<Addon, String> {
         attempted: None,
         opened: HashMap::new(),
         opening: HashMap::new(),
-    })
+    };
+    remember_secrets(&addon);
+    // An error saved by an older host may still hold a secret.
+    let error = addon.error.as_deref().map(|error| masked(&addon.manifest.id, error));
+    Ok(Addon { error, ..addon })
 }
 
 fn save_state(app: &App, addon: &Addon) {
@@ -1143,6 +1178,45 @@ mod sync_tests {
         let status = wait_idle(&app, "demo");
         assert_eq!((status["state"].as_str(), status["items"].as_u64(), status["held"].as_u64()), (Some("idle"), Some(0), Some(1)));
         assert_eq!(seen.lock().unwrap()[1]["force"], json!(true));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    #[test]
+    fn an_addons_secret_settings_never_reach_the_log_or_its_status() {
+        let data = std::env::temp_dir().join(format!("rex-addons-leaky-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), "http://127.0.0.1:9".into(), "127.0.0.1:9".parse().unwrap(), None, None);
+        // Prints its key, its link and only the link's path, then throws with the key in it.
+        let source = "export default {
+            items(ctx) {
+                const link = ctx.config.addons[0];
+                console.log('using', ctx.config.token, link);
+                console.warn('path', new URL(link).pathname);
+                throw new Error('refused key ' + ctx.config.token);
+            },
+            open(item, ctx) { throw new Error('cannot open with ' + ctx.config.addons[0]); },
+        };";
+        let manifest = json!({"id": "leaky", "name": "Leaky", "version": "1.0.0", "hosts": ["*"], "config": [
+            {"key": "token", "label": "Token", "type": "secret"},
+            {"key": "addons", "label": "Addons", "type": "list", "secret": true}
+        ]});
+        app.install(&manifest, source, None).unwrap();
+        let (key, link) = ("KEY-abc123", "https://addon.example/realdebrid=LINKKEY99/manifest.json");
+        app.set_config("leaky", &json!({"token": key, "addons": [link]})).unwrap();
+        let status = wait_idle(&app, "leaky");
+        let error = status["error"].as_str().unwrap();
+        assert!(error.contains("refused key ********"), "{error}");
+        let opened = app.open("leaky", "a").err().unwrap();
+        assert!(opened.contains("cannot open with ********"), "{opened}");
+        warn("leaky", &format!("open(a): {opened}"));
+
+        let logged: Vec<String> = LOGGED.lock().unwrap().iter().filter(|l| l.contains("leaky")).cloned().collect();
+        assert!(logged.iter().any(|l| l.contains("[addon leaky] using ******** ********")), "{logged:?}");
+        assert!(logged.iter().any(|l| l.contains("WARN [addon leaky] path ********")), "{logged:?}");
+        assert!(logged.iter().any(|l| l.contains("sync failed")), "{logged:?}");
+        for line in &logged {
+            assert!(!line.contains("abc123") && !line.contains("LINKKEY99"), "{line}");
+        }
         let _ = std::fs::remove_dir_all(&data);
     }
 

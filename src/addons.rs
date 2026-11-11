@@ -172,6 +172,33 @@ impl Manifest {
         effective
     }
 
+    /// The secret values set now, longest first, for masking in what is logged for the addon:
+    /// each `secret` text, each entry of a secret list and, for a link, its part after the
+    /// host (an addon may print only that). Shorter than 6 characters is too common to mask.
+    pub fn secrets(&self, saved: &Map<String, Json>) -> Vec<String> {
+        let effective = self.effective(saved);
+        let mut found = Vec::new();
+        for field in &self.config {
+            match &effective[&field.key] {
+                Json::String(value) if field.kind == "secret" => found.push(value.clone()),
+                Json::Array(entries) if field.kind == "list" && field.secret => {
+                    for entry in entries.iter().filter_map(Json::as_str) {
+                        found.push(entry.to_string());
+                        let rest = entry.split_once("://").map_or("", |(_, rest)| rest);
+                        if let Some(at) = rest.find(['/', '?', '#']) {
+                            found.push(rest[at..].to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        found.retain(|value| value.chars().count() >= 6);
+        found.sort_by_key(|value| std::cmp::Reverse(value.len()));
+        found.dedup();
+        found
+    }
+
     /// `saved` changed by a PUT: each key given replaces its value, `null` puts back the
     /// default, a secret sent as the mask keeps what is stored. Keys not given are kept.
     pub fn apply(&self, saved: &Map<String, Json>, patch: &Json) -> Result<Map<String, Json>, String> {
@@ -309,6 +336,30 @@ mod tests {
         // A redacted entry nothing saved stands for is taken as typed.
         let third = m.apply(&saved, &json!({"addons": ["https://z.example/********"]})).unwrap();
         assert_eq!(third["addons"], json!(["https://z.example/********"]));
+    }
+
+    #[test]
+    fn secrets_are_the_values_and_link_paths_worth_masking() {
+        let m = Manifest::parse(&json!({"id": "s", "name": "S", "version": "1", "config": [
+            {"key": "token", "label": "Token", "type": "secret"},
+            {"key": "pin", "label": "PIN", "type": "secret"},
+            {"key": "addons", "label": "Addons", "type": "list", "secret": true},
+            {"key": "name", "label": "Name", "type": "text"},
+            {"key": "plain", "label": "Plain", "type": "list"}
+        ]}))
+        .unwrap();
+        let saved = m.apply(&Map::new(), &json!({
+            "token": "tok-123456", "pin": "1234", "name": "visible-name",
+            "addons": ["https://a.example/realdebrid=KEY123/manifest.json", "not-a-link-secret", "https://b.example"],
+            "plain": ["https://c.example/open-path"]
+        })).unwrap();
+        assert_eq!(m.secrets(&saved), [
+            "https://a.example/realdebrid=KEY123/manifest.json",
+            "/realdebrid=KEY123/manifest.json",
+            "not-a-link-secret",
+            "https://b.example",
+            "tok-123456",
+        ]);
     }
 
     #[test]

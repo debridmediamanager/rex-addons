@@ -147,8 +147,10 @@ const PRELUDE: &str = r#"
   async function sleep(ms) {
     host.sleep(Number(ms));
   }
-  async function ffprobe(url, init = {}) {
-    return JSON.parse(host.ffprobe(String(url), JSON.stringify({ headers: init.headers })));
+  async function ffprobe(target, init = {}) {
+    // A link, or playlists the addon wrote ({playlist, playlists}, as open() returns them).
+    const own = typeof target === "object" && target !== null && !(target instanceof URL);
+    return JSON.parse(host.ffprobe(own ? "" : String(target), JSON.stringify({ headers: init.headers }), own ? JSON.stringify(target) : null));
   }
   // URL and URLSearchParams, small: the url crate parses and resolves, each URL keeps its parts
   // and each URLSearchParams its list of pairs, and a URL's params write back to its search.
@@ -510,14 +512,17 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
     let (prober, hosts, probe_waited) = (env.prober.clone(), env.hosts.clone(), waited.clone());
     host.set(
         "ffprobe",
-        Function::new(ctx.clone(), move |ctx: Ctx<'js>, url: String, init: String| -> rquickjs::Result<String> {
+        Function::new(ctx.clone(), move |ctx: Ctx<'js>, url: String, init: String, playlists: Option<String>| -> rquickjs::Result<String> {
             let init: Json = serde_json::from_str(&init).unwrap_or_default();
             let headers = init["headers"]
                 .as_object()
                 .map(|h| h.iter().map(|(k, v)| (k.clone(), v.as_str().map_or_else(|| v.to_string(), str::to_string))).collect())
                 .unwrap_or_default();
             let started = Instant::now();
-            let probed = prober.probe(&url, headers, &hosts);
+            let probed = match playlists {
+                Some(text) => prober.probe_playlists(&serde_json::from_str(&text).unwrap_or_default(), &hosts),
+                None => prober.probe(&url, headers, &hosts),
+            };
             probe_waited.set(probe_waited.get() + started.elapsed());
             probed.map(|probe| probe.to_string()).map_err(|error| throw(&ctx, &format!("ffprobe: {error}")))
         })?,

@@ -181,7 +181,9 @@ fn api(app: &Arc<App>, method: &Method, path: &str, body: &str) -> Answer {
 }
 
 /// `/bytes/{addon}/{path}`: the item's link from `open()`, as a redirect, or relayed when
-/// the link needs headers of its own. rex's DELETE is a person deleting the item in a Plex app.
+/// the link needs headers of its own; or the playlists `open()` wrote, its master at the item's
+/// path and the playlists it names under it (`{path}/{name}`). rex's DELETE is a person deleting
+/// the item in a Plex app.
 fn bytes(app: &Arc<App>, request: Request, rest: &str) {
     let Some((id, encoded)) = rest.split_once('/') else {
         let _ = request.respond(error(404, "no such item"));
@@ -191,14 +193,17 @@ fn bytes(app: &Arc<App>, request: Request, rest: &str) {
     let item = {
         let addons = app.addons.lock().unwrap();
         let addon = addons.get(id).filter(|a| a.enabled);
-        addon.and_then(|a| Some((a.paths.get(&decoded.join("/"))?.clone(), a.manifest.hosts.clone())))
+        let find = |path: &[String]| addon.and_then(|a| Some((a.paths.get(&path.join("/"))?.clone(), a.manifest.hosts.clone())));
+        // An item's own path, or a playlist under it.
+        find(&decoded).map(|(item, hosts)| (item, hosts, None))
+            .or_else(|| find(&decoded[..decoded.len() - 1]).filter(|_| decoded.len() > 1).map(|(item, hosts)| (item, hosts, decoded.last().cloned())))
     };
-    let Some((item, hosts)) = item else {
+    let Some((item, hosts, child)) = item else {
         let _ = request.respond(error(404, "no such item"));
         return;
     };
     match request.method() {
-        Method::Delete => {
+        Method::Delete if child.is_none() => {
             app.delete_item(id, &item);
             let _ = request.respond(Response::empty(204));
         }
@@ -211,6 +216,22 @@ fn bytes(app: &Arc<App>, request: Request, rest: &str) {
                     return;
                 }
             };
+            if let Some(playlists) = &opened.playlists {
+                let file = encoded.split('/').next_back().unwrap_or_default();
+                let text = match &child {
+                    None => Some(playlists.master_under(&format!("{file}/"))),
+                    Some(name) => playlists.children.get(name).cloned(),
+                };
+                let _ = request.respond(match text {
+                    Some(text) => Response::from_string(text).with_header(header("Content-Type", "application/vnd.apple.mpegurl")),
+                    None => error(404, "no such playlist"),
+                });
+                return;
+            }
+            if child.is_some() {
+                let _ = request.respond(error(404, "no such item"));
+                return;
+            }
             if opened.headers.is_empty() {
                 let _ = request.respond(Response::empty(302).with_header(header("Location", &opened.url)));
                 return;
@@ -273,6 +294,11 @@ fn relay(app: &Arc<App>, request: Request, rest: &str) {
         let _ = request.respond(error(404, "no such probe"));
         return;
     };
+    let base = format!("http://{}/relay/{token}", net::reachable(app.listen));
+    if let Some(text) = relay.playlists.as_ref().and_then(|p| p.relayed(rest, &base)) {
+        let _ = request.respond(Response::from_string(text).with_header(header("Content-Type", "application/vnd.apple.mpegurl")));
+        return;
+    }
     let target = if let Some(absolute) = rest.strip_prefix("abs/") {
         let encoded = absolute.split('/').next().unwrap_or("");
         Some(percent_encoding::percent_decode_str(encoded).decode_utf8_lossy().into_owned())
@@ -286,7 +312,6 @@ fn relay(app: &Arc<App>, request: Request, rest: &str) {
         let _ = request.respond(error(400, "not a link"));
         return;
     };
-    let base = format!("http://{}/relay/{token}", net::reachable(app.listen));
     let _ = proxy(request, &relay.hosts, &target, &relay.headers, Some(&base));
 }
 
@@ -309,13 +334,16 @@ mod tests {
     }
 
     fn start_with(listen: &str, hosts: Json, source: &str, token: Option<&str>) -> (Arc<App>, SocketAddr) {
+        start_manifest(listen, json!({"id": "demo", "name": "Demo", "version": "1.0.0", "hosts": hosts}), source, token)
+    }
+
+    fn start_manifest(listen: &str, manifest: Json, source: &str, token: Option<&str>) -> (Arc<App>, SocketAddr) {
         static N: AtomicUsize = AtomicUsize::new(0);
         let server = tiny_http::Server::http(listen).unwrap();
         let addr = server.server_addr().to_ip().unwrap();
         let data = std::env::temp_dir().join(format!("rex-addons-test-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
         let _ = std::fs::remove_dir_all(&data);
         let app = App::new(data, "http://127.0.0.1:9".into(), addr, None, None);
-        let manifest = json!({"id": "demo", "name": "Demo", "version": "1.0.0", "hosts": hosts});
         app.install(&manifest, source, None).unwrap();
         app.addons.lock().unwrap().get_mut("demo").unwrap().paths.insert("films/a film.mp4".into(), "a".into());
         let served = app.clone();
@@ -440,6 +468,53 @@ mod tests {
         let whole = status(agent().get(&format!("http://{addr}/bytes/demo/films/a%20film.mp4")).call());
         assert_eq!(whole.status(), 200);
         assert_eq!(whole.header("content-length"), Some("1000"));
+    }
+
+    /// An addon whose `open()` writes a master playlist and two media playlists over `link`.
+    fn playlist_addon(host: &str, link: &str) -> (Arc<App>, SocketAddr) {
+        let source = format!(
+            r#"const media = (url) => `#EXTM3U\n#EXT-X-MAP:URI="${{url}}",BYTERANGE="10@0"\n#EXTINF:5.0,\n#EXT-X-BYTERANGE:100@10\n${{url}}\n#EXT-X-ENDLIST\n`;
+               export default {{ items() {{ return []; }}, open() {{ return {{
+                 playlist: '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="Original",URI="audio.m3u8"\n#EXT-X-STREAM-INF:BANDWIDTH=9,AUDIO="a"\nvideo.m3u8\n',
+                 playlists: {{ "video.m3u8": media("{link}"), "audio.m3u8": media("{link}") }} }}; }} }};"#
+        );
+        let manifest = json!({"id": "demo", "name": "Demo", "version": "1.0.0", "host": host, "hosts": ["cdn.example.com"]});
+        start_manifest("127.0.0.1:0", manifest, &source, None)
+    }
+
+    #[test]
+    fn playlists_an_addon_writes_are_served_at_the_item_and_under_it() {
+        let (_, addr) = playlist_addon("0.4", "https://cdn.example.com/v.mp4?n=1");
+        let item = format!("http://{addr}/bytes/demo/films/a%20film.mp4");
+        let master = status(agent().get(&item).call());
+        assert_eq!((master.status(), master.header("content-type")), (200, Some("application/vnd.apple.mpegurl")));
+        let text = master.into_string().unwrap();
+        assert!(text.contains("URI=\"a%20film.mp4/audio.m3u8\"") && text.ends_with("\na%20film.mp4/video.m3u8"), "{text}");
+        // Where FFmpeg resolves the master's names to.
+        let video = url::Url::parse(&item).unwrap().join("a%20film.mp4/video.m3u8").unwrap();
+        let child = status(agent().get(video.as_str()).call());
+        assert_eq!(child.status(), 200);
+        assert!(child.into_string().unwrap().contains("#EXT-X-BYTERANGE:100@10\nhttps://cdn.example.com/v.mp4?n=1"));
+        assert_eq!(status(agent().head(&item).call()).status(), 200);
+        assert_eq!(status(agent().get(&format!("{item}/other.m3u8")).call()).status(), 404);
+        assert_eq!(status(agent().get(&format!("http://{addr}/bytes/demo/films/other.mp4/video.m3u8")).call()).status(), 404);
+        // A playlist under an item is not the item: it cannot be deleted.
+        assert_eq!(status(agent().delete(video.as_str()).call()).status(), 405);
+    }
+
+    #[test]
+    fn playlists_are_refused_off_the_hosts_and_without_host_0_4() {
+        for (host, link, want) in [
+            ("0.4", "https://evil.example/v.mp4", "https://evil.example/..., is not on the addon's hosts"),
+            ("0.4", "v.mp4", "v.mp4 is no playlist of its own"),
+            ("0.3", "https://cdn.example.com/v.mp4", "open() returned playlists, which need \"host\": \"0.4\" in the manifest"),
+        ] {
+            let (_, addr) = playlist_addon(host, link);
+            let response = status(agent().get(&format!("http://{addr}/bytes/demo/films/a%20film.mp4")).call());
+            assert_eq!(response.status(), 502);
+            let body: Json = serde_json::from_str(&response.into_string().unwrap()).unwrap();
+            assert!(body["error"].as_str().unwrap().contains(want), "{body}");
+        }
     }
 
     #[test]

@@ -84,6 +84,8 @@ pub fn now() -> u64 {
 pub struct Opened {
     pub url: String,
     pub headers: Vec<(String, String)>,
+    /// Playlists the addon wrote, instead of a link.
+    pub playlists: Option<Arc<probe::Playlists>>,
 }
 
 /// A sign-in waiting for the person to enter its code. Never saved.
@@ -397,6 +399,8 @@ impl App {
                 addon.opening.remove(item);
                 match &result {
                     Ok(opened) => {
+                        // Playlists can be megabytes: what expired goes.
+                        addon.opened.retain(|_, (_, at)| at.elapsed() < OPEN_TTL);
                         addon.opened.insert(item.to_string(), (opened.clone(), Instant::now()));
                     }
                     Err(error) => {
@@ -415,6 +419,14 @@ impl App {
         let env = Env { addon: id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone() };
         let ctx = json!({"config": manifest.effective(config)});
         let answer = sandbox::call(&env, "open", &[json!(item), ctx], sandbox::OPEN)?;
+        if !answer["playlist"].is_null() {
+            // An older rex-addons answers it with "open() returned no url".
+            if manifest.host.as_deref().is_none_or(|host| newer("0.4", host)) {
+                return Err("open() returned playlists, which need \"host\": \"0.4\" in the manifest".into());
+            }
+            let playlists = probe::Playlists::parse(&answer, &manifest.hosts).map_err(|e| format!("open() returned playlists: {e}"))?;
+            return Ok(Opened { url: String::new(), headers: Vec::new(), playlists: Some(Arc::new(playlists)) });
+        }
         let url = answer["url"].as_str().ok_or("open() returned no url")?;
         let parsed = url::Url::parse(url).map_err(|e| format!("open() returned {url}: {e}"))?;
         if !matches!(parsed.scheme(), "http" | "https") || !manifest.hosts.allows(parsed.host_str().unwrap_or("")) {
@@ -424,7 +436,7 @@ impl App {
             .as_object()
             .map(|h| h.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
             .unwrap_or_default();
-        Ok(Opened { url: url.to_string(), headers })
+        Ok(Opened { url: url.to_string(), headers, playlists: None })
     }
 
     pub fn forget_open(&self, id: &str, item: &str) {

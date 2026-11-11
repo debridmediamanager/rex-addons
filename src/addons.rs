@@ -132,6 +132,10 @@ impl Manifest {
             }),
             Some(_) => return Err("manifest: sign_in must be an object, such as {\"label\": \"Sign in to Example\"}".into()),
         };
+        // rex's own `directories` (docs/feed-api.md), passed on as they are when the addon registers.
+        if raw.get("directories").is_some_and(|d| !d.is_null() && !d.is_array()) {
+            return Err("manifest: directories must be a list, such as [{\"name\": \"youtube\", \"shows\": \"YouTube\"}]".into());
+        }
         // An older rex-addons would install it and never sign it in.
         if sign_in.is_some() && host.as_deref().is_none_or(|host| newer("0.3", host)) {
             return Err("manifest: sign_in needs \"host\": \"0.3\" or newer".into());

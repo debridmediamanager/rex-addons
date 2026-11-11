@@ -542,7 +542,11 @@ impl App {
         })?;
         let mut items = checked_items(id, returned, &deleted)?;
         let name = source_name(id);
-        let (status, answer) = self.feed_call(id, "PUT", &format!("/rex/sources/{name}"), &json!({"url": self.byte_base(id)}))?;
+        let mut registration = json!({"url": self.byte_base(id)});
+        if let Some(directories) = manifest.raw.get("directories").filter(|d| d.is_array()) {
+            registration["directories"] = directories.clone();
+        }
+        let (status, answer) = self.feed_call(id, "PUT", &format!("/rex/sources/{name}"), &registration)?;
         if status != 200 {
             return Err(format!("rex refused the registration ({status}): {}", answer["error"]));
         }
@@ -1365,15 +1369,27 @@ mod sync_tests {
     /// A rex that takes registrations and refuses every snapshot unforced as one that would remove
     /// more than half, recording each snapshot body it was sent.
     fn stub_rex() -> (String, Arc<Mutex<Vec<Json>>>) {
+        let (url, seen, _) = stub_rex_registrations();
+        (url, seen)
+    }
+
+    type Bodies = Arc<Mutex<Vec<Json>>>;
+
+    /// stub_rex, also recording each registration's body.
+    fn stub_rex_registrations() -> (String, Bodies, Bodies) {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let url = format!("http://{}", server.server_addr().to_ip().unwrap());
         let seen: Arc<Mutex<Vec<Json>>> = Arc::default();
-        let recorded = seen.clone();
+        let registered: Arc<Mutex<Vec<Json>>> = Arc::default();
+        let (recorded, registrations) = (seen.clone(), registered.clone());
         std::thread::spawn(move || {
             for mut request in server.incoming_requests() {
                 let mut body = String::new();
                 let _ = request.as_reader().read_to_string(&mut body);
                 let body: Json = serde_json::from_str(&body).unwrap_or(Json::Null);
+                if request.url().starts_with("/rex/sources/") {
+                    registrations.lock().unwrap().push(body.clone());
+                }
                 let (status, answer) = if request.url().ends_with("/snapshot") {
                     recorded.lock().unwrap().push(body.clone());
                     if body["force"] == json!(true) {
@@ -1387,7 +1403,7 @@ mod sync_tests {
                 let _ = request.respond(tiny_http::Response::from_string(answer.to_string()).with_status_code(status));
             }
         });
-        (url, seen)
+        (url, seen, registered)
     }
 
     fn wait_idle(app: &App, id: &str) -> Json {
@@ -1399,6 +1415,22 @@ mod sync_tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         panic!("the sync never ended");
+    }
+
+    #[test]
+    fn an_addon_registers_the_libraries_its_manifest_declares() {
+        let (rex, _, registered) = stub_rex_registrations();
+        let data = std::env::temp_dir().join(format!("rex-addons-directories-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+        let source = "export default { items() { return [{id: 'a', path: 'clips/a.mp4'}]; }, open() {} };";
+        let directories = json!([{"name": "clips", "shows": "Clips"}]);
+        app.install(&json!({"id": "clips", "name": "Clips", "version": "1.0.0", "directories": directories}), source, None).unwrap();
+        assert!(app.start_sync("clips", true));
+        wait_idle(&app, "clips");
+        assert_eq!(registered.lock().unwrap()[0]["directories"], directories);
+        assert!(Manifest::parse(&json!({"id": "x", "name": "X", "version": "1.0.0", "directories": {"name": "clips"}})).is_err());
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     #[test]

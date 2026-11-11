@@ -14,6 +14,7 @@ import os
 import socket
 import struct
 import sys
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -89,7 +90,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(name, value)
         self.end_headers()
         if self.command != "HEAD":
-            self.wfile.write(data)
+            # Media at about YouTube's 15 MB/s, so rex's copy runs no faster than it would from YouTube:
+            # from this machine it outran rex's throttle, and a seek never restarted it.
+            for at in range(0, len(data), 1 << 16):
+                self.wfile.write(data[at:at + (1 << 16)])
+                if kind.startswith(("video/", "audio/")):
+                    time.sleep(0.004)
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")

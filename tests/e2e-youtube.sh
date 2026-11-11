@@ -81,13 +81,13 @@ token_file=${YT_TOKEN_FILE:-}
 if [ "$fake_mode" = 1 ]; then
     mkdir -p "$work/media"
     # As YouTube's: the 360p file, H.264 + AAC in one MP4; and the H.264 picture (with B-frames, as
-    # YouTube's) and the AAC sound apart, each an MP4 of 5 s fragments, its index (sidx) after its header.
-    # Six minutes, so a seek to the middle is past what rex makes ahead.
+    # YouTube's) and the AAC sound apart, each an MP4 of 7 s fragments, its index (sidx) after its
+    # header. Six minutes, so a seek to the middle is past what rex makes ahead and inside a fragment.
     "$ffmpeg" -v error -f lavfi -i testsrc=size=640x360:rate=12 -f lavfi -i sine=frequency=440 -t 360 -c:v libx264 -profile:v baseline \
         -pix_fmt yuv420p -preset ultrafast -c:a aac -movflags +faststart "$work/media/muxed.mp4"
-    "$ffmpeg" -v error -f lavfi -i testsrc=size=1280x720:rate=12 -t 360 -c:v libx264 -preset veryfast -bf 2 -g 60 -keyint_min 60 -sc_threshold 0 \
-        -pix_fmt yuv420p -f mp4 -movflags dash+global_sidx -frag_duration 5000000 "$work/media/dash-video.mp4"
-    "$ffmpeg" -v error -f lavfi -i sine=frequency=440 -t 360 -c:a aac -f mp4 -movflags dash+global_sidx -frag_duration 5000000 "$work/media/dash-audio.mp4"
+    "$ffmpeg" -v error -f lavfi -i testsrc=size=1280x720:rate=12 -t 360 -c:v libx264 -preset veryfast -bf 2 -g 84 -keyint_min 84 -sc_threshold 0 \
+        -pix_fmt yuv420p -f mp4 -movflags dash+global_sidx -frag_duration 7000000 "$work/media/dash-video.mp4"
+    "$ffmpeg" -v error -f lavfi -i sine=frequency=440 -t 360 -c:a aac -f mp4 -movflags dash+global_sidx -frag_duration 7000000 "$work/media/dash-audio.mp4"
     # YouTube's TV player script, which the addon cuts its n function out of.
     curl -fsS -o "$work/media/player.js" "https://www.youtube.com/s/player/f5321ed3/tv-player-ias.vflset/tv-player-ias.js"
     python3 tests/e2e-youtube-fake.py "$fake_port" "$work/media" >"$work/fake.url" 2>"$work/fake.log" &

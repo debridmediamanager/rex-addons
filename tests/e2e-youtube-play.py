@@ -2,7 +2,7 @@
 """Plays one item through rex as Plex Web does, for tests/e2e-youtube.sh: the decision, start.m3u8,
 the session's media playlist, its first segment (a cold start) and one in its middle (a seek, which
 restarts rex's FFmpeg there). Each segment must hold the picture at the wanted height and the sound,
-the picture starting with the sound. Prints what it measured; exits 1 on a failure.
+the picture starting with the sound, and the middle one at the source's keyframe before its time. Prints what it measured; exits 1 on a failure.
 
     python3 tests/e2e-youtube-play.py <rex url> <token> <ratingKey> <height> <ffprobe> <work dir>
 """
@@ -92,7 +92,9 @@ status, middle = get(base + names[far], [])
 seek = time.time() - started
 check("segment %d (a seek to the middle)" % far, status == 200 and middle[:1] == b"\x47", "%s, %.2f s to its bytes" % (status, seek))
 at = segment("middle.ts", middle, "middle segment") - start0
-check("the middle segment is at its own time", abs(at - far * length) < 1.6, "at %.2f s, want %.0f s" % (at, far * length))
+# Copied, a run starts at a keyframe of the source at or before its time: YouTube's come every
+# few seconds, at the start of each of its segments (at most 10 s apart).
+check("the middle segment starts at the keyframe before its time", -10 <= at - far * length <= 1.6, "at %.2f s, its time %.0f s" % (at, far * length))
 
 get("/video/:/transcode/universal/stop", [("session", SESSION), ("X-Plex-Token", TOKEN)])
 print("TIMINGS cold %.2f s, seek %.2f s" % (cold, seek))

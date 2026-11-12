@@ -64,6 +64,13 @@ impl Storage {
         self.state.lock().unwrap().map.get(key).cloned()
     }
 
+    /// The keys starting with `prefix`, sorted.
+    fn keys(&self, prefix: &str) -> Vec<String> {
+        let mut keys: Vec<String> = self.state.lock().unwrap().map.keys().filter(|key| key.starts_with(prefix)).cloned().collect();
+        keys.sort();
+        keys
+    }
+
     fn change(&self, key: &str, value: Option<Json>) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         let before = state.map.get(key).map_or(0, |v| entry_size(key, v));
@@ -227,6 +234,7 @@ const PRELUDE: &str = r#"
     get: (key) => { const value = host.storageGet(String(key)); return value === undefined ? undefined : JSON.parse(value); },
     set: (key, value) => { value === undefined ? host.storageDelete(String(key)) : host.storageSet(String(key), JSON.stringify(value)); },
     delete: (key) => { host.storageDelete(String(key)); },
+    keys: (prefix = "") => JSON.parse(host.storageKeys(String(prefix))),
   });
   const globals = { console, fetch, ffprobe, storage, sleep, URL, URLSearchParams, hash, hmac };
   if (host.spotify) {
@@ -518,6 +526,11 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
     )?;
     let storage = env.storage.clone();
     host.set(
+        "storageKeys",
+        Function::new(ctx.clone(), move |prefix: String| Json::from(storage.keys(&prefix)).to_string())?,
+    )?;
+    let storage = env.storage.clone();
+    host.set(
         "storageSet",
         Function::new(ctx.clone(), move |ctx: Ctx<'js>, key: String, value: String| -> rquickjs::Result<()> {
             let value = serde_json::from_str(&value).map_err(|e| throw(&ctx, &e.to_string()))?;
@@ -797,7 +810,9 @@ mod tests {
     fn storage_persists_between_calls() {
         let path = std::env::temp_dir().join(format!("rex-addons-storage-keep-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let source = "export default { items() { const n = (storage.get('n') ?? 0) + 1; storage.set('n', n); storage.set('gone', 1); storage.delete('gone'); return [n, storage.get('gone')]; }, open() {} };";
+        let source = "export default { items() { const n = (storage.get('n') ?? 0) + 1; storage.set('n', n); storage.set('gone', 1); storage.delete('gone');
+            storage.set('probe:b', 1); storage.set('probe:a', 2); storage.set('probed', 3);
+            return [n, storage.get('gone'), storage.keys(), storage.keys('probe:'), storage.keys('none')]; }, open() {} };";
         let call_once = || {
             let env = Env {
                 addon: "test",
@@ -810,8 +825,9 @@ mod tests {
             };
             call(&env, "items", &[], QUICK).unwrap()
         };
-        assert_eq!(call_once(), serde_json::json!([1, null]));
-        assert_eq!(call_once(), serde_json::json!([2, null]));
+        let keys = serde_json::json!(["n", "probe:a", "probe:b", "probed"]);
+        assert_eq!(call_once(), serde_json::json!([1, null, keys, ["probe:a", "probe:b"], []]));
+        assert_eq!(call_once(), serde_json::json!([2, null, keys, ["probe:a", "probe:b"], []]));
         let _ = std::fs::remove_file(&path);
     }
 

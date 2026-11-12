@@ -17,8 +17,10 @@ use crate::spotify::{self, Pairing, Spotify};
 
 /// How long an `open()` answer is reused for the byte reads of one item.
 const OPEN_TTL: Duration = Duration::from_secs(10 * 60);
-/// How soon a sync that failed is tried again.
+/// How soon a sync that failed is tried again...
 const RETRY: Duration = Duration::from_secs(5 * 60);
+/// ...unless `items()` threw `RETRY_AFTER <seconds>`, which is kept within these.
+const RETRY_AFTER: (u64, u64) = (60, 24 * 3600);
 /// Items rex is sent per request, as feed-api.md asks.
 const CHUNK: usize = 200;
 /// Probed items go to rex in batches this big, so they show before the whole sync is done.
@@ -138,6 +140,8 @@ pub struct Addon {
     /// Asked for while one was running (new settings): run again when it ends, for this reason.
     pub again: Option<&'static str>,
     pub attempted: Option<Instant>,
+    /// How long after a failed sync the next one runs: RETRY, or what the addon asked for.
+    pub retry: Duration,
     pub opened: HashMap<String, (Opened, Instant)>,
     /// The `open()` running for each item: callers for the same item wait for it and share it.
     pub opening: HashMap<String, Arc<OnceLock<Result<Opened, String>>>>,
@@ -512,7 +516,7 @@ impl App {
             .filter(|a| a.enabled && !a.syncing && a.signed_in())
             .filter_map(|a| {
                 let reason = match (a.error.is_some(), a.attempted, a.last_sync) {
-                    (true, Some(at), _) => (at.elapsed() >= RETRY).then_some("retry"),
+                    (true, Some(at), _) => (at.elapsed() >= a.retry).then_some("retry"),
                     // A failure from before a restart is tried again at once.
                     (true, None, _) => Some("retry"),
                     // Installed, or updated, and not synced since.
@@ -550,8 +554,13 @@ impl App {
             }
             Err(error) => {
                 warn(id, &format!("sync failed: {error}"));
+                let (retry, shown) = retry_after(&error).unwrap_or((RETRY, error));
+                if retry != RETRY {
+                    log(id, &format!("the addon asked to be tried again in {} s", retry.as_secs()));
+                }
+                addon.retry = retry;
                 // The log keeps the stack; the app shows the reason.
-                addon.error = Some(first_line(&masked(id, &error)));
+                addon.error = Some(first_line(&masked(id, &shown)));
             }
         }
         save_state(self, addon);
@@ -1163,6 +1172,17 @@ fn sign_in_required(addon: &Addon, error: &str) -> Option<String> {
     Some(if reason.is_empty() { "signed out by the website".into() } else { reason })
 }
 
+/// `RETRY_AFTER <seconds>[: why]` thrown from `items()`: how long to wait before the next retry,
+/// within RETRY_AFTER, and what to show (`why`, or that it waits).
+fn retry_after(error: &str) -> Option<(Duration, String)> {
+    let rest = error.strip_prefix("RETRY_AFTER")?.trim_start();
+    let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    let seconds = rest[..digits].parse::<u64>().ok()?.clamp(RETRY_AFTER.0, RETRY_AFTER.1);
+    let reason = first_line(&rest[digits..]).trim_start_matches([':', ' ']).trim().to_string();
+    let shown = if reason.is_empty() { format!("the website asked to wait {seconds} s") } else { reason };
+    Some((Duration::from_secs(seconds), shown))
+}
+
 /// The website ended the session: the addon signs in again before it syncs or plays. Its
 /// titles stay in rex.
 fn signed_out(app: &App, addon: &mut Addon, reason: &str) {
@@ -1547,6 +1567,7 @@ fn load(path: &Path) -> Result<Addon, String> {
         force: false,
         again: None,
         attempted: None,
+        retry: RETRY,
         opened: HashMap::new(),
         opening: HashMap::new(),
         account: state["account"].as_str().map(str::to_string),
@@ -1833,6 +1854,39 @@ mod sync_tests {
         addon.last_sync = Some(now() - addon.manifest.refresh_minutes * 60);
         drop(addons);
         assert_eq!(app.due(), [("ctx".to_string(), "schedule")]);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A sync that threw RETRY_AFTER waits that long, within bounds, before its retry; the reason
+    /// after the number is what the app shows. Any other failure waits RETRY.
+    #[test]
+    fn retry_after_sets_when_a_failed_sync_is_tried_again() {
+        assert_eq!(retry_after("RETRY_AFTER 3600: YouTube answered 429\n    at items (main.js:3:9)"), Some((Duration::from_secs(3600), "YouTube answered 429".into())));
+        assert_eq!(retry_after("RETRY_AFTER 5"), Some((Duration::from_secs(60), "the website asked to wait 60 s".into())));
+        assert_eq!(retry_after("RETRY_AFTER 9999999 too long"), Some((Duration::from_secs(86400), "too long".into())));
+        assert_eq!(retry_after("RETRY_AFTER soon"), None);
+        assert_eq!(retry_after("archive.org answered 503"), None);
+
+        let (rex, _) = stub_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-retry-after-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+        let source = "export default { items(ctx) { throw new Error(ctx.config.error); }, open() {} };";
+        let manifest = json!({"id": "busy", "name": "Busy", "version": "1.0.0", "config": [{"key": "error", "label": "E", "type": "text", "default": "RETRY_AFTER 600: rate limited"}]});
+        app.install(&manifest, source, None).unwrap();
+        assert!(app.start_sync("busy", false, "manual"));
+        assert_eq!(wait_idle(&app, "busy")["error"], "rate limited");
+        let attempted = |ago: Duration| app.addons.lock().unwrap().get_mut("busy").unwrap().attempted = Instant::now().checked_sub(ago);
+        attempted(Duration::from_secs(599));
+        assert!(app.due().is_empty());
+        attempted(Duration::from_secs(600));
+        assert_eq!(app.due(), [("busy".to_string(), "retry")]);
+        // A plain failure goes back to RETRY.
+        app.addons.lock().unwrap().get_mut("busy").unwrap().config.insert("error".into(), json!("down"));
+        assert!(app.start_sync("busy", false, "manual"));
+        assert_eq!(wait_idle(&app, "busy")["error"], "down");
+        attempted(RETRY);
+        assert_eq!(app.due(), [("busy".to_string(), "retry")]);
         let _ = std::fs::remove_dir_all(&data);
     }
 

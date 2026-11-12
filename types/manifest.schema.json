@@ -1,0 +1,161 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://raw.githubusercontent.com/debridmediamanager/rex-addons/main/types/manifest.schema.json",
+  "title": "rex-addons manifest.json",
+  "description": "What an addon is, for rex-addons 0.5. The rules are the ones installing checks; two it checks that this file can't are that each config key is listed once and that requires doesn't name the addon's own id. https://github.com/debridmediamanager/rex-addons/blob/main/docs/writing-addons.md#manifestjson",
+  "type": "object",
+  "required": ["id", "name", "version"],
+  "properties": {
+    "$schema": {
+      "description": "Where your editor finds this file. rex-addons ignores it.",
+      "type": "string"
+    },
+    "id": {
+      "description": "Lowercase letters, digits and -, starting with a letter or digit, at most 64 characters. It's the addon's name in rex too (addon-<id>), so never change it.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+    },
+    "name": {
+      "description": "What people see in the app.",
+      "type": "string",
+      "pattern": "\\S"
+    },
+    "description": {
+      "description": "What people see in the app.",
+      "type": ["string", "null"]
+    },
+    "version": {
+      "description": "Numbers and dots. Raise it with every change: people see an update when the version in your repository is higher than theirs.",
+      "type": "string",
+      "pattern": "^[0-9]+(\\.[0-9]+)*$"
+    },
+    "hosts": {
+      "description": "The websites fetch() may reach, and that open() links may point at: example.com exactly, *.example.com for anything under it, or * for any public website. This device (127.0.0.1, localhost) is never reachable. An address on a private network is reachable only when you list it exactly; never through * or *.example.com.",
+      "type": ["array", "null"],
+      "items": {
+        "type": "string",
+        "pattern": "^(\\*|(\\*\\.)?[A-Za-z0-9.:-]{1,253})$"
+      }
+    },
+    "config": {
+      "description": "The settings the app shows. Each key once.",
+      "type": ["array", "null"],
+      "items": { "$ref": "#/definitions/setting" }
+    },
+    "refresh_minutes": {
+      "description": "How often items() runs. Default 360, at least 5.",
+      "type": ["integer", "null"],
+      "minimum": 5
+    },
+    "host": {
+      "description": "The lowest rex-addons version your addon needs, such as \"0.2\". 0.2: sleep, atob, btoa, URL, URLSearchParams, hash, hmac, bytes(), a binary body. 0.3: sign_in. 0.4: playlists from open(). 0.5: \"kind\": \"spotify\", exports, requires.",
+      "type": ["string", "null"],
+      "pattern": "^[0-9]+(\\.[0-9]+)*$"
+    },
+    "directories": {
+      "description": "Libraries of the addon's own, in rex's directories shape, such as [{\"name\": \"youtube\", \"shows\": \"YouTube\"}]: titles whose path starts with youtube/ go to a TV library called YouTube. https://github.com/debridmediamanager/rex/blob/main/docs/feed-api.md#libraries-a-source-declares",
+      "type": ["array", "null"]
+    },
+    "sign_in": {
+      "description": "For an addon that needs the person's account on a website, such as {\"label\": \"Sign in to Example\"}. Needs \"host\": \"0.3\" (0.5 with \"kind\": \"spotify\").",
+      "type": ["object", "null"],
+      "properties": {
+        "label": {
+          "description": "What the app's button says. Default: Sign in to <name>.",
+          "type": ["string", "null"],
+          "pattern": "\\S"
+        },
+        "kind": {
+          "description": "\"code\" (the default: your signIn()) or \"spotify\" (Spotify pairing).",
+          "enum": ["code", "spotify", null]
+        }
+      }
+    },
+    "exports": {
+      "description": "Functions of your default export that other addons may call, such as [\"findSong\"]. Needs \"host\": \"0.5\".",
+      "type": ["array", "null"],
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+      }
+    },
+    "requires": {
+      "description": "Ids of addons whose exports yours calls, such as [\"youtube\"], never your own. Needs \"host\": \"0.5\".",
+      "type": ["array", "null"],
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9-]{0,63}$"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "required": ["sign_in"], "properties": { "sign_in": { "type": "object" } } },
+      "then": {
+        "required": ["host"],
+        "properties": { "host": { "$ref": "#/definitions/host_0_3" } }
+      }
+    },
+    {
+      "if": {
+        "anyOf": [
+          { "required": ["sign_in"], "properties": { "sign_in": { "type": "object", "required": ["kind"], "properties": { "kind": { "const": "spotify" } } } } },
+          { "required": ["exports"], "properties": { "exports": { "type": "array", "minItems": 1 } } },
+          { "required": ["requires"], "properties": { "requires": { "type": "array", "minItems": 1 } } }
+        ]
+      },
+      "then": {
+        "required": ["host"],
+        "properties": { "host": { "$ref": "#/definitions/host_0_5" } }
+      }
+    }
+  ],
+  "definitions": {
+    "host_0_3": {
+      "description": "sign_in needs \"host\": \"0.3\" or newer.",
+      "type": "string",
+      "pattern": "^(0*[1-9][0-9]*(\\.[0-9]+)*|0+\\.0*([3-9]|[1-9][0-9]+)(\\.[0-9]+)*)$"
+    },
+    "host_0_5": {
+      "description": "sign_in kind spotify, exports and requires need \"host\": \"0.5\" or newer.",
+      "type": "string",
+      "pattern": "^(0*[1-9][0-9]*(\\.[0-9]+)*|0+\\.0*([5-9]|[1-9][0-9]+)(\\.[0-9]+)*)$"
+    },
+    "setting": {
+      "type": "object",
+      "required": ["key", "type"],
+      "properties": {
+        "key": {
+          "description": "Letters, digits and _, each key once. ctx.config.<key> holds its value.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_]+$"
+        },
+        "label": {
+          "description": "What the app shows. Default: the key.",
+          "type": "string"
+        },
+        "type": {
+          "description": "text, secret (shown masked), bool, number or list (a list of text).",
+          "enum": ["text", "secret", "bool", "number", "list"]
+        },
+        "default": {
+          "description": "The value until one is saved. Of the setting's type."
+        },
+        "required": {
+          "description": "true: a sync fails with \"set <label> first\" while it is empty.",
+          "type": "boolean"
+        },
+        "secret": {
+          "description": "On a list: shows only each link's website, for links that carry a key.",
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        { "if": { "properties": { "type": { "enum": ["text", "secret"] } } }, "then": { "properties": { "default": { "type": ["string", "null"] } } } },
+        { "if": { "properties": { "type": { "const": "bool" } } }, "then": { "properties": { "default": { "type": ["boolean", "null"] } } } },
+        { "if": { "properties": { "type": { "const": "number" } } }, "then": { "properties": { "default": { "type": ["number", "null"] } } } },
+        { "if": { "properties": { "type": { "const": "list" } } }, "then": { "properties": { "default": { "type": ["array", "null"], "items": { "type": "string" } } } } }
+      ]
+    }
+  }
+}

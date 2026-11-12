@@ -5,7 +5,8 @@ says what it has and where each title plays from. rex-addons does the rest: it r
 addon with rex, sends rex the list, serves the bytes and keeps it all up to date. People install
 addons from a git repository, so sharing yours means putting it in one ([below](#a-repository-of-addons)).
 
-You write plain JavaScript (an ES module). There's no npm and no build step.
+You write plain JavaScript (an ES module). There's no npm and no build step, and your editor can
+still check it ([editor help](#editor-help)).
 
 This page is about addons that run inside rex-addons. A program of your own, in any language,
 that talks to rex's feed API directly is a rex addon too: see
@@ -584,6 +585,38 @@ seconds until `sign_in.account` is set, and it syncs. When `REX_ADDONS_TOKEN` is
 [api.md](api.md).
 
 Once it works, push it to your repository and add that in the app.
+
+## Editor help
+
+Two files in [`types/`](../types) give VS Code autocomplete and checking, still with no npm and no
+build step:
+
+- **manifest.json**: add this as its first field. VS Code then completes the fields and
+  underlines one that breaks a rule installing checks. rex-addons ignores it, older ones too.
+
+  ```json
+  "$schema": "https://raw.githubusercontent.com/debridmediamanager/rex-addons/main/types/manifest.schema.json",
+  ```
+
+- **main.js**: put [`rex-addons.d.ts`](../types/rex-addons.d.ts) beside it, start `main.js` with
+  the two lines below, and put `/** @type {Addon} */` on the line above `export default {`.
+
+  ```bash
+  curl -O https://raw.githubusercontent.com/debridmediamanager/rex-addons/main/types/rex-addons.d.ts
+  ```
+
+  ```js
+  // @ts-check
+  /// <reference path="rex-addons.d.ts" />
+  ```
+
+  VS Code then completes `fetch`, `storage`, `ctx.config` and the rest, and underlines what
+  isn't there (`setTimeout`, `document`), a call with the wrong arguments, an item without a
+  `path` and an `open()` that returns neither `{ url }` nor playlists.
+
+The types are rex-addons 0.5's, and they keep a browser's globals out even where a
+`jsconfig.json` asks for them. The [bundled addons](../addons) use both files (the YouTube addon
+only the schema).
 
 ## When it doesn't work
 

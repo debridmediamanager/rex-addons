@@ -252,7 +252,7 @@ the useful part first: `archive.org answered 503`, not `Error in step 3`.
 | Memory | 64 MB |
 | JavaScript time | 30 s for `items()`, 10 s for `open()`. Time spent waiting on `fetch`, `ffprobe` or `sleep` doesn't count |
 | Whole call | 20 minutes for `items()`, 90 s for `open()`. A `fetch` or body read still waiting then fails |
-| One sync's pages | 10,000 pages, 500,000 titles, 128 MB of ids and paths, and an hour of `items()` calls, waiting included |
+| One sync's pages | 10,000 pages, 200,000 titles, 64 MB of ids and paths, and an hour of `items()` calls, waiting included |
 | A fetched body | 16 MB |
 | `storage` | 16 MB in all, written to disk when the call ends |
 | `crypto.getRandomValues` | 65,536 bytes a call |
@@ -313,7 +313,7 @@ function link(film) {
 
 ## A large library
 
-One `items()` call has 30 s of JavaScript and 64 MB, which is about 12,000 titles that carry
+One `items()` call has 30 s of JavaScript and 64 MB, which is about 11,000 titles that carry
 their `media_info`. Past that, or when listing every title every time costs too much, return them
 in pages, or only what changed, or both. Each needs `"host": "0.8"`.
 
@@ -839,7 +839,7 @@ only the schema).
 | `rex-addons removed nothing: items() removed 80 of the 100 titles the addon has, more than half. If that is right, sync with force` | A partial answer's `removed` took more than half. A forced sync asks for every title |
 | `items() returned 10000 pages and still a next: at most 10000 a sync` | The last page needs `next: null`, or none. Return bigger pages |
 | `items() ran for longer than 3600 s over all its pages` | The pages took over an hour together. Return changes only ([a large library](#a-large-library)) |
-| `items() returned more than 500000 titles: at most 500000 a sync`, `... more than 128 MB of ids and paths ...` | Too many titles for one addon, or very long ids and paths |
+| `items() returned more than 200000 titles: at most 200000 a sync`, `... more than 64 MB of ids and paths ...` | Too many titles for one addon, or very long ids and paths |
 | `items(): x has the path "a/b.mp4", which y has; left out` | A partial answer gave a title the path another title has ([changes only](#changes-only)) |
 | `rex refused the snapshot (409): no such snapshot session at this part: start again from part 0` | rex restarted during a sync of several pages. The next try, 5 minutes later, starts again |
 | `items() took longer than 1200 s` | The whole call ran past 20 minutes, waiting included |

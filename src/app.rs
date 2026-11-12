@@ -25,9 +25,11 @@ const RETRY_AFTER: (u64, u64) = (60, 24 * 3600);
 const CHUNK: usize = 200;
 /// What one sync's `items()` may return over all its pages: pages, titles, bytes of the ids and
 /// paths the host keeps for them (index, checks), and time spent in the calls, waiting included.
+/// Measured on zen (2026-11-12), 100,000 titles in pages of 5,000: rex peaked at 1.5 GB, this
+/// host at 196 to 344 MB, most of it one page's JSON; the index alone is about 40 MB.
 const MAX_PAGES: usize = 10_000;
-const MAX_TITLES: usize = 500_000;
-const MAX_KEPT: usize = 128 << 20;
+const MAX_TITLES: usize = 200_000;
+const MAX_KEPT: usize = 64 << 20;
 const PAGES_TIME: Duration = Duration::from_secs(3600);
 /// A sync asks for every title at least this often, so rex converges even after it lost what it had.
 const FULL_EVERY: u64 = 24 * 3600;
@@ -2072,6 +2074,14 @@ mod tests {
         page(partial, "0.8", false, &mut seen).unwrap();
         assert_eq!(page(json!([]), "0.8", false, &mut seen).err().unwrap(), "items(): a sync's pages are all partial, or none is");
         assert!(page(json!({"next": 1}), "0.8", true, &mut Seen::default()).is_err());
+        // What one sync's pages may add up to.
+        let mut full = Seen { kept: MAX_KEPT, ..Seen::default() };
+        assert_eq!(page(json!([{"id": "a", "path": "a.mp4"}]), "0.8", true, &mut full).err().unwrap(), "items() returned more than 64 MB of ids and paths: at most 64 MB a sync");
+        let mut many = Seen { ids: (0..MAX_TITLES).map(|n| n.to_string()).collect(), ..Seen::default() };
+        assert_eq!(page(json!([{"id": "a", "path": "a.mp4"}]), "0.8", true, &mut many).err().unwrap(), "items() returned more than 200000 titles: at most 200000 a sync");
+        let env = Env { addon: "a", source: "", hosts: Default::default(), storage: Arc::new(Storage::open("/dev/null".into())), prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())), spotify: None, calls: None };
+        let mut paged = Seen { pages: MAX_PAGES, ..Seen::default() };
+        assert_eq!(pages(&env, json!({}), &manifest("0.8"), true, &none, &mut paged, |_, _| Ok(())).err().unwrap(), "items() returned 10000 pages and still a next: at most 10000 a sync");
     }
 
     #[test]

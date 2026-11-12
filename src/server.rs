@@ -279,7 +279,11 @@ fn proxy(request: Request, hosts: &net::Hosts, url: &str, extra: &[(String, Stri
         .filter_map(|name| upstream.header(name).map(|value| header(name, value)))
         .collect();
     let length = upstream.header("Content-Length").and_then(|v| v.parse().ok());
-    let _ = request.respond(Response::new(StatusCode(status), copied, upstream.into_reader(), length, None));
+    // With the origin's length, never chunked (tiny_http chunks 32 KB and more by default): FFmpeg
+    // 4.4 reads `Transfer-Encoding: chunked` after `Content-Range` as a file of unknown size, then
+    // reads past its end, each read a 416, until its probe is killed.
+    let response = Response::new(StatusCode(status), copied, upstream.into_reader(), length, None).with_chunked_threshold(usize::MAX);
+    let _ = request.respond(response);
     if status >= 400 {
         return Err(format!("the link answered {status}"));
     }
@@ -468,6 +472,72 @@ mod tests {
         let whole = status(agent().get(&format!("http://{addr}/bytes/demo/films/a%20film.mp4")).call());
         assert_eq!(whole.status(), 200);
         assert_eq!(whole.header("content-length"), Some("1000"));
+    }
+
+    /// The status line and headers of a GET with `range`, read off the wire as a client sees them.
+    fn head_of(addr: SocketAddr, path: &str, range: &str) -> (u16, Vec<(String, String)>) {
+        use std::io::Write;
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        write!(stream, "GET {path} HTTP/1.1\r\nHost: {addr}\r\nRange: {range}\r\nConnection: close\r\n\r\n").unwrap();
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap() == 1 {
+            head.push(byte[0]);
+        }
+        let text = String::from_utf8(head).unwrap();
+        let mut lines = text.lines();
+        let status = lines.next().unwrap().split(' ').nth(1).unwrap().parse().unwrap();
+        let headers = lines.filter_map(|l| l.split_once(": ")).map(|(n, v)| (n.to_ascii_lowercase(), v.to_string())).collect();
+        (status, headers)
+    }
+
+    /// What ffprobe 4.4 asked the relay for and what the origin answered, replayed: the relay, and
+    /// /bytes/ for a link with headers, answer with the origin's status, Content-Range and
+    /// Content-Length, never chunked. Chunked, FFmpeg 4.4 takes the file's size as unknown (its
+    /// `Transfer-Encoding: chunked` line comes after `Content-Range`), reads past the end and gets a
+    /// 416 for each read until it is killed (tests/fixtures/relay-ffprobe44.json).
+    #[test]
+    fn relayed_bytes_keep_the_origins_length() {
+        let Some(lan) = lan_ip() else {
+            eprintln!("SKIP: no network address for the upstream (loopback is never fetched)");
+            return;
+        };
+        let fixture: Json = serde_json::from_str(include_str!("../tests/fixtures/relay-ffprobe44.json")).unwrap();
+        let exchange = fixture["exchange"].as_array().unwrap().clone();
+        // The origin, answering each recorded Range as archive.org did, its body zeros.
+        let origin = tiny_http::Server::http("0.0.0.0:0").unwrap();
+        let link = format!("http://{lan}:{}/his_girl_friday.mp4", origin.server_addr().to_ip().unwrap().port());
+        let answers = exchange.clone();
+        std::thread::spawn(move || {
+            for request in origin.incoming_requests() {
+                let range = request.headers().iter().find(|h| h.field.equiv("Range")).map(|h| h.value.to_string());
+                let Some(answer) = answers.iter().find(|a| a["range"].as_str() == range.as_deref()) else {
+                    let _ = request.respond(error(400, "a range not in the fixture"));
+                    continue;
+                };
+                let recorded = answer["origin"]["headers"].as_object().unwrap();
+                let length: usize = recorded["Content-Length"].as_str().unwrap().parse().unwrap();
+                let headers = recorded.iter().filter(|(name, _)| *name != "Content-Length").map(|(name, value)| header(name, value.as_str().unwrap())).collect();
+                let status = StatusCode(answer["origin"]["status"].as_u64().unwrap() as u16);
+                let body = std::io::Read::take(std::io::repeat(0), length as u64);
+                let _ = request.respond(Response::new(status, headers, body, Some(length), None).with_chunked_threshold(usize::MAX));
+            }
+        });
+        let source = format!("export default {{ items() {{ return []; }}, open() {{ return {{ url: '{link}', headers: {{ Referer: 'https://archive.org/' }} }}; }} }};");
+        let (app, addr) = start("127.0.0.1:0", json!([lan.to_string()]), &source);
+        let token = app.prober.hold(crate::probe::Relay { url: link, headers: Vec::new(), hosts: net::Hosts(vec![lan.to_string()]), playlists: None });
+        for path in [format!("/relay/{token}/his_girl_friday.mp4"), "/bytes/demo/films/a%20film.mp4".to_string()] {
+            for answer in &exchange {
+                let range = answer["range"].as_str().unwrap();
+                let (status, headers) = head_of(addr, &path, range);
+                let got = |name: &str| headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str());
+                let origin = &answer["origin"];
+                assert_eq!(status as u64, origin["status"].as_u64().unwrap(), "{path} {range}");
+                assert_eq!(got("content-length"), origin["headers"]["Content-Length"].as_str(), "{path} {range}: {headers:?}");
+                assert_eq!(got("content-range"), origin["headers"]["Content-Range"].as_str(), "{path} {range}: {headers:?}");
+                assert_eq!(got("transfer-encoding"), None, "{path} {range}: {headers:?}");
+            }
+        }
     }
 
     /// An addon whose `open()` writes a master playlist and two media playlists over `link`.

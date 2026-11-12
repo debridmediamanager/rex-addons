@@ -84,6 +84,14 @@ impl Prober {
         probed
     }
 
+    /// A relay held open, as during a probe, for a test to read through.
+    #[cfg(test)]
+    pub fn hold(&self, relay: Relay) -> String {
+        let token = token();
+        self.relays.lock().unwrap().insert(token.clone(), relay);
+        token
+    }
+
     pub fn relay(&self, token: &str) -> Option<Relay> {
         self.relays.lock().unwrap().get(token).cloned()
     }

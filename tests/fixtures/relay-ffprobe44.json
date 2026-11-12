@@ -1,0 +1,26 @@
+{
+  "about": "An addon's ffprobe() of an archive.org link through /relay/, recorded on zen on 2026-11-12 with Ubuntu's ffprobe 4.4.2 (Lavf/58.76.100) against rex-addons 0.5.0. ffprobe's requests and the relay's answers are from its -v trace (relay-ffprobe44-trace.txt); the origin's answers are curl's, for the same Range, after archive.org's redirect to its data node. The relay answered every one chunked, without the origin's Content-Length, and ffprobe ran until it was killed at 120 s, 95 requests in, most of them answered 416.",
+  "link": "https://archive.org/download/his_girl_friday/his_girl_friday.mp4",
+  "exchange": [
+    {
+      "range": "bytes=0-",
+      "origin": {"status": 206, "headers": {"Content-Type": "video/mp4", "Content-Length": "575274912", "Content-Range": "bytes 0-575274911/575274912", "Last-Modified": "Fri, 26 Oct 2018 22:38:32 GMT", "ETag": "\"5bd39768-2249ffa0\""}},
+      "relay_in_0.5.0": {"status": 206, "headers": {"Content-Type": "video/mp4", "Content-Range": "bytes 0-575274911/575274912", "Last-Modified": "Fri, 26 Oct 2018 22:38:32 GMT", "ETag": "\"5bd39768-2249ffa0\"", "Transfer-Encoding": "chunked"}}
+    },
+    {
+      "range": "bytes=575274912-",
+      "origin": {"status": 416, "headers": {"Content-Type": "video/mp4", "Content-Length": "190", "Content-Range": "bytes */575274912"}},
+      "relay_in_0.5.0": {"status": 416}
+    },
+    {
+      "range": "bytes=88526421-",
+      "origin": {"status": 206, "headers": {"Content-Type": "video/mp4", "Content-Length": "486748491", "Content-Range": "bytes 88526421-575274911/575274912", "Last-Modified": "Fri, 26 Oct 2018 22:38:32 GMT", "ETag": "\"5bd39768-2249ffa0\""}},
+      "relay_in_0.5.0": {"status": 206, "headers": {"Content-Type": "video/mp4", "Content-Range": "bytes 88526421-575274911/575274912", "Last-Modified": "Fri, 26 Oct 2018 22:38:32 GMT", "ETag": "\"5bd39768-2249ffa0\"", "Transfer-Encoding": "chunked"}}
+    },
+    {
+      "range": "bytes=491586428-",
+      "origin": {"status": 206, "headers": {"Content-Type": "video/mp4", "Content-Length": "83688484", "Content-Range": "bytes 491586428-575274911/575274912", "Last-Modified": "Fri, 26 Oct 2018 22:38:32 GMT", "ETag": "\"5bd39768-2249ffa0\""}},
+      "relay_in_0.5.0": {"status": 206, "headers": {"Content-Type": "video/mp4", "Content-Range": "bytes 491586428-575274911/575274912", "Last-Modified": "Fri, 26 Oct 2018 22:38:32 GMT", "ETag": "\"5bd39768-2249ffa0\"", "Transfer-Encoding": "chunked"}}
+    }
+  ]
+}

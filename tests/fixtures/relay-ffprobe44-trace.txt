@@ -1,0 +1,300 @@
+[NULL @ 0x562b80c67a80] Opening 'http://127.0.0.1:32621/relay/fb44fea5a7bc83af1577027dde19e2b8/his_girl_friday.mp4' for reading
+[tcp @ 0x562b80c6b780] Original list of addresses:
+[tcp @ 0x562b80c6b780] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80c6b780] Interleaved list of addresses:
+[tcp @ 0x562b80c6b780] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80c6b780] Starting connection attempt to 127.0.0.1 port 32621
+[tcp @ 0x562b80c6b780] Successfully connected to 127.0.0.1 port 32621
+[http @ 0x562b80c68740] request: GET /relay/fb44fea5a7bc83af1577027dde19e2b8/his_girl_friday.mp4 HTTP/1.1
+User-Agent: Lavf/58.76.100
+Accept: */*
+Range: bytes=0-
+Connection: close
+Host: 127.0.0.1:32621
+Icy-MetaData: 1
+
+
+[http @ 0x562b80c68740] header='HTTP/1.1 206 Partial Content'
+[http @ 0x562b80c68740] http_code=206
+[http @ 0x562b80c68740] header='Server: tiny-http (Rust)'
+[http @ 0x562b80c68740] header='Date: Thu, 12 Nov 2026 12:08:51 GMT'
+[http @ 0x562b80c68740] header='Content-Type: video/mp4'
+[http @ 0x562b80c68740] header='Content-Range: bytes 0-575274911/575274912'
+[http @ 0x562b80c68740] header='Last-Modified: Fri, 26 Oct 2018 22:38:32 GMT'
+[http @ 0x562b80c68740] header='ETag: "5bd39768-2249ffa0"'
+[http @ 0x562b80c68740] header='Transfer-Encoding: chunked'
+[http @ 0x562b80c68740] header=''
+[http @ 0x562b80c68740] Chunked encoding data size: 8192
+Probing mov,mp4,m4a,3gp,3g2,mj2 score:100 size:2048
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] Format mov,mp4,m4a,3gp,3g2,mj2 probed with size=2048 and score=100
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'ftyp' parent:'root' sz: 32 8 9223372036854775807
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] ISO: File Type Major Brand: isom
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'moov' parent:'root' sz: 4662607 40 9223372036854775807
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'mvhd' parent:'moov' sz: 108 8 4662599
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] time scale = 1000
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'trak' parent:'moov' sz: 1323668 116 4662599
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'tkhd' parent:'trak' sz: 92 8 1323660
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'edts' parent:'trak' sz: 36 100 1323660
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'elst' parent:'edts' sz: 28 8 28
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] track[0].edit_count = 1
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] duration=5504566 time=0 rate=1.000000
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'mdia' parent:'trak' sz: 1323532 136 1323660
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'mdhd' parent:'mdia' sz: 32 8 1323524
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'hdlr' parent:'mdia' sz: 45 40 1323524
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] ctype=[0][0][0][0]
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] stype=vide
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'minf' parent:'mdia' sz: 1323447 85 1323524
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'vmhd' parent:'minf' sz: 20 8 1323439
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'dinf' parent:'minf' sz: 36 28 1323439
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'dref' parent:'dinf' sz: 28 8 28
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] Unknown dref type 0x206c7275 size 12
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stbl' parent:'minf' sz: 1323383 64 1323439
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stsd' parent:'stbl' sz: 147 8 1323375
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] size=131 4CC=avc1 codec_type=0
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'avcC' parent:'stsd' sz: 45 8 45
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stts' parent:'stbl' sz: 24 155 1323375
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] track[0].stts.entries = 1
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] sample_count=164972, sample_duration=1001
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stss' parent:'stbl' sz: 3396 179 1323375
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] keyframe_count = 845
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stsc' parent:'stbl' sz: 40 3575 1323375
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] track[0].stsc.entries = 2
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stsz' parent:'stbl' sz: 659908 3615 1323375
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] sample_size = 0 sample_count = 164972
+[http @ 0x562b80c68740] Chunked encoding data size: 8192
+    Last message repeated 80 times
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stco' parent:'stbl' sz: 659860 663523 1323375
+[http @ 0x562b80c68740] Chunked encoding data size: 8192
+    Last message repeated 79 times
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] Processing st: 0, edit list 0 - media time: 0, duration: 165136980
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'trak' parent:'moov' sz: 3338559 1323784 4662599
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'tkhd' parent:'trak' sz: 92 8 3338551
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'edts' parent:'trak' sz: 36 100 3338551
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'elst' parent:'edts' sz: 28 8 28
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] track[1].edit_count = 1
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] duration=5504160 time=1024 rate=1.000000
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'mdia' parent:'trak' sz: 3338423 136 3338551
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'mdhd' parent:'mdia' sz: 32 8 3338415
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'hdlr' parent:'mdia' sz: 45 40 3338415
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] ctype=[0][0][0][0]
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] stype=soun
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'minf' parent:'mdia' sz: 3338338 85 3338415
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'smhd' parent:'minf' sz: 16 8 3338330
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'dinf' parent:'minf' sz: 36 24 3338330
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'dref' parent:'dinf' sz: 28 8 28
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] Unknown dref type 0x206c7275 size 12
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stbl' parent:'minf' sz: 3338278 60 3338330
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stsd' parent:'stbl' sz: 106 8 3338270
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] size=90 4CC=mp4a codec_type=1
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] audio channels 2
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] version =0, isom =1
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'esds' parent:'stsd' sz: 54 8 54
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] MPEG-4 description: tag=0x03 len=37
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] MPEG-4 description: tag=0x04 len=23
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] esds object type id 0x40
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] MPEG-4 description: tag=0x05 len=5
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] Specific MPEG-4 header len=5
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] mp4a config channels 2 obj 2 ext obj 5 sample rate 44100 ext sample rate 0
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stts' parent:'stbl' sz: 32 114 3338270
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] track[1].stts.entries = 2
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] sample_count=237045, sample_duration=1024
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] sample_count=1, sample_duration=400
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stsc' parent:'stbl' sz: 1730068 146 3338270
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] track[1].stsc.entries = 144171
+[http @ 0x562b80c68740] Chunked encoding data size: 8192
+    Last message repeated 210 times
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stsz' parent:'stbl' sz: 948204 1730214 3338270
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] sample_size = 0 sample_count = 237046
+[http @ 0x562b80c68740] Chunked encoding data size: 8192
+    Last message repeated 115 times
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'stco' parent:'stbl' sz: 659860 2678418 3338270
+[http @ 0x562b80c68740] Chunked encoding data size: 8192
+    Last message repeated 80 times
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] Processing st: 1, edit list 0 - media time: 1024, duration: 242733456
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] drop a frame at curr_cts: 0 @ 0
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'udta' parent:'moov' sz: 264 4662343 4662599
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'meta' parent:'udta' sz: 256 8 256
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'hdlr' parent:'meta' sz: 33 8 244
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] ctype=[0][0][0][0]
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] stype=mdir
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'ilst' parent:'meta' sz: 211 41 244
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'[169]nam' parent:'ilst' sz: 85 8 203
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'[169]too' parent:'ilst' sz: 37 93 203
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'[169]cmt' parent:'ilst' sz: 81 130 203
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'free' parent:'root' sz: 8 4662647 9223372036854775807
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'mdat' parent:'root' sz: 570612265 4662655 9223372036854775807
+[tcp @ 0x562b80c728c0] Original list of addresses:
+[tcp @ 0x562b80c728c0] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80c728c0] Interleaved list of addresses:
+[tcp @ 0x562b80c728c0] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80c728c0] Starting connection attempt to 127.0.0.1 port 32621
+[tcp @ 0x562b80c728c0] Successfully connected to 127.0.0.1 port 32621
+[http @ 0x562b80c68740] request: GET /relay/fb44fea5a7bc83af1577027dde19e2b8/his_girl_friday.mp4 HTTP/1.1
+User-Agent: Lavf/58.76.100
+Accept: */*
+Range: bytes=575274912-
+Connection: close
+Host: 127.0.0.1:32621
+Icy-MetaData: 1
+
+
+[http @ 0x562b80c68740] header='HTTP/1.1 416 Range Not Satisfiable'
+[http @ 0x562b80c68740] http_code=416
+[http @ 0x562b80c68740] HTTP error 416 Range Not Satisfiable
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'avc5' parent:'root' sz: 3724673100 575274920 9223372036854775807
+[tcp @ 0x562b80c72d80] Original list of addresses:
+[tcp @ 0x562b80c72d80] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80c72d80] Interleaved list of addresses:
+[tcp @ 0x562b80c72d80] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80c72d80] Starting connection attempt to 127.0.0.1 port 32621
+[tcp @ 0x562b80c72d80] Successfully connected to 127.0.0.1 port 32621
+[http @ 0x562b80c68740] request: GET /relay/fb44fea5a7bc83af1577027dde19e2b8/his_girl_friday.mp4 HTTP/1.1
+User-Agent: Lavf/58.76.100
+Accept: */*
+Range: bytes=3729335755-
+Connection: close
+Host: 127.0.0.1:32621
+Icy-MetaData: 1
+
+
+[http @ 0x562b80c68740] header='HTTP/1.1 416 Range Not Satisfiable'
+[http @ 0x562b80c68740] http_code=416
+[http @ 0x562b80c68740] HTTP error 416 Range Not Satisfiable
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'.100' parent:'root' sz: 925774386 4299948020 9223372036854775807
+[tcp @ 0x562b80c73340] Original list of addresses:
+[tcp @ 0x562b80c73340] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80c73340] Interleaved list of addresses:
+[tcp @ 0x562b80c73340] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80c73340] Starting connection attempt to 127.0.0.1 port 32621
+[tcp @ 0x562b80c73340] Successfully connected to 127.0.0.1 port 32621
+[http @ 0x562b80c68740] request: GET /relay/fb44fea5a7bc83af1577027dde19e2b8/his_girl_friday.mp4 HTTP/1.1
+User-Agent: Lavf/58.76.100
+Accept: */*
+Range: bytes=930437049-
+Connection: close
+Host: 127.0.0.1:32621
+Icy-MetaData: 1
+
+
+[http @ 0x562b80c68740] header='HTTP/1.1 416 Range Not Satisfiable'
+[http @ 0x562b80c68740] http_code=416
+[http @ 0x562b80c68740] HTTP error 416 Range Not Satisfiable
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'[0][0][0][0]' parent:'root' sz: 4338960 5225722406 9223372036854775807
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'[31][17]xN' parent:'root' sz: 3694471257 5230061366 9223372036854775807
+[tcp @ 0x562b80c738c0] Original list of addresses:
+[tcp @ 0x562b80c738c0] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80c738c0] Interleaved list of addresses:
+[tcp @ 0x562b80c738c0] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80c738c0] Starting connection attempt to 127.0.0.1 port 32621
+[tcp @ 0x562b80c738c0] Successfully connected to 127.0.0.1 port 32621
+[http @ 0x562b80c68740] request: GET /relay/fb44fea5a7bc83af1577027dde19e2b8/his_girl_friday.mp4 HTTP/1.1
+User-Agent: Lavf/58.76.100
+Accept: */*
+Range: bytes=3703472888-
+Connection: close
+Host: 127.0.0.1:32621
+Icy-MetaData: 1
+
+
+[http @ 0x562b80c68740] header='HTTP/1.1 416 Range Not Satisfiable'
+[http @ 0x562b80c68740] http_code=416
+[http @ 0x562b80c68740] HTTP error 416 Range Not Satisfiable
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'[185][149][93]F' parent:'root' sz: 4009065687 8924532623 9223372036854775807
+[tcp @ 0x562b80e22640] Original list of addresses:
+[tcp @ 0x562b80e22640] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80e22640] Interleaved list of addresses:
+[tcp @ 0x562b80e22640] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80e22640] Starting connection attempt to 127.0.0.1 port 32621
+[tcp @ 0x562b80e22640] Successfully connected to 127.0.0.1 port 32621
+[http @ 0x562b80c68740] request: GET /relay/fb44fea5a7bc83af1577027dde19e2b8/his_girl_friday.mp4 HTTP/1.1
+User-Agent: Lavf/58.76.100
+Accept: */*
+Range: bytes=4018067326-
+Connection: close
+Host: 127.0.0.1:32621
+Icy-MetaData: 1
+
+
+[http @ 0x562b80c68740] header='HTTP/1.1 416 Range Not Satisfiable'
+[http @ 0x562b80c68740] http_code=416
+[http @ 0x562b80c68740] HTTP error 416 Range Not Satisfiable
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'-n[225][167]' parent:'root' sz: 4018905687 12933598310 9223372036854775807
+[tcp @ 0x562b80e22b00] Original list of addresses:
+[tcp @ 0x562b80e22b00] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80e22b00] Interleaved list of addresses:
+[tcp @ 0x562b80e22b00] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80e22b00] Starting connection attempt to 127.0.0.1 port 32621
+[tcp @ 0x562b80e22b00] Successfully connected to 127.0.0.1 port 32621
+[http @ 0x562b80c68740] request: GET /relay/fb44fea5a7bc83af1577027dde19e2b8/his_girl_friday.mp4 HTTP/1.1
+User-Agent: Lavf/58.76.100
+Accept: */*
+Range: bytes=4027907334-
+Connection: close
+Host: 127.0.0.1:32621
+Icy-MetaData: 1
+
+
+[http @ 0x562b80c68740] header='HTTP/1.1 416 Range Not Satisfiable'
+[http @ 0x562b80c68740] http_code=416
+[http @ 0x562b80c68740] HTTP error 416 Range Not Satisfiable
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'[175][229][94]Y' parent:'root' sz: 79524766 16952503997 9223372036854775807
+[tcp @ 0x562b80e230c0] Original list of addresses:
+[tcp @ 0x562b80e230c0] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80e230c0] Interleaved list of addresses:
+[tcp @ 0x562b80e230c0] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80e230c0] Starting connection attempt to 127.0.0.1 port 32621
+[tcp @ 0x562b80e230c0] Successfully connected to 127.0.0.1 port 32621
+[http @ 0x562b80c68740] request: GET /relay/fb44fea5a7bc83af1577027dde19e2b8/his_girl_friday.mp4 HTTP/1.1
+User-Agent: Lavf/58.76.100
+Accept: */*
+Range: bytes=88526421-
+Connection: close
+Host: 127.0.0.1:32621
+Icy-MetaData: 1
+
+
+[http @ 0x562b80c68740] header='HTTP/1.1 206 Partial Content'
+[http @ 0x562b80c68740] http_code=206
+[http @ 0x562b80c68740] header='Server: tiny-http (Rust)'
+[http @ 0x562b80c68740] header='Date: Thu, 12 Nov 2026 12:09:05 GMT'
+[http @ 0x562b80c68740] header='Content-Type: video/mp4'
+[http @ 0x562b80c68740] header='Content-Range: bytes 88526421-575274911/575274912'
+[http @ 0x562b80c68740] header='Last-Modified: Fri, 26 Oct 2018 22:38:32 GMT'
+[http @ 0x562b80c68740] header='ETag: "5bd39768-2249ffa0"'
+[http @ 0x562b80c68740] header='Transfer-Encoding: chunked'
+[http @ 0x562b80c68740] header=''
+[http @ 0x562b80c68740] Chunked encoding data size: 8192
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'[21][30]m[136]' parent:'root' sz: 403060007 17032028763 9223372036854775807
+[tcp @ 0x562b80e23640] Original list of addresses:
+[tcp @ 0x562b80e23640] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80e23640] Interleaved list of addresses:
+[tcp @ 0x562b80e23640] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80e23640] Starting connection attempt to 127.0.0.1 port 32621
+[tcp @ 0x562b80e23640] Successfully connected to 127.0.0.1 port 32621
+[http @ 0x562b80c68740] request: GET /relay/fb44fea5a7bc83af1577027dde19e2b8/his_girl_friday.mp4 HTTP/1.1
+User-Agent: Lavf/58.76.100
+Accept: */*
+Range: bytes=491586428-
+Connection: close
+Host: 127.0.0.1:32621
+Icy-MetaData: 1
+
+
+[http @ 0x562b80c68740] header='HTTP/1.1 206 Partial Content'
+[http @ 0x562b80c68740] http_code=206
+[http @ 0x562b80c68740] header='Server: tiny-http (Rust)'
+[http @ 0x562b80c68740] header='Date: Thu, 12 Nov 2026 12:09:06 GMT'
+[http @ 0x562b80c68740] header='Content-Type: video/mp4'
+[http @ 0x562b80c68740] header='Content-Range: bytes 491586428-575274911/575274912'
+[http @ 0x562b80c68740] header='Last-Modified: Fri, 26 Oct 2018 22:38:32 GMT'
+[http @ 0x562b80c68740] header='ETag: "5bd39768-2249ffa0"'
+[http @ 0x562b80c68740] header='Transfer-Encoding: chunked'
+[http @ 0x562b80c68740] header=''
+[http @ 0x562b80c68740] Chunked encoding data size: 8192
+[mov,mp4,m4a,3gp,3g2,mj2 @ 0x562b80c67a80] type:'6[191]w[230]' parent:'root' sz: 470757911 17435088770 9223372036854775807
+[tcp @ 0x562b80e23cc0] Original list of addresses:
+[tcp @ 0x562b80e23cc0] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80e23cc0] Interleaved list of addresses:
+[tcp @ 0x562b80e23cc0] Address 127.0.0.1 port 32621
+[tcp @ 0x562b80e23cc0] Starting connection attempt to 127.0.0.1 port 32621
+[tcp @ 0x562b80e23cc0] Successfully connected to 127.0.0.1 port 32621

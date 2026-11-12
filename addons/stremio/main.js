@@ -1,8 +1,11 @@
+// @ts-check
+/// <reference path="../../types/rex-addons.d.ts" />
 // Your Stremio addons' film and series catalogs in rex, as rex-stremio brings them: each film
 // and episode goes to rex with its IMDb id, so Plex names it, and plays from the best stream
 // your stream addons give for it at that moment.
 
 const CINEMETA = "https://v3-cinemeta.strem.io";
+/** @type {[RegExp, number][]} */
 const RESOLUTIONS = [
   [/2160p|\b4k\b|\buhd\b/i, 2160],
   [/1440p/i, 1440],
@@ -74,7 +77,7 @@ function ranked(streams, config, pinned) {
       typeof stream.url === "string" && /^https?:\/\//.test(stream.url) &&
       !(cap && resolution > cap) && !(biggest && size && size > biggest))
     .sort((a, b) =>
-      (pinned ? (streamKey(a.stream) !== pinned) - (streamKey(b.stream) !== pinned) : 0) ||
+      (pinned ? Number(streamKey(a.stream) !== pinned) - Number(streamKey(b.stream) !== pinned) : 0) ||
       b.quality[0] - a.quality[0] || a.at - b.at)
     .map(({ stream }) => stream);
 }
@@ -142,6 +145,7 @@ function prune(value) {
 
 const released = (value) => (/^\d{4}-\d{2}-\d{2}/.test(String(value ?? "")) ? String(value).slice(0, 10) : undefined);
 
+/** @type {Addon} */
 export default {
   async items(ctx) {
     const config = ctx.config;

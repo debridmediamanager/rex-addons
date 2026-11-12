@@ -1,4 +1,5 @@
 {
+  "$schema": "../../types/manifest.schema.json",
   "id": "stremio",
   "name": "Stremio addons",
   "version": "1.0.1",

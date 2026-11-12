@@ -1,3 +1,5 @@
+// @ts-check
+/// <reference path="../../types/rex-addons.d.ts" />
 // Public domain feature films from the Internet Archive.
 //
 // The films are archive.org's Feature Films collection, only those it lists as public domain
@@ -81,6 +83,7 @@ function text(html) {
   return plain.length > 2000 ? `${plain.slice(0, 1997)}...` : plain;
 }
 
+/** @type {Addon} */
 export default {
   async items(ctx) {
     const count = Math.max(1, Math.min(1000, Math.floor(ctx.config.count ?? 100)));

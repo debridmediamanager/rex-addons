@@ -1,3 +1,5 @@
+// @ts-check
+/// <reference path="../../types/rex-addons.d.ts" />
 // Your Spotify library in rex, as music: liked songs, your playlists and saved albums, each track
 // with Spotify's own title, artists, album, numbers, date and cover. Each Spotify playlist, and
 // Liked Songs, is a rex playlist in Spotify's order. Spotify's audio is out of reach (rex-addons
@@ -210,6 +212,7 @@ function settings(config) {
   };
 }
 
+/** @type {Addon} */
 export default {
   async items(ctx) {
     const wanted = settings(ctx.config);

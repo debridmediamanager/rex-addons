@@ -1,4 +1,5 @@
 {
+  "$schema": "../../types/manifest.schema.json",
   "id": "spotify",
   "name": "Spotify",
   "version": "1.0.0",

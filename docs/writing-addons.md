@@ -70,7 +70,8 @@ export default {
 };
 ```
 
-Each function gets `ctx` as its last argument:
+Each may be `async` or a plain function that returns its answer. Each gets `ctx` as its last
+argument:
 
 | | |
 |---|---|
@@ -183,7 +184,8 @@ called for every seek.
 ### Playlists you write
 
 `playlist` is the text of an HLS master playlist, and `playlists` the media playlists it names,
-each by a plain name (`video.m3u8`: letters, digits, `-` and `_`, ending in `.m3u8`):
+each by a plain name (`video.m3u8`: at most 64 letters, digits, `-` and `_`, then `.m3u8`; never
+`master.m3u8`). Leave `playlists` out when the master names only links:
 
 ```js
 return {
@@ -209,12 +211,12 @@ Plain JavaScript, plus these:
 
 | Global | What it does |
 |---|---|
-| `fetch(url, {method, headers, body})` | Returns `{status, ok, headers, url, text(), json(), bytes()}`, `bytes()` giving a `Uint8Array`. `headers` is a plain object with lowercase names, `url` is where redirects ended. Only `hosts` are reachable, and every redirect is checked again. `body` is text, a `Uint8Array` or an `ArrayBuffer`. The body is read only when you call `text()`, `json()` or `bytes()`, once, so a `Range: bytes=0-0` check costs nothing. Fetches run one at a time: `Promise.all` over several waits for each in turn ([more](#more-on-fetch)) |
+| `fetch(url, {method, headers, body})` | Returns `{status, ok, headers, url, text(), json(), bytes()}`, `bytes()` giving a `Uint8Array`. `headers` is a plain object with lowercase names, `url` is where redirects ended. Only `hosts` are reachable, and every redirect is checked again. `body` is text, any typed array (such as a `Uint8Array`) or an `ArrayBuffer`. The body is read only when you call `text()`, `json()` or `bytes()`, once, so a `Range: bytes=0-0` check costs nothing. Fetches run one at a time: `Promise.all` over several waits for each in turn ([more](#more-on-fetch)) |
 | `ffprobe(url, {headers})` | ffprobe's JSON of a video (`format`, `streams`, `chapters`), for `media_info`. rex-addons reads the link itself, for ffprobe, so the same `hosts` rule applies as for `fetch`; an HLS playlist works too. `ffprobe({playlist, playlists})` probes [playlists you wrote](#playlists-you-write), checked as `open()`'s are (`"host": "0.4"`). It fails with a clear message when rex-addons runs without ffprobe. Up to 2 minutes, which don't count as JavaScript time |
 | `console.log`, `console.info`, `console.debug`, `console.warn`, `console.error` | Into rex-addons' log, tagged `[addon <id>]`, with your secret settings' values (6 characters or more) shown as `********`. `warn` and `error` lines start with `WARN` and `ERROR` |
 | `storage.get(key)`, `storage.set(key, value)`, `storage.delete(key)`, `storage.keys(prefix)` | Your addon's own saved values, any JSON. They survive restarts and updates. A key never set gives `undefined`, and setting `undefined` deletes the key. `keys()` lists every key, sorted; `keys("probe:")` only those starting with `probe:`, so you can delete what's gone |
 | `atob(text)`, `btoa(text)` | Base64, as in browsers: text whose characters are bytes (0 to 255) |
-| `new URL(link, base)`, `URLSearchParams` | Links, as in browsers but smaller: `new URL(link, base)` resolves a relative link, a URL has `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin` and `searchParams`, and `URLSearchParams` has `get`, `getAll`, `has`, `set`, `append`, `delete`, `toString` and `entries`. Changing `searchParams` changes the URL |
+| `new URL(link, base)`, `URLSearchParams` | Links, as in browsers but smaller: `new URL(link, base)` resolves a relative link, a URL has `href`, `protocol`, `username`, `password`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin` and `searchParams`, and `URLSearchParams` takes a query string, an object or a list of pairs, has `get`, `getAll`, `has`, `set`, `append`, `delete`, `toString`, `entries`, `keys` and `values`, and works in `for...of`. Changing `searchParams` changes the URL |
 | `hash(algorithm, data)`, `hmac(algorithm, key, data)` | A digest in lowercase hex, for signing an API request. `data` and `key` are text (taken as UTF-8), a `Uint8Array` or an `ArrayBuffer`. `algorithm` is `md5`, `sha1`, `sha256` or `sha512` |
 | `new TextEncoder().encode(text)`, `new TextDecoder().decode(bytes)` | Text to UTF-8 bytes and back, as in browsers. UTF-8 only: `new TextDecoder("latin1")` throws |
 | `crypto.getRandomValues(array)`, `crypto.randomUUID()` | Random numbers for a nonce or a PKCE verifier, as in browsers: `getRandomValues` fills an integer typed array, at most 65,536 bytes a call, and returns it. There's no `crypto.subtle` |
@@ -227,7 +229,7 @@ access. Each call starts fresh, so keep anything you want to remember across cal
 
 ### More on fetch
 
-- `method` is `GET` (the default), `HEAD`, `POST`, `PUT`, `PATCH` or `DELETE`.
+- `method` is `GET` (the default), `HEAD`, `POST`, `PUT`, `PATCH` or `DELETE`, in any case.
 - It waits up to 10 s to connect. After that, only the call's own time limit (below) stops it.
 - It follows up to 9 redirects, each one checked against your `hosts`.
 - It sends `User-Agent: rex-addons/<version>` unless you set your own.

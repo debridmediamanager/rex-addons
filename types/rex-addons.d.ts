@@ -75,7 +75,7 @@ interface OpenedLink {
 interface Playlists {
   /** The master playlist's text, starting with `#EXTM3U`. */
   playlist: string;
-  /** The media playlists it names, each by a plain name: letters, digits, `-` and `_`, ending in `.m3u8` (not `master.m3u8`). Every link in them an absolute `http(s)` link on your `hosts`. */
+  /** The media playlists it names, each by a plain name: letters, digits, `-` and `_`, at most 64 of them, ending in `.m3u8` (not `master.m3u8`). Leave it out when the master names only links. Every link in them an absolute `http(s)` link on your `hosts`. */
   playlists?: Record<string, string>;
 }
 

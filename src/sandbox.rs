@@ -71,7 +71,7 @@ impl Storage {
         keys
     }
 
-    fn change(&self, key: &str, value: Option<Json>) -> Result<(), String> {
+    pub(crate) fn change(&self, key: &str, value: Option<Json>) -> Result<(), String> {
         let mut state = self.state.lock().unwrap();
         let before = state.map.get(key).map_or(0, |v| entry_size(key, v));
         let after = value.as_ref().map_or(0, |v| entry_size(key, v));

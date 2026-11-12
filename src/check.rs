@@ -12,9 +12,10 @@ use crate::addons::{read_json, Manifest};
 use crate::app::{self, App};
 use crate::sandbox::{self, Storage};
 
-pub const USAGE: &str = "rex-addons check <addon folder> [--config '<json>'] [--open <item id>] [--ffprobe <path>] [--data <dir>]
+pub const USAGE: &str = "rex-addons check <addon folder> [--config '<json>'] [--since <unix seconds>] [--open <item id>] [--ffprobe <path>] [--data <dir>]
 
   --config   settings, as the app would PUT them; the rest take their defaults
+  --since    a sync that may answer with changes only: ctx.full false, ctx.last_sync this time
   --open     an item id: open() runs for it too, and what it returned is checked against the hosts
   --ffprobe  the ffprobe behind the addon's ffprobe(); without it ffprobe() fails
   --data     a rex-addons data directory: the addon's storage there is used (its sign-in's tokens,
@@ -22,7 +23,7 @@ pub const USAGE: &str = "rex-addons check <addon folder> [--config '<json>'] [--
 
 /// Runs the check; the exit status.
 pub fn run(args: &[String]) -> i32 {
-    let (mut folder, mut config, mut open, mut ffprobe, mut data) = (None, None, None, None, None);
+    let (mut folder, mut config, mut open, mut ffprobe, mut data, mut since) = (None, None, None, None, None, None);
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         let slot = match arg.as_str() {
@@ -30,6 +31,7 @@ pub fn run(args: &[String]) -> i32 {
             "--open" => &mut open,
             "--ffprobe" => &mut ffprobe,
             "--data" => &mut data,
+            "--since" => &mut since,
             _ if folder.is_none() && !arg.starts_with('-') => {
                 folder = Some(PathBuf::from(arg));
                 continue;
@@ -51,8 +53,16 @@ pub fn run(args: &[String]) -> i32 {
         eprintln!("{USAGE}");
         return 2;
     };
+    let since = match since.map(|s| s.parse::<u64>()) {
+        None => None,
+        Some(Ok(since)) => Some(since),
+        Some(Err(_)) => {
+            eprintln!("--since takes unix seconds\n\n{USAGE}");
+            return 2;
+        }
+    };
     let temp = std::env::temp_dir().join(format!("rex-addons-check-{}", std::process::id()));
-    let failed = check(&folder, config.as_deref(), open.as_deref(), ffprobe, data.as_deref().map(Path::new), &temp);
+    let failed = check(&folder, config.as_deref(), open.as_deref(), ffprobe, data.as_deref().map(Path::new), since, &temp);
     let _ = std::fs::remove_dir_all(&temp);
     i32::from(failed)
 }
@@ -71,7 +81,7 @@ fn fail(text: &str) -> bool {
 }
 
 /// Whether any step failed. `temp` is thrown away afterwards.
-fn check(folder: &Path, config: Option<&str>, open: Option<&str>, ffprobe: Option<String>, data: Option<&Path>, temp: &Path) -> bool {
+fn check(folder: &Path, config: Option<&str>, open: Option<&str>, ffprobe: Option<String>, data: Option<&Path>, since: Option<u64>, temp: &Path) -> bool {
     let Some(raw) = read_json(&folder.join("manifest.json")) else {
         return fail(&format!("{}: missing, or not JSON", folder.join("manifest.json").display()));
     };
@@ -136,21 +146,39 @@ fn check(folder: &Path, config: Option<&str>, open: Option<&str>, ffprobe: Optio
     let mut failed = false;
     let mut ctx = app::call_ctx(&manifest, &config);
     ctx["reason"] = json!("manual");
+    ctx["full"] = json!(since.is_none());
+    ctx["last_sync"] = json!(since);
     let started = Instant::now();
-    match sandbox::call(&env, "items", &[ctx], sandbox::ITEMS).and_then(|returned| app::checked_items(returned, &BTreeSet::new())) {
+    let (mut titles, mut unprobed, mut removed, mut first) = (0, 0, Vec::new(), None);
+    let mut seen = app::Seen::default();
+    let paged = app::pages(&env, ctx, &manifest, since.is_none(), &BTreeSet::new(), &mut seen, |page, _| {
+        for why in &page.left_out {
+            failed = fail(&app::masked(&id, why));
+        }
+        titles += page.items.len();
+        unprobed += page.items.iter().filter(|item| !item.get("media_info").is_some_and(Json::is_object)).count();
+        removed.extend(page.removed);
+        first = first.take().or_else(|| page.items.into_iter().next());
+        Ok(())
+    });
+    match paged {
         Err(error) => failed = fail(&format!("items(): {}", app::masked(&id, &error))),
-        Ok((items, left_out)) => {
-            let titles = |n: usize| if n == 1 { "1 title".to_string() } else { format!("{n} titles") };
-            ok(&format!("items(): {} in {:.1} s", titles(items.len()), started.elapsed().as_secs_f64()));
-            for why in left_out {
-                failed = fail(&app::masked(&id, &why));
-            }
-            let unprobed = items.iter().filter(|item| !item.get("media_info").is_some_and(Json::is_object)).count();
+        Ok(()) => {
+            let count = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+            let what = match seen.partial {
+                Some(true) => format!("changes only: {}, {} removed", count(titles, "title", "titles"), removed.len()),
+                _ => count(titles, "title", "titles"),
+            };
+            let pages = if seen.pages > 1 { format!(" over {} pages", seen.pages) } else { String::new() };
+            ok(&format!("items(): {what}{pages} in {:.1} s", started.elapsed().as_secs_f64()));
             if unprobed > 0 {
-                note(&format!("{} without media_info: rex-addons probes each through open() when it syncs (with --ffprobe), and rex holds it until then", titles(unprobed)));
+                note(&format!("{} without media_info: rex-addons probes each through open() when it syncs (with --ffprobe), and rex holds it until then", count(unprobed, "title", "titles")));
             }
-            if let Some(first) = items.first() {
-                println!("first title:\n{}", shown(&Json::Object(first.clone())));
+            if !removed.is_empty() {
+                note(&format!("removed: {}", removed.iter().take(5).cloned().collect::<Vec<_>>().join(", ")));
+            }
+            if let Some(first) = first {
+                println!("first title:\n{}", shown(&Json::Object(first)));
             }
         }
     }
@@ -210,11 +238,22 @@ mod tests {
         assert_eq!(checked(&folder("no-open", manifest.clone(), "export default { items() { return []; } };"), &[]), 1);
         assert_eq!(checked(&folder("bad-manifest", json!({"id": "Films"}), good), &[]), 1);
         assert_eq!(checked(&folder("too-new", json!({"id": "a", "name": "A", "version": "1", "host": "99"}), good), &[]), 1);
+        // Pages, and changes only with --since; partial without it fails, as in a sync that needs every title.
+        let paged = json!({"id": "paged", "name": "Paged", "version": "1.0.0", "host": "0.8"});
+        let pages = folder("paged", paged.clone(), "export default { items(ctx) {
+            const at = ctx.cursor ?? 0;
+            if (!ctx.full) return {partial: true, items: [{id: 'n', path: 'f/n.mp4'}], removed: ['a0'], ...(at < 1 ? {next: at + 1} : {})};
+            return {items: [{id: 'a' + at, path: 'f/' + at + '.mp4'}], ...(at < 2 ? {next: at + 1} : {})}; }, open() {} };");
+        assert_eq!(checked(&pages, &[]), 0);
+        assert_eq!(checked(&pages, &["--since", "1794489288"]), 1, "the same id on two pages is left out");
+        let changes = folder("changes", paged, "export default { items(ctx) { return ctx.full ? [] : {partial: true, items: [], removed: ['a']}; }, open() {} };");
+        assert_eq!(checked(&changes, &["--since", "1794489288"]), 0);
+        assert_eq!(checked(&changes, &["--since", "yesterday"]), 2);
         // Asked wrongly: no folder, a flag without its value, one it doesn't know.
         assert_eq!(run(&[]), 2);
         assert_eq!(checked(&dir, &["--open"]), 2);
         assert_eq!(checked(&dir, &["--force"]), 2);
-        for name in ["good", "left-out", "throws", "no-open", "bad-manifest", "too-new"] {
+        for name in ["good", "left-out", "throws", "no-open", "bad-manifest", "too-new", "paged", "changes"] {
             let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("rex-addons-check-test-{}-{name}", std::process::id())));
         }
     }

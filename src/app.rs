@@ -1,5 +1,5 @@
 //! The host's state and work: installed addons, their syncs to rex, and what they open.
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +23,14 @@ const RETRY: Duration = Duration::from_secs(5 * 60);
 const RETRY_AFTER: (u64, u64) = (60, 24 * 3600);
 /// Items rex is sent per request, as feed-api.md asks.
 const CHUNK: usize = 200;
+/// What one sync's `items()` may return over all its pages: pages, titles, bytes of the ids and
+/// paths the host keeps for them (index, checks), and time spent in the calls, waiting included.
+const MAX_PAGES: usize = 10_000;
+const MAX_TITLES: usize = 500_000;
+const MAX_KEPT: usize = 128 << 20;
+const PAGES_TIME: Duration = Duration::from_secs(3600);
+/// A sync asks for every title at least this often, so rex converges even after it lost what it had.
+const FULL_EVERY: u64 = 24 * 3600;
 /// How many of the last sync's left-out entries the status quotes; it counts them all.
 const WARNINGS_SHOWN: usize = 5;
 /// Probed items go to rex in batches this big, so they show before the whole sync is done.
@@ -170,6 +178,16 @@ pub struct Addon {
     pub deleted: BTreeSet<String>,
     /// Each pushed path (and each id) to its item id: what `/bytes` reads by.
     pub paths: HashMap<String, String>,
+    /// Ids pushed without a probe, which rex holds.
+    pub held_ids: BTreeSet<String>,
+    /// The next sync asks for every title (`ctx.full`): new settings, a sign-in, a restore, or
+    /// a sync that failed once `items()` had answered.
+    pub full_due: bool,
+    /// A sync's `items()` answered and its push hasn't ended: saved, so a crash means `full_due`.
+    pub unfinished: bool,
+    /// When the last sync that worked began (`ctx.last_sync`), and the last that sent every title.
+    pub since: Option<u64>,
+    pub last_full: u64,
     pub probes: Map<String, Json>,
     /// Items whose probe failed: `{"count", "at"}`, so they wait before the next try.
     pub probe_failures: Map<String, Json>,
@@ -556,6 +574,7 @@ impl App {
         if let Some(addon) = addons.get_mut(id) {
             addon.deleted.insert(item.to_string());
             addon.paths.retain(|_, value| value != item);
+            addon.held_ids.remove(item);
             save_state(self, addon);
             write_index(self, addon);
         }
@@ -604,7 +623,7 @@ impl App {
     }
 
     fn sync(self: &Arc<Self>, id: &str, reason: &'static str) {
-        let started = Instant::now();
+        let (started, began) = (Instant::now(), now());
         // Force is for this attempt only: the retries of one that fails are not forced.
         let force = match self.addons.lock().unwrap().get_mut(id) {
             Some(addon) => {
@@ -613,20 +632,29 @@ impl App {
             }
             None => return,
         };
-        let result = self.run_sync(id, force, reason);
+        let mut run = Run::default();
+        let result = self.run_sync(id, force, reason, &mut run);
         let mut addons = self.addons.lock().unwrap();
         let Some(addon) = addons.get_mut(id) else { return };
         addon.syncing = false;
         addon.attempted = Some(Instant::now());
         match result {
-            Ok((items, held)) => {
+            Ok((items, held, every)) => {
                 addon.last_sync = Some(now());
+                addon.since = Some(began);
+                if every {
+                    addon.last_full = began;
+                }
                 addon.items = items;
                 addon.held = held;
                 addon.error = None;
-                log(id, &format!("synced in {:.1} s: {items} items in rex, {held} held", started.elapsed().as_secs_f64()));
+                let what = if every { "every title" } else { "changes only" };
+                let pages = if run.pages > 1 { format!(", {} pages", run.pages) } else { String::new() };
+                log(id, &format!("synced in {:.1} s ({what}{pages}): {items} items in rex, {held} held", started.elapsed().as_secs_f64()));
             }
             Err(error) => {
+                // What reached rex is unknown once items() answered, and a full sync that failed is still owed.
+                addon.full_due |= run.full || run.answered;
                 warn(id, &format!("sync failed: {error}"));
                 let (retry, shown) = retry_after(&error).unwrap_or((RETRY, error));
                 if retry != RETRY {
@@ -637,6 +665,10 @@ impl App {
                 addon.error = Some(first_line(&masked(id, &shown)));
             }
         }
+        if run.answered {
+            addon.unfinished = false;
+            save_bookkeeping(self, addon);
+        }
         save_state(self, addon);
         if let Some(reason) = addon.again.take() {
             drop(addons);
@@ -644,15 +676,23 @@ impl App {
         }
     }
 
-    fn run_sync(self: &Arc<Self>, id: &str, force: bool, reason: &str) -> Result<(usize, usize), String> {
-        let (manifest, source, config, storage, deleted) = {
+    /// One sync: `items()` page by page, each page probed and sent as it comes, every title in one
+    /// snapshot or, for a partial answer, upserts and then removals. The items and held titles
+    /// rex has afterwards, and whether every title was sent.
+    fn run_sync(self: &Arc<Self>, id: &str, force: bool, reason: &str, run: &mut Run) -> Result<(usize, usize, bool), String> {
+        let (manifest, source, config, storage, deleted, last_sync) = {
             let mut addons = self.addons.lock().unwrap();
             let a = addons.get_mut(id).ok_or("removed")?;
             if !a.signed_in() {
                 a.error_kind = Some("sign_in".into());
                 return Err("sign in first".into());
             }
-            (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone(), a.deleted.clone())
+            let interval = a.manifest.refresh_minutes * 60;
+            // A held title whose probe is due again is probed only when items() sends it.
+            let probes_due = self.prober.bin.is_some() && a.held_ids.iter().any(|h| !probe_waits(a.probe_failures.get(h), interval, now()));
+            let due = std::mem::take(&mut a.full_due);
+            run.full = force || due || a.last_sync.is_none() || now() >= a.last_full.saturating_add(FULL_EVERY) || probes_due;
+            (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone(), a.deleted.clone(), a.last_sync.and(a.since))
         };
         if let Some(label) = manifest.missing(&config).first() {
             return Err(format!("set {label} first"));
@@ -660,7 +700,40 @@ impl App {
         let env = self.env(id, &manifest, &config, &source, storage, true);
         let mut ctx = call_ctx(&manifest, &config);
         ctx["reason"] = json!(reason);
-        let returned = sandbox::call(&env, "items", &[ctx], sandbox::ITEMS).map_err(|error| {
+        ctx["full"] = json!(run.full);
+        ctx["last_sync"] = json!(last_sync);
+        let session = format!("{}-{}", now(), std::process::id());
+        let (mut part, mut fresh, mut held, mut removed) = (0, HashMap::new(), BTreeSet::new(), Vec::new());
+        let (full, mut seen) = (run.full, Seen::default());
+        let paged = pages(&env, ctx, &manifest, full, &deleted, &mut seen, |page, last| {
+            let Page { mut items, left_out, partial, removed: gone, .. } = page;
+            if run.pages == 0 {
+                if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
+                    (addon.warned, addon.warnings) = (0, Vec::new());
+                    addon.unfinished = true;
+                    save_state(self, addon);
+                }
+                self.register(id, &manifest)?;
+            }
+            run.pages += 1;
+            removed.extend(gone);
+            let left_out = [left_out, self.prepare(id, &mut items, partial)?].concat();
+            for why in &left_out {
+                warn(id, why);
+            }
+            if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
+                warned(addon, left_out);
+            }
+            if partial {
+                return self.upsert(id, &items);
+            }
+            fresh.extend(index_of(&items));
+            held.extend(items.iter().filter(|i| !probed(i)).map(id_of));
+            self.snapshot(id, &session, &mut part, &items, last, force)
+        });
+        // Once items() answered, the addon may count what it returned as sent: if it isn't, the next sync is full.
+        run.answered = seen.pages > 0;
+        paged.map_err(|error| {
             let mut addons = self.addons.lock().unwrap();
             match addons.get_mut(id).and_then(|a| Some((sign_in_required(a, &error)?, a))) {
                 Some((reason, addon)) => {
@@ -671,73 +744,79 @@ impl App {
                 None => error,
             }
         })?;
-        let (mut items, left_out) = checked_items(returned, &deleted)?;
-        for why in &left_out {
-            warn(id, why);
+        let every = seen.partial != Some(true);
+        if !every {
+            self.remove_titles(id, removed, &seen.ids)?;
         }
-        if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
-            (addon.warned, addon.warnings) = (0, Vec::new());
-            warned(addon, left_out);
+        let mut addons = self.addons.lock().unwrap();
+        let addon = addons.get_mut(id).ok_or("removed")?;
+        // An empty set changes nothing in rex, nor here.
+        if every && part > 0 {
+            addon.paths = fresh;
+            addon.held_ids = held;
+            addon.probes.retain(|key, _| seen.ids.contains(key));
+            addon.probe_failures.retain(|key, _| seen.ids.contains(key));
         }
-        let name = source_name(id);
+        let ids = addon.paths.iter().filter(|(path, item)| path == item).count();
+        let held = addon.held_ids.iter().filter(|h| addon.paths.get(*h) == Some(h)).count();
+        Ok((ids - held, held, every))
+    }
+
+    /// Registers the addon as rex's source `addon-<id>`, with the libraries its manifest declares.
+    fn register(&self, id: &str, manifest: &Manifest) -> Result<(), String> {
         let mut registration = json!({"url": self.byte_base(id)});
         if let Some(directories) = manifest.raw.get("directories").filter(|d| d.is_array()) {
             registration["directories"] = directories.clone();
         }
-        let (status, answer) = self.feed_call(id, "PUT", &format!("/rex/sources/{name}"), &registration)?;
+        let (status, answer) = self.feed_call(id, "PUT", &format!("/rex/sources/{}", source_name(id)), &registration)?;
         if status != 200 {
             return Err(format!("rex refused the registration ({status}): {}", answer["error"]));
         }
+        Ok(())
+    }
 
-        // An item the addon probed itself keeps its probe; one this host probed before takes
-        // that; the rest are probed below.
-        let (mut todo, mut waiting) = (Vec::new(), 0);
+    /// Gives each item its probe: its own, one this host made before, or one made now, and adds it
+    /// to the index `/bytes` reads by. In a partial sync an item whose path another title has is
+    /// left out, as rex would refuse it: why each was.
+    fn prepare(&self, id: &str, items: &mut Vec<Map<String, Json>>, partial: bool) -> Result<Vec<String>, String> {
+        let (mut todo, mut waiting, mut left_out) = (Vec::new(), 0, Vec::new());
         {
             let mut addons = self.addons.lock().unwrap();
             let addon = addons.get_mut(id).ok_or("removed")?;
-            // Added to, not replaced: rex keeps every old title until it takes the snapshot.
-            addon.paths.extend(index_of(&items, &addon.deleted));
-            addon.probes.retain(|key, _| items.iter().any(|i| id_of(i) == *key));
-            addon.probe_failures.retain(|key, _| items.iter().any(|i| id_of(i) == *key));
-            let interval = addon.manifest.refresh_minutes * 60;
-            for (at, item) in items.iter_mut().enumerate() {
-                if let Some(own) = item.get("media_info").filter(|m| m.is_object()).cloned() {
-                    attach(item, own);
-                    addon.paths.insert(path_of(item), id_of(item));
-                    continue;
-                }
-                match addon.probes.get(&id_of(item)) {
-                    Some(probe) => {
-                        attach(item, probe.clone());
-                        addon.paths.insert(path_of(item), id_of(item));
-                    }
-                    None if probe_waits(addon.probe_failures.get(&id_of(item)), interval, now()) => waiting += 1,
-                    None => todo.push(at),
+            for item in items.iter_mut() {
+                if let Some(probe) = item.get("media_info").filter(|m| m.is_object()).or_else(|| addon.probes.get(&id_of(item))).cloned() {
+                    attach(item, probe);
                 }
             }
-            write_index(self, addon);
+            if partial {
+                items.retain(|item| match addon.paths.get(&path_of(item)) {
+                    Some(other) if *other != id_of(item) => {
+                        left_out.push(format!("items(): {} has the path {:?}, which {other} has; left out", id_of(item), path_of(item)));
+                        false
+                    }
+                    _ => true,
+                });
+            }
+            // Added to, not replaced: rex reads the old paths until it takes the new ones.
+            addon.paths.extend(index_of(items));
+            let interval = addon.manifest.refresh_minutes * 60;
+            for (at, item) in items.iter().enumerate().filter(|(_, item)| !probed(item)) {
+                match probe_waits(addon.probe_failures.get(&id_of(item)), interval, now()) {
+                    true => waiting += 1,
+                    false => todo.push(at),
+                }
+            }
         }
         if waiting > 0 {
             log(id, &format!("{waiting} items whose probe failed wait before they are probed again; rex holds them"));
         }
-
         if !todo.is_empty() {
             match &self.prober.bin {
                 None => warn(id, &format!("{} items are not probed (no --ffprobe): rex holds them and shows none of them", todo.len())),
-                Some(ffprobe) => self.probe_all(id, ffprobe, &mut items, todo)?,
+                Some(ffprobe) => self.probe_all(id, ffprobe, items, todo)?,
             }
         }
-
-        let held = items.iter().filter(|i| !i.get("media_info").is_some_and(Json::is_object)).count();
-        if items.is_empty() {
-            return Ok((0, 0));
-        }
-        self.snapshot(id, &items, force)?;
-        if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
-            addon.paths = index_of(&items, &addon.deleted);
-            write_index(self, addon);
-        }
-        Ok((items.len() - held, held))
+        Ok(left_out)
     }
 
     /// Probes items PROBE_WORKERS at a time through this host's own byte path, so the probe
@@ -791,39 +870,109 @@ impl App {
         if !batch.is_empty() {
             self.push(id, batch)?;
         }
-        if let Some(addon) = self.addons.lock().unwrap().get(id) {
-            let _ = write_atomic(&dir(self, id).join("probes.json"), Json::Object(addon.probes.clone()).to_string().as_bytes());
-            let _ = write_atomic(&dir(self, id).join("probe_failures.json"), Json::Object(addon.probe_failures.clone()).to_string().as_bytes());
-            write_index(self, addon);
-        }
         if failed > 0 {
             warn(id, &format!("{failed} of {} probes failed; rex holds those until a later sync probes them", todo.len()));
         }
         Ok(())
     }
 
-    fn push(&self, id: &str, items: Vec<Json>) -> Result<(), String> {
+    fn push(&self, id: &str, items: Vec<Json>) -> Result<Json, String> {
         let (status, answer) = self.feed_call(id, "POST", &format!("/rex/feed/{}/items", source_name(id)), &json!({"items": items}))?;
         if status != 200 {
             return Err(format!("rex refused items ({status}): {}", answer["error"]));
         }
         self.rejected(id, &answer);
+        Ok(answer)
+    }
+
+    /// A partial sync's titles, upserted CHUNK at a time. Once rex has taken a chunk, the paths its
+    /// titles had before leave the index; a title rex refused keeps its old ones.
+    fn upsert(&self, id: &str, items: &[Map<String, Json>]) -> Result<(), String> {
+        for chunk in items.chunks(CHUNK) {
+            let answer = self.push(id, chunk.iter().cloned().map(Json::Object).collect())?;
+            let refused: HashSet<&str> = answer["rejected"].as_array().into_iter().flatten().filter_map(|r| r["id"].as_str()).collect();
+            let taken: Vec<&Map<String, Json>> = chunk.iter().filter(|i| !refused.contains(i["id"].as_str().unwrap_or_default())).collect();
+            let ids: HashSet<String> = taken.iter().map(|i| id_of(i)).collect();
+            let paths: HashSet<String> = taken.iter().map(|i| path_of(i)).collect();
+            let mut addons = self.addons.lock().unwrap();
+            let addon = addons.get_mut(id).ok_or("removed")?;
+            addon.paths.retain(|path, item| !ids.contains(item) || path == item || paths.contains(path));
+            for item in taken {
+                match probed(item) {
+                    true => addon.held_ids.remove(&id_of(item)),
+                    false => addon.held_ids.insert(id_of(item)),
+                };
+            }
+        }
         Ok(())
     }
 
-    /// The whole set, in chunks of one session. rex refuses a snapshot that would remove more
-    /// than half of the source's items; that is the addon's error to show, never forced, unless
-    /// the person changed its settings or asked for it (`force`).
-    fn snapshot(&self, id: &str, items: &[Map<String, Json>], force: bool) -> Result<(), String> {
+    /// A partial sync's `removed`, once every page is in: rex removes them, and so does the index.
+    /// An id the sync also sent is kept. Like rex's snapshot, it refuses to take more than half of
+    /// the addon's titles; a forced sync asks for every title instead.
+    fn remove_titles(&self, id: &str, removed: Vec<String>, sent: &HashSet<String>) -> Result<(), String> {
+        let (kept, gone): (Vec<String>, Vec<String>) = removed.into_iter().partition(|r| sent.contains(r));
+        let gone: BTreeSet<String> = gone.into_iter().collect();
+        let kept: Vec<String> = kept.iter().map(|r| format!("items(): {r} is in items and in removed; kept")).collect();
+        for why in &kept {
+            warn(id, why);
+        }
+        let (known, total) = {
+            let mut addons = self.addons.lock().unwrap();
+            let addon = addons.get_mut(id).ok_or("removed")?;
+            warned(addon, kept);
+            let known = gone.iter().filter(|g| addon.paths.get(*g) == Some(g)).count();
+            (known, addon.paths.iter().filter(|(path, item)| path == item).count())
+        };
+        if gone.is_empty() {
+            return Ok(());
+        }
+        if known * 2 > total {
+            if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
+                addon.error_kind = Some("would_remove".into());
+            }
+            return Err(format!(
+                "rex-addons removed nothing: items() removed {known} of the {total} titles the addon has, more than half. \
+                 If that is right, sync with force"
+            ));
+        }
+        let path = format!("/rex/feed/{}/items", source_name(id));
+        for chunk in gone.iter().collect::<Vec<_>>().chunks(1000) {
+            let (status, answer) = self.feed_call(id, "DELETE", &path, &json!({"ids": chunk}))?;
+            if status != 200 {
+                return Err(format!("rex refused the removal ({status}): {}", answer["error"]));
+            }
+        }
+        let mut addons = self.addons.lock().unwrap();
+        let addon = addons.get_mut(id).ok_or("removed")?;
+        addon.paths.retain(|_, item| !gone.contains(item));
+        for item in &gone {
+            addon.held_ids.remove(item);
+            addon.probes.remove(item);
+            addon.probe_failures.remove(item);
+        }
+        Ok(())
+    }
+
+    /// Every title, CHUNK at a time, as the parts of one snapshot session that `complete` ends.
+    /// rex refuses a snapshot that would remove more than half of the source's items; that is
+    /// the addon's error to show, never forced, unless the person changed its settings or asked
+    /// for it (`force`).
+    fn snapshot(&self, id: &str, session: &str, part: &mut usize, items: &[Map<String, Json>], complete: bool, force: bool) -> Result<(), String> {
         let path = format!("/rex/feed/{}/snapshot", source_name(id));
-        let session = format!("{}-{}", now(), std::process::id());
-        let chunks: Vec<&[Map<String, Json>]> = items.chunks(CHUNK).collect();
-        for (part, chunk) in chunks.iter().enumerate() {
-            let complete = part + 1 == chunks.len();
-            let mut body = json!({"session": session, "part": part, "complete": complete, "items": chunk});
+        let mut chunks: Vec<&[Map<String, Json>]> = items.chunks(CHUNK).collect();
+        // A last page with nothing on it still ends what earlier pages started.
+        if chunks.is_empty() && complete && *part > 0 {
+            chunks.push(&[]);
+        }
+        let count = chunks.len();
+        for (n, chunk) in chunks.into_iter().enumerate() {
+            let complete = complete && n + 1 == count;
+            let mut body = json!({"session": session, "part": *part, "complete": complete, "items": chunk});
             if complete && force {
                 body["force"] = json!(true);
             }
+            *part += 1;
             let (status, answer) = self.feed_call(id, "PUT", &path, &body)?;
             self.rejected(id, &answer);
             match status {
@@ -836,7 +985,7 @@ impl App {
                         "rex kept everything: this sync would remove {} of the {} items it has from this addon, more than half. \
                          If that is right, sync with force",
                         answer["would_remove"], answer["of"]
-                    ))
+                    ));
                 }
                 _ => return Err(format!("rex refused the snapshot ({status}): {}", answer["error"])),
             }
@@ -866,6 +1015,8 @@ impl App {
         addon.opened.clear();
         addon.opening.clear();
         clear_probe_failures(self, addon);
+        addon.full_due = true;
+        save_state(self, addon);
         let masked = addon.manifest.masked(&addon.config);
         let enabled = addon.enabled;
         drop(addons);
@@ -881,6 +1032,8 @@ impl App {
         let mut addons = self.addons.lock().unwrap();
         let addon = addons.get_mut(id).ok_or("no such addon")?;
         let restored = std::mem::take(&mut addon.deleted).len();
+        // A delta would never bring them back: they are unchanged.
+        addon.full_due = true;
         save_state(self, addon);
         let enabled = addon.enabled;
         drop(addons);
@@ -1271,6 +1424,8 @@ fn end_sign_in(app: &App, addon: &mut Addon, outcome: Result<String, String>) {
             log(&id, &format!("signed in as {account}"));
             addon.account = Some(account);
             addon.sign_in_error = None;
+            // Maybe another account, whose library no delta describes.
+            addon.full_due = true;
         }
         Err(error) => {
             warn(&id, &format!("sign-in failed: {error}"));
@@ -1578,38 +1733,121 @@ fn path_of(item: &Map<String, Json>) -> String {
 }
 
 /// What `/bytes` reads items by: each one's path, and its id.
-fn index_of(items: &[Map<String, Json>], deleted: &BTreeSet<String>) -> HashMap<String, String> {
-    items.iter().filter(|i| !deleted.contains(&id_of(i))).flat_map(|i| [(path_of(i), id_of(i)), (id_of(i), id_of(i))]).collect()
+fn index_of(items: &[Map<String, Json>]) -> HashMap<String, String> {
+    items.iter().flat_map(|i| [(path_of(i), id_of(i)), (id_of(i), id_of(i))]).collect()
 }
 
-/// The items kept, and why each entry left out was.
-pub type Checked = (Vec<Map<String, Json>>, Vec<String>);
-
-/// Adds to the addon's warnings: each counted, the first few kept, masked and cut short.
-fn warned(addon: &mut Addon, messages: Vec<String>) {
-    addon.warned += messages.len();
-    let room = WARNINGS_SHOWN.saturating_sub(addon.warnings.len());
-    let id = addon.manifest.id.clone();
-    addon.warnings.extend(messages.into_iter().take(room).map(|message| format!("{:.300}", masked(&id, &message))));
+/// Whether an item carries its probe: one without is held by rex.
+fn probed(item: &Map<String, Json>) -> bool {
+    item.get("media_info").is_some_and(Json::is_object)
 }
 
-/// What `items()` returned, kept to what rex can take: objects with an `id` and a relative
-/// `path`, each id and path once, none a person deleted; and why each entry left out was.
-pub fn checked_items(returned: Json, deleted: &BTreeSet<String>) -> Result<Checked, String> {
-    let Json::Array(list) = returned else {
-        return Err("items() must return a list".into());
+/// What one sync is: whether it asked for every title (`ctx.full`), whether `items()` answered at
+/// all, and how many pages it took.
+#[derive(Default)]
+struct Run {
+    full: bool,
+    answered: bool,
+    pages: usize,
+}
+
+/// One answer of `items()`, checked: the titles kept, why each entry left out was, and for a
+/// partial answer the ids it removes; `next`, the cursor of the page after it.
+pub struct Page {
+    pub items: Vec<Map<String, Json>>,
+    pub left_out: Vec<String>,
+    pub partial: bool,
+    pub removed: Vec<String>,
+    pub next: Option<Json>,
+}
+
+/// What a sync's pages returned so far: each id and path once over all of them, the bytes the
+/// host keeps for them, and whether the pages are partial.
+#[derive(Default)]
+pub struct Seen {
+    pub ids: HashSet<String>,
+    paths: HashSet<String>,
+    kept: usize,
+    pub pages: usize,
+    pub partial: Option<bool>,
+}
+
+/// Calls `items()` with `ctx` and, while an answer has a `next`, again with `ctx.cursor` set to
+/// it, each call with its own limits; each page goes to `each` as soon as it is checked, with
+/// whether it is the last. `seen` counts the pages that answered, also when one fails. The pages together are bounded by MAX_PAGES, PAGES_TIME, MAX_TITLES
+/// and MAX_KEPT.
+pub fn pages(env: &Env, mut ctx: Json, manifest: &Manifest, full: bool, deleted: &BTreeSet<String>, seen: &mut Seen, mut each: impl FnMut(Page, bool) -> Result<(), String>) -> Result<(), String> {
+    let mut spent = Duration::ZERO;
+    loop {
+        if seen.pages == MAX_PAGES {
+            return Err(format!("items() returned {MAX_PAGES} pages and still a next: at most {MAX_PAGES} a sync"));
+        }
+        if spent >= PAGES_TIME {
+            return Err(format!("items() ran for longer than {} s over all its pages", PAGES_TIME.as_secs()));
+        }
+        let started = Instant::now();
+        let returned = sandbox::call(env, "items", std::slice::from_ref(&ctx), sandbox::ITEMS)?;
+        spent += started.elapsed();
+        seen.pages += 1;
+        let page = page_of(returned, manifest, full, seen, deleted)?;
+        let next = page.next.clone();
+        each(page, next.is_none())?;
+        match next {
+            Some(next) => ctx["cursor"] = next,
+            None => return Ok(()),
+        }
+    }
+}
+
+/// One answer of `items()`: a list, or `{items, next, partial, removed}` (`"host": "0.8"`). Its
+/// titles are kept to what rex can take: objects with an `id` and a relative `path`, each id and
+/// path once over every page, none a person deleted.
+pub fn page_of(returned: Json, manifest: &Manifest, full: bool, seen: &mut Seen, deleted: &BTreeSet<String>) -> Result<Page, String> {
+    let (list, partial, removed, next) = match returned {
+        Json::Array(list) => (list, false, Vec::new(), None),
+        Json::Object(mut answer) => {
+            // An older rex-addons answers it with "items() must return a list".
+            if manifest.host.as_deref().is_none_or(|host| newer("0.8", host)) {
+                return Err("items() returned {items: [...]}, which needs \"host\": \"0.8\" in the manifest".into());
+            }
+            let Some(Json::Array(list)) = answer.remove("items") else {
+                return Err("items() must return a list, or {items: [...]}".into());
+            };
+            let partial = answer.get("partial") == Some(&json!(true));
+            let removed = match answer.remove("removed") {
+                None | Some(Json::Null) => Vec::new(),
+                Some(_) if !partial => return Err("items(): removed needs partial: true".into()),
+                Some(Json::Array(ids)) if ids.iter().all(|id| id.as_str().is_some_and(|id| !id.is_empty())) => {
+                    ids.into_iter().filter_map(|id| id.as_str().map(str::to_string)).collect()
+                }
+                Some(_) => return Err("items(): removed must be a list of ids".into()),
+            };
+            (list, partial, removed, answer.remove("next").filter(|next| !next.is_null()))
+        }
+        _ => return Err("items() must return a list".into()),
     };
-    let (mut ids, mut paths, mut kept, mut left_out) = (BTreeSet::new(), BTreeSet::new(), Vec::new(), Vec::new());
+    if partial && full {
+        return Err("items() returned partial: true, but this sync needs every title (ctx.full is true)".into());
+    }
+    if seen.partial.is_some_and(|before| before != partial) {
+        return Err("items(): a sync's pages are all partial, or none is".into());
+    }
+    seen.partial = Some(partial);
+    seen.kept += removed.iter().map(String::len).sum::<usize>();
+    let (mut kept, mut left_out) = (Vec::new(), Vec::new());
     for entry in list {
         let why = match &entry {
             Json::Object(item) => match (item.get("id").and_then(Json::as_str), item.get("path").and_then(Json::as_str)) {
                 (Some(item_id), Some(path)) if item_id.is_empty() || path.starts_with('/') || path.split('/').any(|s| s.is_empty() || s == "." || s == "..") => {
                     Some(format!("items(): {item_id:?} has the path {path:?}, which is not relative; left out"))
                 }
-                (Some(item_id), Some(path)) if !ids.insert(item_id.to_string()) || !paths.insert(path.to_string()) => {
+                (Some(item_id), Some(path)) if !seen.ids.insert(item_id.to_string()) || !seen.paths.insert(path.to_string()) => {
                     Some(format!("items(): {item_id} repeats an id or a path; left out"))
                 }
-                (Some(_), Some(_)) => None,
+                (Some(item_id), Some(path)) => {
+                    seen.kept += item_id.len() + path.len();
+                    None
+                }
                 _ => Some("items(): an entry has no id or path; left out".to_string()),
             },
             _ => Some("items(): an entry is not an object; left out".to_string()),
@@ -1620,7 +1858,21 @@ pub fn checked_items(returned: Json, deleted: &BTreeSet<String>) -> Result<Check
             _ => {}
         }
     }
-    Ok((kept, left_out))
+    if seen.ids.len() > MAX_TITLES {
+        return Err(format!("items() returned more than {MAX_TITLES} titles: at most {MAX_TITLES} a sync"));
+    }
+    if seen.kept > MAX_KEPT {
+        return Err(format!("items() returned more than {} MB of ids and paths: at most {} MB a sync", MAX_KEPT >> 20, MAX_KEPT >> 20));
+    }
+    Ok(Page { items: kept, left_out, partial, removed, next })
+}
+
+/// Adds to the addon's warnings: each counted, the first few kept, masked and cut short.
+fn warned(addon: &mut Addon, messages: Vec<String>) {
+    addon.warned += messages.len();
+    let room = WARNINGS_SHOWN.saturating_sub(addon.warnings.len());
+    let id = addon.manifest.id.clone();
+    addon.warnings.extend(messages.into_iter().take(room).map(|message| format!("{:.300}", masked(&id, &message))));
 }
 
 /// ffprobe's container to the extension rex takes the file by.
@@ -1688,6 +1940,12 @@ fn load(path: &Path) -> Result<Addon, String> {
         warnings: serde_json::from_value(state["warnings"]["first"].clone()).unwrap_or_default(),
         deleted: serde_json::from_value(state["deleted"].clone()).unwrap_or_default(),
         paths,
+        held_ids: read_json(&path.join("held.json")).and_then(|held| serde_json::from_value(held).ok()).unwrap_or_default(),
+        // A state an older rex-addons wrote, or a push a crash cut short: the host can't apply a delta.
+        full_due: state["full_due"].as_bool().unwrap_or(true) || state["unfinished"] == json!(true),
+        unfinished: false,
+        since: state["since"].as_u64(),
+        last_full: state["last_full"].as_u64().unwrap_or(0),
         probes: object("probes.json"),
         probe_failures: object("probe_failures.json"),
         syncing: false,
@@ -1713,6 +1971,7 @@ fn save_state(app: &App, addon: &Addon) {
         "error": addon.error, "error_kind": addon.error_kind, "deleted": addon.deleted, "repo": addon.repo,
         "account": addon.account, "sign_in_error": addon.sign_in_error,
         "warnings": {"count": addon.warned, "first": addon.warnings},
+        "full_due": addon.full_due, "unfinished": addon.unfinished, "since": addon.since, "last_full": addon.last_full,
     });
     let _ = write_atomic(&dir(app, &addon.manifest.id).join("state.json"), state.to_string().as_bytes());
 }
@@ -1735,17 +1994,30 @@ fn clear_probe_failures(app: &App, addon: &mut Addon) {
 }
 
 fn write_index(app: &App, addon: &Addon) {
-    let _ = write_atomic(&dir(app, &addon.manifest.id).join("index.json"), json!(addon.paths).to_string().as_bytes());
+    let _ = write_atomic(&dir(app, &addon.manifest.id).join("index.json"), &serde_json::to_vec(&addon.paths).unwrap());
+}
+
+/// What a sync changed of the host's own bookkeeping, written once when it ends.
+fn save_bookkeeping(app: &App, addon: &Addon) {
+    let dir = dir(app, &addon.manifest.id);
+    write_index(app, addon);
+    let _ = write_atomic(&dir.join("held.json"), &serde_json::to_vec(&addon.held_ids).unwrap());
+    let _ = write_atomic(&dir.join("probes.json"), &serde_json::to_vec(&addon.probes).unwrap());
+    let _ = write_atomic(&dir.join("probe_failures.json"), &serde_json::to_vec(&addon.probe_failures).unwrap());
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn manifest(host: &str) -> Manifest {
+        Manifest::parse(&json!({"id": "a", "name": "A", "version": "1", "host": host})).unwrap()
+    }
+
     #[test]
     fn items_are_checked() {
         let deleted = BTreeSet::from(["gone".to_string()]);
-        let (kept, left_out) = checked_items(
+        let page = page_of(
             json!([
                 {"id": "a", "path": "movies/a.mp4"},
                 {"id": "a", "path": "movies/a2.mp4"},
@@ -1757,11 +2029,14 @@ mod tests {
                 "f",
                 {"id": "g", "path": "movies/g.mkv", "kind": "movie"}
             ]),
+            &manifest("0.6"),
+            true,
+            &mut Seen::default(),
             &deleted,
         )
         .unwrap();
-        assert_eq!(kept.iter().map(id_of).collect::<Vec<_>>(), ["a", "g"]);
-        assert_eq!(left_out, [
+        assert_eq!(page.items.iter().map(id_of).collect::<Vec<_>>(), ["a", "g"]);
+        assert_eq!(page.left_out, [
             "items(): a repeats an id or a path; left out",
             "items(): b repeats an id or a path; left out",
             "items(): \"c\" has the path \"/etc/passwd\", which is not relative; left out",
@@ -1769,7 +2044,34 @@ mod tests {
             "items(): an entry has no id or path; left out",
             "items(): an entry is not an object; left out",
         ]);
-        assert!(checked_items(json!({"id": "a"}), &deleted).is_err());
+        assert!(page_of(json!("a"), &manifest("0.8"), true, &mut Seen::default(), &deleted).is_err());
+    }
+
+    /// The object shape, paging and changes only need "host": "0.8"; each shape's rules, and the
+    /// left-out rules over every page of one sync.
+    #[test]
+    fn pages_and_changes_are_checked() {
+        let none = BTreeSet::new();
+        let page = |returned: Json, host: &str, full: bool, seen: &mut Seen| page_of(returned, &manifest(host), full, seen, &none);
+        let one = json!({"items": [{"id": "a", "path": "f/a.mp4"}], "next": 2});
+        assert_eq!(page(one.clone(), "0.6", true, &mut Seen::default()).err().unwrap(), "items() returned {items: [...]}, which needs \"host\": \"0.8\" in the manifest");
+        let mut seen = Seen::default();
+        let first = page(one, "0.8", true, &mut seen).unwrap();
+        assert_eq!((first.next, first.partial, first.items.len()), (Some(json!(2)), false, 1));
+        // The same id or path on a later page is left out; next: null ends the sync.
+        let last = page(json!({"items": [{"id": "a", "path": "f/b.mp4"}, {"id": "b", "path": "f/a.mp4"}, {"id": "c", "path": "f/c.mp4"}], "next": null}), "0.8", true, &mut seen).unwrap();
+        assert_eq!((last.next, last.items.iter().map(id_of).collect::<Vec<_>>(), last.left_out.len()), (None, vec!["c".to_string()], 2));
+        // partial: only where ctx.full is false; removed only with it; never mixed in one sync.
+        let partial = json!({"partial": true, "items": [{"id": "d", "path": "f/d.mp4"}], "removed": ["x", "y"]});
+        assert_eq!(page(partial.clone(), "0.8", true, &mut Seen::default()).err().unwrap(), "items() returned partial: true, but this sync needs every title (ctx.full is true)");
+        let changes = page(partial.clone(), "0.8", false, &mut Seen::default()).unwrap();
+        assert_eq!((changes.partial, changes.removed), (true, vec!["x".to_string(), "y".to_string()]));
+        assert_eq!(page(json!({"items": [], "removed": ["x"]}), "0.8", false, &mut Seen::default()).err().unwrap(), "items(): removed needs partial: true");
+        assert_eq!(page(json!({"partial": true, "items": [], "removed": [1]}), "0.8", false, &mut Seen::default()).err().unwrap(), "items(): removed must be a list of ids");
+        let mut seen = Seen::default();
+        page(partial, "0.8", false, &mut seen).unwrap();
+        assert_eq!(page(json!([]), "0.8", false, &mut seen).err().unwrap(), "items(): a sync's pages are all partial, or none is");
+        assert!(page(json!({"next": 1}), "0.8", true, &mut Seen::default()).is_err());
     }
 
     #[test]
@@ -1973,9 +2275,12 @@ mod sync_tests {
         wait_idle(&app, "ctx");
         app.open("ctx", "a").unwrap();
         let stored = read_json(&dir(&app, "ctx").join("storage.json")).unwrap();
-        let ctx = |config: i64, reason: &str| json!({"config": {"n": config}, "host": env!("CARGO_PKG_VERSION"), "addon": {"id": "ctx", "version": "1.2.3"}, "reason": reason});
-        assert_eq!(stored["items"], json!([ctx(1, "manual"), ctx(2, "settings")]));
-        assert_eq!(stored["open"], json!({"config": {"n": 2}, "host": "0.7.0", "addon": {"id": "ctx", "version": "1.2.3"}}));
+        let ctx = |config: i64, reason: &str, last: Json| json!({"config": {"n": config}, "host": env!("CARGO_PKG_VERSION"), "addon": {"id": "ctx", "version": "1.2.3"}, "reason": reason, "full": true, "last_sync": last});
+        // The second sync is told when the first began; new settings ask for every title.
+        let first = stored["items"][1]["last_sync"].as_u64().unwrap();
+        assert!(first <= now() && first + 60 > now());
+        assert_eq!(stored["items"], json!([ctx(1, "manual", Json::Null), ctx(2, "settings", json!(first))]));
+        assert_eq!(stored["open"], json!({"config": {"n": 2}, "host": env!("CARGO_PKG_VERSION"), "addon": {"id": "ctx", "version": "1.2.3"}}));
         // A sync that failed is a retry once RETRY has passed; one that worked, a schedule once refresh_minutes have.
         let mut addons = app.addons.lock().unwrap();
         let addon = addons.get_mut("ctx").unwrap();
@@ -2221,6 +2526,331 @@ mod sync_tests {
 
         assert!(app.start_sync("need", true, "manual"));
         assert_eq!(wait_idle(&app, "need")["error_kind"], Json::Null);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A rex that keeps what it is sent as rex does: upserts, removals, snapshot sessions and the
+    /// guard against removing more than half. Every feed request after `fail_after` answers 503.
+    #[derive(Default)]
+    struct FakeRex {
+        items: BTreeMap<String, Json>,
+        session: Option<(String, u64, BTreeSet<String>)>,
+        requests: Vec<String>,
+        fail_after: Option<usize>,
+    }
+
+    fn fake_rex() -> (String, Arc<Mutex<FakeRex>>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr().to_ip().unwrap());
+        let rex: Arc<Mutex<FakeRex>> = Arc::default();
+        let state = rex.clone();
+        std::thread::spawn(move || {
+            for mut request in server.incoming_requests() {
+                let mut body = String::new();
+                let _ = request.as_reader().read_to_string(&mut body);
+                let body: Json = serde_json::from_str(&body).unwrap_or(Json::Null);
+                let mut rex = state.lock().unwrap();
+                let (method, leaf) = (request.method().to_string(), request.url().rsplit('/').next().unwrap_or_default().to_string());
+                let (status, answer) = if !request.url().starts_with("/rex/feed/") {
+                    (200, json!({}))
+                } else if rex.fail_after.is_some_and(|n| rex.requests.len() >= n) {
+                    (503, json!({"error": "down"}))
+                } else {
+                    rex.requests.push(format!("{method} {leaf}"));
+                    let upsert = |rex: &mut FakeRex, items: &Json| {
+                        for item in items.as_array().unwrap() {
+                            rex.items.insert(item["id"].as_str().unwrap().to_string(), item.clone());
+                        }
+                    };
+                    match (method.as_str(), leaf.as_str()) {
+                        ("POST", "items") => {
+                            upsert(&mut rex, &body["items"]);
+                            (200, json!({}))
+                        }
+                        ("DELETE", "items") => {
+                            for id in body["ids"].as_array().unwrap() {
+                                rex.items.remove(id.as_str().unwrap());
+                            }
+                            (200, json!({}))
+                        }
+                        _ => {
+                            let (session, part) = (body["session"].as_str().unwrap().to_string(), body["part"].as_u64().unwrap());
+                            if part == 0 {
+                                rex.session = Some((session.clone(), 0, BTreeSet::new()));
+                            }
+                            if rex.session.as_ref().is_none_or(|(open, next, _)| *open != session || *next != part) {
+                                (409, json!({"error": "no such snapshot session at this part"}))
+                            } else {
+                                upsert(&mut rex, &body["items"]);
+                                let named: Vec<String> = body["items"].as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap().to_string()).collect();
+                                let (_, next, seen) = rex.session.as_mut().unwrap();
+                                *next += 1;
+                                seen.extend(named);
+                                if body["complete"] != json!(true) {
+                                    (200, json!({}))
+                                } else {
+                                    let (_, _, seen) = rex.session.take().unwrap();
+                                    let gone: Vec<String> = rex.items.keys().filter(|id| !seen.contains(*id)).cloned().collect();
+                                    if gone.len() * 2 > rex.items.len() && body["force"] != json!(true) {
+                                        (409, json!({"error": "would remove", "would_remove": gone.len(), "of": rex.items.len()}))
+                                    } else {
+                                        for id in gone {
+                                            rex.items.remove(&id);
+                                        }
+                                        (200, json!({}))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                };
+                drop(rex);
+                let _ = request.respond(tiny_http::Response::from_string(answer.to_string()).with_status_code(status));
+            }
+        });
+        (url, rex)
+    }
+
+    /// An addon that answers what its `plan` setting says: `full` the pages of every title, `delta`
+    /// the pages of changes; a page "throw" throws. It records each call's ctx in storage.
+    const PLANNED: &str = "export default {
+        items(ctx) {
+            storage.set('calls', [...(storage.get('calls') ?? []), {full: ctx.full, cursor: ctx.cursor ?? 'none', last: ctx.last_sync}]);
+            const plan = JSON.parse(ctx.config.plan);
+            const pages = ctx.full || !plan.delta ? plan.full : plan.delta;
+            const at = ctx.cursor ?? 0;
+            if (pages[at] === 'throw') throw new Error('page ' + at + ' failed');
+            return at + 1 < pages.length ? {...pages[at], next: at + 1} : pages[at];
+        },
+        open() { return { url: 'https://cdn.example.com/x' }; } };";
+
+    fn titles(ids: std::ops::Range<usize>) -> Json {
+        ids.map(|n| json!({"id": format!("t{n}"), "path": format!("films/t{n}.mp4"), "media_info": {"format": {"format_name": "matroska,webm"}, "streams": [{}]}})).collect()
+    }
+
+    fn planned(name: &str, rex: &str) -> (Arc<App>, PathBuf) {
+        let data = std::env::temp_dir().join(format!("rex-addons-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), rex.into(), "127.0.0.1:9".parse().unwrap(), None, None);
+        let manifest = json!({"id": "plan", "name": "Plan", "version": "1.0.0", "host": "0.8", "hosts": ["cdn.example.com"],
+            "config": [{"key": "plan", "label": "Plan", "type": "text", "default": "{}"}]});
+        app.install(&manifest, PLANNED, None).unwrap();
+        (app, data)
+    }
+
+    fn plan(app: &App, plan: Json) {
+        app.addons.lock().unwrap().get_mut("plan").unwrap().config.insert("plan".into(), json!(plan.to_string()));
+    }
+
+    fn synced(app: &Arc<App>) -> Json {
+        assert!(app.start_sync("plan", false, "schedule"));
+        wait_idle(app, "plan")
+    }
+
+    fn calls(app: &App) -> Vec<Json> {
+        let calls = read_json(&dir(app, "plan").join("storage.json")).and_then(|s| s["calls"].as_array().cloned()).unwrap_or_default();
+        app.addons.lock().unwrap()["plan"].storage.change("calls", None).unwrap();
+        app.addons.lock().unwrap()["plan"].storage.flush();
+        calls
+    }
+
+    /// Pages are one snapshot: every part of one session, the last one complete, so what no page
+    /// named leaves rex only once every page is in; a page that throws fails the whole sync, rex
+    /// removes nothing and the next sync asks for every title again.
+    #[test]
+    fn pages_reach_rex_as_one_snapshot() {
+        let (url, rex) = fake_rex();
+        let (app, data) = planned("pages", &url);
+        plan(&app, json!({"full": [{"items": titles(0..300)}, {"items": titles(300..450)}, {"items": []}]}));
+        let status = synced(&app);
+        assert_eq!((status["state"].as_str(), status["items"].as_u64()), (Some("idle"), Some(450)));
+        assert_eq!(rex.lock().unwrap().items.len(), 450);
+        // 300 in two parts, 150 in one, and the empty last page's part that ends the session.
+        assert_eq!(rex.lock().unwrap().requests, ["PUT snapshot"; 4]);
+        assert_eq!(calls(&app).iter().map(|c| c["cursor"].clone()).collect::<Vec<_>>(), [json!("none"), json!(1), json!(2)]);
+
+        // The second page throws: the first page's titles are upserted, nothing is removed.
+        plan(&app, json!({"full": [{"items": titles(0..200)}, "throw"]}));
+        app.addons.lock().unwrap().get_mut("plan").unwrap().full_due = true;
+        let status = synced(&app);
+        assert_eq!(status["error"], "page 1 failed");
+        assert_eq!(rex.lock().unwrap().items.len(), 450);
+        assert!(app.addons.lock().unwrap()["plan"].full_due);
+        // Every title is readable at /bytes still.
+        assert_eq!(app.addons.lock().unwrap()["plan"].paths.get("films/t449.mkv"), Some(&"t449".to_string()));
+
+        // A page past the last title of a sync goes too: the same id or path on another page is left out.
+        plan(&app, json!({"full": [{"items": titles(0..2)}, {"items": titles(1..3)}]}));
+        let status = synced(&app);
+        // 3 of 450 is a removal of more than half: forced, as the person would.
+        assert_eq!((status["error_kind"].as_str(), status["warnings"]["count"].as_u64()), (Some("would_remove"), Some(1)));
+        assert!(app.start_sync("plan", true, "manual"));
+        assert_eq!(wait_idle(&app, "plan")["items"], 3);
+        assert_eq!(rex.lock().unwrap().items.keys().cloned().collect::<Vec<_>>(), ["t0", "t1", "t2"]);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A partial answer upserts its titles and removes its `removed`, with no snapshot. The index
+    /// follows a changed path, the counts and held titles stay right, also across a restart.
+    #[test]
+    fn changes_only_upsert_and_remove() {
+        let (url, rex) = fake_rex();
+        let (app, data) = planned("changes", &url);
+        plan(&app, json!({"full": [{"items": titles(0..10)}]}));
+        synced(&app);
+        assert_eq!(calls(&app)[0]["full"], true);
+        let moved = json!({"id": "t1", "path": "films/moved/t1.mp4", "media_info": {"format": {"format_name": "matroska,webm"}, "streams": [{}]}});
+        let unprobed = json!({"id": "new", "path": "films/new.mp4"});
+        plan(&app, json!({"full": [{"items": titles(0..10)}], "delta": [{"partial": true, "items": [moved], "removed": ["t2"]}, {"partial": true, "items": [unprobed], "removed": ["t3"]}]}));
+        let status = synced(&app);
+        let call = &calls(&app)[0];
+        assert_eq!((&call["full"], call["last"].is_u64()), (&json!(false), true));
+        assert_eq!((status["state"].as_str(), status["items"].as_u64(), status["held"].as_u64()), (Some("idle"), Some(8), Some(1)));
+        let ids: Vec<String> = rex.lock().unwrap().items.keys().cloned().collect();
+        assert_eq!(ids, ["new", "t0", "t1", "t4", "t5", "t6", "t7", "t8", "t9"]);
+        let paths = app.addons.lock().unwrap()["plan"].paths.clone();
+        assert_eq!((paths.get("films/moved/t1.mkv"), paths.get("films/t1.mkv"), paths.get("films/t2.mkv")), (Some(&"t1".to_string()), None, None));
+
+        // Restarted, it knows the same, from disk, and a partial sync goes on from there.
+        let again = App::new(data.clone(), url.clone(), "127.0.0.1:9".parse().unwrap(), None, None);
+        assert_eq!(again.addons.lock().unwrap()["plan"].paths, paths);
+        assert!(!again.addons.lock().unwrap()["plan"].full_due);
+        plan(&again, json!({"full": [], "delta": [{"partial": true, "items": [], "removed": ["new"]}]}));
+        let status = synced(&again);
+        assert_eq!((status["items"].as_u64(), status["held"].as_u64()), (Some(8), Some(0)));
+        assert!(!rex.lock().unwrap().items.contains_key("new"));
+        // One snapshot, the first sync's; the partial ones only upsert and remove.
+        assert_eq!(rex.lock().unwrap().requests, ["PUT snapshot", "POST items", "POST items", "DELETE items", "DELETE items"]);
+
+        // A path another title has is left out, as rex would refuse it; an id both sent and
+        // removed stays.
+        plan(&again, json!({"full": [], "delta": [{"partial": true, "items": [{"id": "x", "path": "films/t0.mkv"}, {"id": "t4", "path": "films/t4.mkv"}], "removed": ["t4"]}]}));
+        let status = synced(&again);
+        assert_eq!(status["warnings"]["count"], 2);
+        assert!(!rex.lock().unwrap().items.contains_key("x") && rex.lock().unwrap().items.contains_key("t4"));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// `removed` can't take more than half of the titles: nothing is removed, the status names
+    /// the guard, and the next sync asks for every title, which a forced sync gets through.
+    #[test]
+    fn removing_most_titles_through_removed_is_refused() {
+        let (url, rex) = fake_rex();
+        let (app, data) = planned("removed", &url);
+        plan(&app, json!({"full": [{"items": titles(0..10)}]}));
+        synced(&app);
+        let gone: Vec<String> = (0..6).map(|n| format!("t{n}")).collect();
+        plan(&app, json!({"full": [{"items": titles(6..10)}], "delta": [{"partial": true, "items": [], "removed": gone}]}));
+        let status = synced(&app);
+        assert_eq!(status["error_kind"], "would_remove");
+        assert!(status["error"].as_str().unwrap().starts_with("rex-addons removed nothing: items() removed 6 of the 10 titles"), "{status}");
+        assert_eq!(rex.lock().unwrap().items.len(), 10);
+        assert_eq!(app.addons.lock().unwrap()["plan"].paths.len(), 20);
+        calls(&app);
+        assert!(app.start_sync("plan", true, "manual"));
+        assert_eq!(wait_idle(&app, "plan")["items"], 4);
+        assert_eq!(calls(&app)[0]["full"], true);
+        assert_eq!(rex.lock().unwrap().items.len(), 4);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// rex stops answering halfway through a partial sync: it fails, and the next sync asks for
+    /// every title, which brings rex back to exactly what the addon has.
+    #[test]
+    fn a_partial_sync_cut_short_is_followed_by_a_full_one() {
+        let (url, rex) = fake_rex();
+        let (app, data) = planned("cut", &url);
+        plan(&app, json!({"full": [{"items": titles(0..10)}]}));
+        synced(&app);
+        let changed: Json = titles(0..400).as_array().unwrap().iter().map(|t| json!({"id": t["id"], "path": t["path"], "display": {"title": "new"}, "media_info": t["media_info"]})).collect();
+        plan(&app, json!({"full": [{"items": changed}], "delta": [{"partial": true, "items": changed, "removed": ["t9"]}]}));
+        let sent = rex.lock().unwrap().requests.len();
+        rex.lock().unwrap().fail_after = Some(sent + 1);
+        let status = synced(&app);
+        assert!(status["error"].as_str().unwrap().contains("503"), "{status}");
+        assert_eq!(rex.lock().unwrap().items.len(), 200);
+        assert!(app.addons.lock().unwrap()["plan"].full_due);
+        assert_eq!(read_json(&dir(&app, "plan").join("state.json")).unwrap()["full_due"], true);
+        rex.lock().unwrap().fail_after = None;
+        calls(&app);
+        let status = synced(&app);
+        assert_eq!((status["state"].as_str(), status["items"].as_u64()), (Some("idle"), Some(400)));
+        assert_eq!(calls(&app)[0]["full"], true);
+        assert!(rex.lock().unwrap().items.values().all(|i| i["display"]["title"] == "new"));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// When the host asks for every title: first sync, new settings, a sign-in, a restore, a
+    /// forced sync, a day after the last full one, a held title due for a probe, a state an older
+    /// rex-addons wrote or a crash left unfinished; else ctx.full is false.
+    #[test]
+    fn a_sync_asks_for_every_title_when_a_delta_cannot_be_trusted() {
+        let (url, _) = fake_rex();
+        let (app, data) = planned("full", &url);
+        plan(&app, json!({"full": [{"items": titles(0..2)}]}));
+        let full = |app: &Arc<App>| {
+            calls(app);
+            synced(app);
+            calls(app)[0]["full"].as_bool().unwrap()
+        };
+        assert!(full(&app));
+        assert!(!full(&app));
+        let mark = |app: &Arc<App>, f: &dyn Fn(&mut Addon)| f(app.addons.lock().unwrap().get_mut("plan").unwrap());
+        mark(&app, &|a| a.last_full = now() - FULL_EVERY);
+        assert!(full(&app));
+        assert!(!full(&app));
+        app.restore("plan").unwrap();
+        wait_idle(&app, "plan");
+        assert_eq!(calls(&app)[0]["full"], true);
+        app.set_config("plan", &json!({"plan": json!({"full": [{"items": titles(0..2)}]}).to_string()})).unwrap();
+        wait_idle(&app, "plan");
+        assert_eq!(calls(&app)[0]["full"], true);
+        assert!(app.start_sync("plan", true, "manual"));
+        wait_idle(&app, "plan");
+        assert_eq!(calls(&app)[0]["full"], true);
+        assert!(!full(&app));
+        // Partial where ctx.full is true fails, and the next one is still full.
+        plan(&app, json!({"full": [{"partial": true, "items": []}]}));
+        mark(&app, &|a| a.full_due = true);
+        assert!(full(&app));
+        assert_eq!(app.status("plan").unwrap()["error"], "items() returned partial: true, but this sync needs every title (ctx.full is true)");
+        plan(&app, json!({"full": [{"items": titles(0..2)}]}));
+        assert!(full(&app));
+        assert!(!full(&app));
+        // A partial answer the host can't take: the addon may count it as sent, so the next is full.
+        plan(&app, json!({"full": [{"items": titles(0..2)}], "delta": [{"partial": true, "items": [], "removed": [1]}]}));
+        assert!(!full(&app));
+        assert!(full(&app));
+        // A crash with a push unfinished, or a state from before 0.8: full after a restart.
+        for state in [json!({"enabled": true, "last_sync": 1, "since": 1, "last_full": now(), "full_due": false, "unfinished": true}), json!({"enabled": true, "last_sync": 1})] {
+            std::fs::write(dir(&app, "plan").join("state.json"), state.to_string()).unwrap();
+            let again = App::new(data.clone(), url.clone(), "127.0.0.1:9".parse().unwrap(), None, None);
+            assert!(again.addons.lock().unwrap()["plan"].full_due, "{state}");
+        }
+        // A held title whose probe is due again: only with an ffprobe.
+        let held = |app: &Arc<App>| mark(app, &|a| {
+            a.held_ids.insert("t0".into());
+            a.probe_failures.insert("t0".into(), json!({"count": 1, "at": 0}));
+        });
+        held(&app);
+        assert!(!full(&app));
+        let probing = App::new(data.clone(), url.clone(), "127.0.0.1:9".parse().unwrap(), Some("/bin/false".into()), None);
+        mark(&probing, &|a| a.full_due = false);
+        held(&probing);
+        assert!(full(&probing));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// An addon that returns the object shape without "host": "0.8" is told so.
+    #[test]
+    fn the_object_shape_needs_host_0_8() {
+        let (url, _) = fake_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-old-host-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), url, "127.0.0.1:9".parse().unwrap(), None, None);
+        app.install(&json!({"id": "old", "name": "Old", "version": "1", "host": "0.6"}), "export default { items() { return {items: []}; }, open() {} };", None).unwrap();
+        assert!(app.start_sync("old", false, "manual"));
+        assert_eq!(wait_idle(&app, "old")["error"], "items() returned {items: [...]}, which needs \"host\": \"0.8\" in the manifest");
         let _ = std::fs::remove_dir_all(&data);
     }
 

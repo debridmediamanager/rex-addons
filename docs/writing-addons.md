@@ -34,7 +34,7 @@ that talks to rex's feed API directly is a rex addon too: see
 | `name`, `description` | What people see in the app |
 | `version` | Numbers and dots. Raise it with every change: people see an update when the version in your repository is higher than theirs |
 | `hosts` | The websites `fetch()` may reach, and that `open()` links may point at: `example.com` exactly, `*.example.com` for anything under it, or `*` for any public website. This device (`127.0.0.1`, `localhost`) is never reachable. An address on a private network (a NAS at `192.168.1.20`, a Tailscale address) is reachable only when you list it exactly, by its address or by a name that leads to it; never through `*` or `*.example.com` |
-| `config` | The settings the app shows. Each has a `key` (letters, digits and `_`, each key once), a `label`, a `type` (`text`, `secret`, `bool`, `number` or `list`, a list of text), and optionally a `default` and `required: true`. A `secret` is shown masked; a `list` with `secret: true` shows only each link's website, for links that carry a key |
+| `config` | The settings the app shows. Each has a `key` (letters, digits and `_`, each key once), a `label`, a `type` (`text`, `secret`, `bool`, `number`, `list`, a list of text, or `select`, one of its `options`), and optionally a `default`, `required: true` and `help`, a line of text the app shows with it. A `secret` is shown masked; a `list` with `secret: true` shows only each link's website, for links that carry a key. A `select` has `options`, such as `[{"value": "1080", "label": "1080p"}, {"value": "720", "label": "720p"}]`: each `value` is text, given once, and its `label` is what the app shows. Your code gets the `value`, always one of them: one a newer version of your addon drops gives the `default` |
 | `refresh_minutes` | How often `items()` runs. Default 360, at least 5 |
 | `host` | Optional: the lowest rex-addons version your addon needs, such as `"0.2"` ([below](#which-rex-addons-it-needs)) |
 | `directories` | Optional: libraries of the addon's own, in rex's [`directories`](https://github.com/debridmediamanager/rex/blob/main/docs/feed-api.md#libraries-a-source-declares) shape, such as `[{"name": "youtube", "shows": "YouTube"}]`: titles whose `path` starts with `youtube/` go to a TV library called YouTube instead of your Movies or TV Shows. rex-addons sends it when the addon registers |
@@ -56,6 +56,10 @@ repository's list. rex-addons 0.1 doesn't know the field.
 | `0.3` | `sign_in` | Installing refuses it |
 | `0.4` | Playlists from `open()`, and `ffprobe()` of them | Playing fails: `open() returned playlists, which need "host": "0.4" in the manifest`. `ffprobe()` of them isn't checked |
 | `0.5` | `"kind": "spotify"`, `exports`, `requires` | Installing refuses it |
+| `0.6` | `select` settings | Installing refuses it |
+| `0.6` | `storage.keys`, `TextEncoder`, `TextDecoder`, `crypto`, `md5` and bytes in `hash` and `hmac`, `ctx.host`, `ctx.addon`, `ctx.reason`, `RETRY_AFTER` | Not checked: it installs, and fails where it uses them on an older rex-addons (`RETRY_AFTER` is just an error there, tried again in 5 minutes) |
+
+A setting's `help` needs no `host`: an older rex-addons doesn't show it.
 
 ## main.js
 
@@ -66,7 +70,14 @@ export default {
 };
 ```
 
-`ctx` holds one thing, `ctx.config`: the settings, each one its saved value or its default.
+Each function gets `ctx` as its last argument:
+
+| | |
+|---|---|
+| `ctx.config` | The settings, each one its saved value or its default |
+| `ctx.host` | This rex-addons' version, such as `"0.6.0"` |
+| `ctx.addon` | `{id, version}`, from your manifest |
+| `ctx.reason` | Only for `items()`: why this sync runs ([below](#why-a-sync-runs)) |
 
 ### items(ctx)
 
@@ -77,9 +88,11 @@ refuses a sync that would take away more than half of the titles. An empty list 
 in rex.
 
 A sync that failed is tried again 5 minutes later, and every 5 minutes after that. So when a
-website answers `429`, either `await sleep(...)` and try again within the call, or keep a "not
-before" time in `storage` and skip that website until then; an addon that just throws asks again
-in 5 minutes.
+website answers `429`, either `await sleep(...)` and try again within the call, or throw an error
+whose message starts with `RETRY_AFTER <seconds>`, such as
+`RETRY_AFTER 3600: YouTube answered 429`: the next try then waits that long (at least a minute, at
+most a day), and the app shows the rest of the message, or `the website asked to wait 3600 s`. A
+sync someone starts from the app still runs at once. Needs `"host": "0.6"`.
 
 A `required` setting that is empty (not set, blank text or an empty list) fails the sync with
 `set <label> first`, and `items()` isn't called.
@@ -98,10 +111,23 @@ Each title is a rex feed item. The fields that matter most:
 The rest (`release`, `subtitles`, `collections`, `channel` for live TV, music `track`s and so on)
 is in rex's [feed API](https://github.com/debridmediamanager/rex/blob/main/docs/feed-api.md#an-item).
 
-An entry that can't be a title is left out, with a `WARN` in the log, and the rest still sync:
-one that isn't an object, has no `id` or `path` or an empty `id`, repeats another's `id` or
-`path`, or has a `path` that starts with `/` or holds an empty, `.` or `..` part
-(`a//b.mp4`, `../b.mp4`).
+An entry that can't be a title is left out, with a `WARN` in the log and in the status's
+`warnings`, and the rest still sync: one that isn't an object, has no `id` or `path` or an empty
+`id`, repeats another's `id` or `path`, or has a `path` that starts with `/` or holds an empty,
+`.` or `..` part (`a//b.mp4`, `../b.mp4`).
+
+### Why a sync runs
+
+`ctx.reason` says what started the sync, for an addon that does more on some than on others:
+
+| `ctx.reason` | The sync runs because |
+|---|---|
+| `schedule` | `refresh_minutes` passed since the last one that worked |
+| `retry` | The last one failed, and its wait passed; or an addon yours `requires` was just signed in or enabled |
+| `manual` | A person asked: a sync from the app, enabling the addon, or restoring its deleted titles; and `rex-addons check` |
+| `settings` | Its settings changed |
+| `install` | It was installed or updated, from a repository, `--bundled` or `--dev`, and hasn't synced since |
+| `sign_in` | It was just signed in |
 
 A title a person deleted in a Plex app is left out of what you return from then on, until they
 restore the addon's deleted titles in the app. Keep returning it; don't track deletions yourself.
@@ -186,17 +212,18 @@ Plain JavaScript, plus these:
 | `fetch(url, {method, headers, body})` | Returns `{status, ok, headers, url, text(), json(), bytes()}`, `bytes()` giving a `Uint8Array`. `headers` is a plain object with lowercase names, `url` is where redirects ended. Only `hosts` are reachable, and every redirect is checked again. `body` is text, a `Uint8Array` or an `ArrayBuffer`. The body is read only when you call `text()`, `json()` or `bytes()`, once, so a `Range: bytes=0-0` check costs nothing. Fetches run one at a time: `Promise.all` over several waits for each in turn ([more](#more-on-fetch)) |
 | `ffprobe(url, {headers})` | ffprobe's JSON of a video (`format`, `streams`, `chapters`), for `media_info`. rex-addons reads the link itself, for ffprobe, so the same `hosts` rule applies as for `fetch`; an HLS playlist works too. `ffprobe({playlist, playlists})` probes [playlists you wrote](#playlists-you-write), checked as `open()`'s are (`"host": "0.4"`). It fails with a clear message when rex-addons runs without ffprobe. Up to 2 minutes, which don't count as JavaScript time |
 | `console.log`, `console.info`, `console.debug`, `console.warn`, `console.error` | Into rex-addons' log, tagged `[addon <id>]`, with your secret settings' values (6 characters or more) shown as `********`. `warn` and `error` lines start with `WARN` and `ERROR` |
-| `storage.get(key)`, `storage.set(key, value)`, `storage.delete(key)` | Your addon's own saved values, any JSON. They survive restarts and updates. A key never set gives `undefined`, and setting `undefined` deletes the key |
+| `storage.get(key)`, `storage.set(key, value)`, `storage.delete(key)`, `storage.keys(prefix)` | Your addon's own saved values, any JSON. They survive restarts and updates. A key never set gives `undefined`, and setting `undefined` deletes the key. `keys()` lists every key, sorted; `keys("probe:")` only those starting with `probe:`, so you can delete what's gone |
 | `atob(text)`, `btoa(text)` | Base64, as in browsers: text whose characters are bytes (0 to 255) |
 | `new URL(link, base)`, `URLSearchParams` | Links, as in browsers but smaller: `new URL(link, base)` resolves a relative link, a URL has `href`, `protocol`, `host`, `hostname`, `port`, `pathname`, `search`, `hash`, `origin` and `searchParams`, and `URLSearchParams` has `get`, `getAll`, `has`, `set`, `append`, `delete`, `toString` and `entries`. Changing `searchParams` changes the URL |
-| `hash(algorithm, text)`, `hmac(algorithm, key, text)` | A digest of the text (as UTF-8) in lowercase hex, for signing an API request. `algorithm` is `sha1`, `sha256` or `sha512`; there's no `md5` |
+| `hash(algorithm, data)`, `hmac(algorithm, key, data)` | A digest in lowercase hex, for signing an API request. `data` and `key` are text (taken as UTF-8), a `Uint8Array` or an `ArrayBuffer`. `algorithm` is `md5`, `sha1`, `sha256` or `sha512` |
+| `new TextEncoder().encode(text)`, `new TextDecoder().decode(bytes)` | Text to UTF-8 bytes and back, as in browsers. UTF-8 only: `new TextDecoder("latin1")` throws |
+| `crypto.getRandomValues(array)`, `crypto.randomUUID()` | Random numbers for a nonce or a PKCE verifier, as in browsers: `getRandomValues` fills an integer typed array, at most 65,536 bytes a call, and returns it. There's no `crypto.subtle` |
 | `await sleep(ms)` | Waits, for backing off when a website answers 429. The wait doesn't count as JavaScript time, and a sleep past the end of the call fails at once |
 | `spotify.user()`, `await spotify.get(path)`, `await spotify.post(path, body)` | Only with `"sign_in": {"kind": "spotify"}`: the person's Spotify library ([below](#signing-in-with-spotify)) |
 | `await addons.call(id, name, ...args)` | Only with `requires`: another addon's exported function ([below](#calling-another-addon)) |
 
-There's nothing else: no timers (`setTimeout`, use `sleep`), no `require` or `import`, no
-`TextEncoder`, no file access. Each call starts fresh, so keep anything you want to remember
-across calls in `storage`.
+There's nothing else: no timers (`setTimeout`, use `sleep`), no `require` or `import`, no file
+access. Each call starts fresh, so keep anything you want to remember across calls in `storage`.
 
 ### More on fetch
 
@@ -221,6 +248,7 @@ the useful part first: `archive.org answered 503`, not `Error in step 3`.
 | Whole call | 20 minutes for `items()`, 90 s for `open()`. A `fetch` or body read still waiting then fails |
 | A fetched body | 16 MB |
 | `storage` | 16 MB in all, written to disk when the call ends |
+| `crypto.getRandomValues` | 65,536 bytes a call |
 
 `signIn()`, `signInPoll()`, `signOut()` and functions other addons call get `open()`'s limits.
 
@@ -549,28 +577,53 @@ raise the addon's `version` and push; people see the update when they refresh th
 
 ## Trying it
 
-While you work on an addon, skip git: start rex-addons with `--bundled` naming a folder that holds
-your addon's folder. It's installed on start, and installed again on a start after you raise its
-`version`. rex must be running too: rex-addons talks to it at `--rex` (default
-`http://127.0.0.1:32400`) and syncs nothing until it answers.
+`rex-addons check` tries an addon folder once, without rex: it parses the manifest, does what
+installing checks, runs `items()` and tells you what came back.
 
 ```bash
-rex-addons --data ~/rex-addons-dev --ffprobe "$(command -v ffprobe)" --bundled ~/my-addons
+rex-addons check ~/my-addons/my-films --ffprobe "$(command -v ffprobe)"
+rex-addons check ~/my-addons/my-films --config '{"pawnshop": false}' --open his-girl-friday
+```
+
+It prints a line for each step, `ok`, `FAIL` or `note`: how many titles `items()` returned and how
+long it took, every entry left out and why, every required setting not given, and the first title
+as JSON. With `--open <id>` it runs `open()` for that title too, prints what it returned and
+whether the link is on your `hosts`. What your addon prints is there too. It exits with 1 when a
+step failed.
+
+- `--config` takes the settings as the app sends them; the rest take their defaults.
+- Without `--ffprobe`, `ffprobe()` fails as it does in rex-addons without one.
+- `storage` starts empty and is thrown away. `--data <dir>` names a rex-addons data directory
+  instead: the addon's storage there is used, and `addons.call` reaches the addons installed there.
+- `check` can't sign in. An addon with `sign_in` runs with what its storage holds, so give it
+  `--data` where it is signed in, or it fails where it needs the account.
+
+Then run it in rex-addons, beside rex: start rex-addons with `--dev` naming a folder that holds your
+addon's folder. It's installed on start, and installed again, then synced, each time you save its
+`manifest.json` or `main.js`, without raising its `version`. rex-addons talks to rex at `--rex`
+(default `http://127.0.0.1:32400`) and syncs nothing until it answers.
+
+```bash
+rex-addons --data ~/rex-addons-dev --ffprobe "$(command -v ffprobe)" --dev ~/my-addons
 curl http://127.0.0.1:32410/api/status
+curl http://127.0.0.1:32410/api/addons/my-films/log
 curl -X POST http://127.0.0.1:32410/api/addons/my-films/sync
 ```
 
-Installing checks that `main.js` loads and exports `items` and `open` (and `signIn`,
-`signInPoll` and each of your `exports` when the manifest has them); a bundled addon it refuses
-is a `WARN [host] bundled <id>: ...` line in the log. A sync runs once rex answers. The log shows
-what your addon printed and why a sync failed, and `/api/status` shows each addon's `items` (in
-rex) and `held` ([held titles](#probing-and-held-titles)). rex itself shows what it has and what
-it holds:
+A change it can't install (a manifest that breaks a rule, a `main.js` that doesn't load) is a
+`WARN [host] dev <folder>: ...` line in the log, and the last version that installed stays. A sync
+runs once rex answers. The log shows what your addon printed and why a sync failed; `/log` answers
+the addon's last lines of it. `/api/status` shows each addon's `items` (in rex), `held`
+([held titles](#probing-and-held-titles)) and `warnings` (entries left out). rex itself shows what
+it has and what it holds:
 
 ```bash
 curl http://127.0.0.1:32400/rex/feed/addon-my-films/items
 curl http://127.0.0.1:32400/rex/feed/addon-my-films/held
 ```
+
+`--bundled` works as `--dev` does, but installs again only on a start after you raise `version`,
+and one it refuses is a `WARN [host] bundled <id>: ...` line; it's how an app ships addons.
 
 To sign in an addon with `sign_in`, start it and read the code to enter:
 
@@ -625,9 +678,11 @@ only the schema).
 | A sync worked, nothing shows in Plex | The titles are held: they have no probe. Check `held` in `/api/status`, then whether rex-addons runs with `--ffprobe` and why probes failed (`<id>: probe failed: ...` in the log) ([held titles](#probing-and-held-titles)) |
 | Nothing syncs, no error | rex isn't answering at `--rex`. `/api/status` says `"reachable": false` |
 | `rex at http://127.0.0.1:32400 is not reachable: ...` | The same, for a sync you started yourself |
-| Some titles are missing, the sync worked | Entries left out: look for `items(): ...; left out` in the log ([items()](#itemsctx)) |
+| Some titles are missing, the sync worked | Entries left out: `warnings` in `/api/status` counts them and quotes the first few, and the log has each as `items(): ...; left out` ([items()](#itemsctx)) |
 | `items() must return a list` | `items()` returned something else, or nothing |
 | `set <label> first` | A `required` setting is empty |
+| `<label>: must be one of 1080, 720` | A `select` was given a value that isn't one of its options |
+| `the website asked to wait 3600 s` | `items()` threw `RETRY_AFTER 3600`: the next try is an hour later |
 | `sign in first` | An addon with `sign_in` isn't signed in |
 | `rex kept everything: this sync would remove 80 of the 100 items it has from this addon, more than half. If that is right, sync with force` | `items()` returned under half of what it did before. If a website gave a short answer, throw instead. If it's right, sync with `{"force": true}` |
 | `items() ran JavaScript for longer than 30 s` | Too much work in one call. Do less each sync ([a large library](#a-large-library)) |
@@ -640,7 +695,7 @@ only the schema).
 | `the body was already read` | `text()`, `json()` and `bytes()` read the body once. Keep what the first one gave |
 | `the body was already read, or closed after 32 newer unread ones` | A response kept unread while 32 more were fetched ([more on fetch](#more-on-fetch)) |
 | `the body is over 16 MB` | Ask for less: a `Range`, a smaller page |
-| `storage is limited to 16 MB` | Keep less in `storage`, and delete what's gone |
+| `storage is limited to 16 MB` | Keep less in `storage`, and delete what's gone (`storage.keys()` lists it) |
 | `sleep(60000) would outlast the call: a call may take 90 s in all` | The sleep is longer than the call has left |
 | `ffprobe: ffprobe() is not available: rex-addons runs without --ffprobe` | Start rex-addons with `--ffprobe` |
 | `open() returned https://..., which is not on the addon's hosts` | The link's host isn't in `hosts`, or it isn't `http(s)` |
@@ -650,3 +705,7 @@ only the schema).
 | `main.js: main.js exports no open()` | The default export lacks that function. Installing needs `items` and `open`, plus `signIn` and `signInPoll` with `sign_in`, and each name in `exports` |
 | `manifest: ...` | The manifest breaks a rule: the message says which ([manifest.json](#manifestjson)) |
 | `this addon needs rex-addons 0.5 or newer` | Its `host` is newer than this rex-addons |
+| `manifest: a select setting needs "host": "0.6" or newer` | Set `"host": "0.6"` or higher |
+| `hash: crc32 is not md5, sha1, sha256 or sha512` | Only those four |
+| `TextDecoder: latin1 is not supported, only utf-8` | Decode other encodings yourself, from `bytes()` |
+| `WARN [host] dev <folder>: ...` | `--dev` couldn't install what you saved: the rest of the line says why. The last version that installed stays |

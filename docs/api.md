@@ -8,7 +8,7 @@ that).
 ## The command
 
 ```
-rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [--ffprobe <path>] [--bundled <dir>] [--default-repo <url>]... [--device-name <name>]
+rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [--ffprobe <path>] [--bundled <dir>] [--dev <dir>] [--default-repo <url>]... [--device-name <name>]
 ```
 
 | Flag | Default | Meaning |
@@ -18,11 +18,23 @@ rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [-
 | `--data` | `./rex-addons-data` | `<dir>/addons/<id>/` holds each installed addon: `manifest.json`, `main.js`, `config.json`, `storage.json`, and the host's own `state.json`, `probes.json`, `probe_failures.json`, `index.json`, and for a Spotify addon `spotify-credentials.json` (the sign-in, mode 600, never served or given to the addon). `<dir>/repos/<repo id>/` holds each repository's fetched files, `<dir>/repos.json` the list. `<dir>/removed.json` lists bundled addons the person removed |
 | `--ffprobe` | none | The ffprobe behind addons' `ffprobe()` and the host's own check of a title that arrives without `media_info`. Without it `ffprobe()` fails, those titles reach rex unprobed, and rex holds unprobed titles without showing them |
 | `--bundled` | none | Addon folders installed on the first start, and updated whenever the bundled `version` is higher. A person can remove one; it then stays removed. Installing the same addon from a repository later makes it that repository's |
+| `--dev` | none | Addon folders installed on every start, whatever their `version`, and installed again, then synced (`ctx.reason` `install`), within a second of their `manifest.json` or `main.js` changing. For writing an addon; one it can't install is a `WARN [host] dev <folder>: ...` line and the last one installed stays |
 | `--default-repo` | none | A repository added the first time it is given, and fetched in the background; repeat it for several. One the person removed is never added again |
 | `--device-name` | `rex` | The name this device shows in the Spotify app while a Spotify addon pairs ([below](#spotify-pairing)) |
 
 `--version` and `--help` print and exit. Logs go to stdout (info) and stderr (`WARN`, `ERROR`),
 one line each, tagged `[host]`, `[<addon id>]` or `[addon <id>]` for what the addon itself printed.
+
+```
+rex-addons check <addon folder> [--config '<json>'] [--open <item id>] [--ffprobe <path>] [--data <dir>]
+```
+
+tries one addon folder without rex or a running rex-addons: the manifest, what installing checks,
+one `items()` (`ctx.reason` `manual`) and, with `--open`, one `open()`, each printed as an `ok`,
+`FAIL` or `note` line. It exits with 0 when every step worked, 1 when one failed, 2 when asked
+wrongly. `--data` names a rex-addons data directory whose storage, and installed addons, the
+addon uses; without it storage starts empty and is thrown away. What it prints is in
+[Trying it](writing-addons.md#trying-it).
 
 ## The API
 
@@ -47,7 +59,8 @@ JSON in and out. It answers only this device: the socket's own peer address must
              "description": "...", "enabled": true, "repo": "github-com-debridmediamanager-rex-addons",
              "hosts": ["archive.org", "*.archive.org"],
              "state": "idle", "items": 100, "held": 0, "last_sync": 1794326938, "error": null,
-             "error_kind": null, "update_available": false, "update_hosts": null, "sign_in": null, "requires": []}]}
+             "error_kind": null, "warnings": {"count": 0, "first": []},
+             "update_available": false, "update_hosts": null, "sign_in": null, "requires": []}]}
 ```
 
 | Field | Meaning |
@@ -55,6 +68,7 @@ JSON in and out. It answers only this device: the socket's own peer address must
 | `state` | `syncing`, `error` (the last sync failed: `error` says why), or `idle` |
 | `error_kind` | `would_remove` when the last sync failed because rex refused a snapshot that would remove more than half of the addon's titles (offer a forced sync), `sign_in` when it failed because the addon needs signing in (offer that), else `null` |
 | `items` | Titles in rex from the last sync, probed |
+| `warnings` | Entries the last sync left out, which show nowhere else: `count`, every one of them, and `first`, the messages of the first five, such as `items(): "a" has the path "/a.mp4", which is not relative; left out` or `rex rejected "a": ...`. `{"count": 0, "first": []}` when none was. The next sync that runs `items()` replaces them |
 | `held` | Titles sent without a probe, which rex holds unshown (no ffprobe, or one that failed). A title whose probe failed is probed again after one sync interval (`refresh_minutes`), doubled for each failure after that, at most a week; new settings or a new version of the addon try them all again at the next sync |
 | `last_sync` | Unix seconds of the last sync that worked, or `null` |
 | `repo` | The id of the repository it was installed from, or `null` for a bundled one. It stays when that repository is removed |
@@ -68,7 +82,10 @@ JSON in and out. It answers only this device: the socket's own peer address must
 
 The status fields above, plus `manifest` (as installed), `deleted` (how many of its titles a
 person deleted in a Plex app, which it no longer pushes) and `config`: every setting with its
-saved value or default, a set `secret` answered as `"********"`. A `list` the manifest marks
+saved value or default, a set `secret` answered as `"********"`. How to show each setting is in
+`manifest.config`, in order: its `key`, `label` and `type`, and as the manifest gives them its
+`default`, `required`, `help` (a line to show with it) and, for a `select`, `options`
+(`[{"value": "1080", "label": "1080p"}, ...]`: show the `label`s, send the `value`). A `list` the manifest marks
 `"secret": true` (the stremio addon's `addons`, whose links carry account tokens) is answered
 entry by entry: an http(s) link as `<scheme>://<host>/********`, anything else as `"********"`.
 
@@ -95,8 +112,22 @@ A JSON object of settings. Each key given replaces its value, `null` puts back t
 an entry sent back as it was answered keeps the saved entry it stands for (the first one not yet
 kept, so two links on one host both stay, in the order sent); any other entry is taken as typed.
 So the app can remove, reorder and add entries without ever seeing the saved ones. A key the manifest
-doesn't list, or a value of the wrong type, is `400`. Answers `{"config": ...}` as `GET` shows it
+doesn't list, or a value of the wrong type, is `400`, as is a `select` value that isn't one of its
+options (`Highest quality: must be one of 1080, 720`). Answers `{"config": ...}` as `GET` shows it
 and starts a sync, which may remove more than half of the addon's titles (new settings can).
+
+### `GET /api/addons/{id}/log`
+
+The addon's last log lines, oldest first: what it printed (`[addon <id>]`) and the host's lines
+about it (`[<id>]`), each exactly as logged, secrets masked. `?lines=N` answers the last `N`; at
+most the last 300 are kept, in memory only, each cut to 4 KB.
+
+```json
+{"lines": [{"at": 1794326938, "line": "[addon my-films] probed in 3525 ms"},
+           {"at": 1794326938, "line": "WARN [my-films] items(): \"a\" repeats an id or a path; left out"}]}
+```
+
+`at` is Unix seconds. `400` when `lines` isn't a whole number, `404` for an addon it doesn't know.
 
 ### `POST /api/addons/{id}/sync`
 

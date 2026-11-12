@@ -196,7 +196,7 @@ impl Addon {
         let m = &self.manifest;
         json!({
             "id": m.id, "name": m.name, "version": m.version, "description": m.description,
-            "enabled": self.enabled, "repo": self.repo, "hosts": m.hosts.0,
+            "enabled": self.enabled, "repo": self.repo, "hosts": m.hosts.listed, "granted_hosts": m.reach(&self.config).granted.iter().map(|(host, port)| net::shown(host, *port)).collect::<Vec<_>>(),
             "state": if self.syncing { "syncing" } else if self.error.is_some() { "error" } else { "idle" },
             "items": self.items, "held": self.held, "last_sync": self.last_sync, "error": self.error,
             "error_kind": self.error_kind,
@@ -383,6 +383,13 @@ impl App {
         let id = manifest.id.clone();
         match addons.get_mut(&id) {
             Some(addon) => {
+                // A value saved in a setting that only now becomes a host setting was never typed
+                // as a host to reach: the person types it again.
+                let was_host = |key: &str| addon.manifest.config.iter().any(|f| f.key == key && f.kind == "host");
+                let new_hosts: Vec<String> = manifest.config.iter().filter(|f| f.kind == "host" && !was_host(&f.key)).map(|f| f.key.clone()).collect();
+                if new_hosts.iter().filter(|key| addon.config.remove(*key).is_some()).count() > 0 {
+                    write_atomic(&path.join("config.json"), Json::Object(addon.config.clone()).to_string().as_bytes()).map_err(|e| e.to_string())?;
+                }
                 addon.manifest = Arc::new(manifest);
                 addon.source = Arc::new(source.to_string());
                 addon.opened.clear();
@@ -411,7 +418,7 @@ impl App {
     /// `signInPoll` with a code sign-in, and each of `exports`. The names checked, or why not.
     pub fn loads(&self, manifest: &Manifest, source: &str) -> Result<Vec<String>, String> {
         let storage = Arc::new(Storage::open(PathBuf::from("/dev/null")));
-        let env = Env { addon: &manifest.id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone(), spotify: None, calls: None };
+        let env = Env { addon: &manifest.id, source, hosts: manifest.hosts.clone(), storage, prober: self.prober.clone(), spotify: None, calls: None };
         let mut needed = vec!["items".to_string(), "open".into()];
         if manifest.sign_in.as_ref().is_some_and(|s| !s.spotify()) {
             needed.extend(["signIn".to_string(), "signInPoll".into()]);
@@ -532,9 +539,9 @@ impl App {
     }
 
     fn call_open(self: &Arc<Self>, id: &str, item: &str, manifest: &Manifest, source: &str, config: &Map<String, Json>, storage: Arc<Storage>) -> Result<Opened, String> {
-        let env = self.env(id, manifest, source, storage, true);
+        let env = self.env(id, manifest, config, source, storage, true);
         let answer = sandbox::call(&env, "open", &[json!(item), call_ctx(manifest, config)], sandbox::OPEN)?;
-        opened_from(&answer, manifest)
+        opened_from(&answer, manifest, &env.hosts)
     }
 
     pub fn forget_open(&self, id: &str, item: &str) {
@@ -650,7 +657,7 @@ impl App {
         if let Some(label) = manifest.missing(&config).first() {
             return Err(format!("set {label} first"));
         }
-        let env = self.env(id, &manifest, &source, storage, true);
+        let env = self.env(id, &manifest, &config, &source, storage, true);
         let mut ctx = call_ctx(&manifest, &config);
         ctx["reason"] = json!(reason);
         let returned = sandbox::call(&env, "items", &[ctx], sandbox::ITEMS).map_err(|error| {
@@ -926,7 +933,7 @@ impl App {
             let a = addons.get(id).ok_or("no such addon")?;
             (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone())
         };
-        let env = self.env(id, &manifest, &source, storage, true);
+        let env = self.env(id, &manifest, &config, &source, storage, true);
         let mut args = args.to_vec();
         args.push(call_ctx(&manifest, &config));
         sandbox::call(&env, method, &args, sandbox::OPEN).map_err(|error| masked(id, &error))
@@ -1145,7 +1152,7 @@ impl App {
             }
             (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone())
         };
-        let env = self.env(callee, &manifest, &source, storage, false);
+        let env = self.env(callee, &manifest, &config, &source, storage, false);
         let mut args = args;
         args.push(call_ctx(&manifest, &config));
         sandbox::call(&env, function, &args, sandbox::OPEN).map_err(|error| {
@@ -1163,7 +1170,7 @@ impl App {
 
     /// The sandbox an addon's call runs in, with the globals its manifest asks for. `calls`:
     /// whether `addons.call` reaches other addons (false inside a call from another one).
-    pub fn env<'a>(self: &Arc<Self>, id: &'a str, manifest: &'a Manifest, source: &'a str, storage: Arc<Storage>, calls: bool) -> Env<'a> {
+    pub fn env<'a>(self: &Arc<Self>, id: &'a str, manifest: &'a Manifest, config: &Map<String, Json>, source: &'a str, storage: Arc<Storage>, calls: bool) -> Env<'a> {
         let spotify = manifest.sign_in.as_ref().filter(|s| s.spotify()).map(|_| {
             let (app, id) = (self.clone(), id.to_string());
             Arc::new(move |method: &str, path: &str, body: Vec<Json>| app.spotify_call(&id, method, path, body.first())) as Bridge
@@ -1175,25 +1182,26 @@ impl App {
             }
             false => Arc::new(|_: &str, _: &str, _: Vec<Json>| Err("addons.call: an addon called by another cannot call a third".to_string())) as Bridge,
         });
-        Env { addon: id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone(), spotify, calls }
+        Env { addon: id, source, hosts: manifest.reach(config), storage, prober: self.prober.clone(), spotify, calls }
     }
 }
 
-/// What `open()` returned, checked: playlists (`"host": "0.4"`, every link on the addon's hosts),
-/// or a link on its hosts and the headers it needs.
-pub fn opened_from(answer: &Json, manifest: &Manifest) -> Result<Opened, String> {
+/// What `open()` returned, checked: playlists (`"host": "0.4"`, every link on `hosts`, what the
+/// addon reaches), or a link on them and the headers it needs.
+pub fn opened_from(answer: &Json, manifest: &Manifest, hosts: &net::Hosts) -> Result<Opened, String> {
     if !answer["playlist"].is_null() {
         // An older rex-addons answers it with "open() returned no url".
         if manifest.host.as_deref().is_none_or(|host| newer("0.4", host)) {
             return Err("open() returned playlists, which need \"host\": \"0.4\" in the manifest".into());
         }
-        let playlists = probe::Playlists::parse(answer, &manifest.hosts).map_err(|e| format!("open() returned playlists: {e}"))?;
+        let playlists = probe::Playlists::parse(answer, hosts).map_err(|e| format!("open() returned playlists: {e}"))?;
         return Ok(Opened { url: String::new(), headers: Vec::new(), playlists: Some(Arc::new(playlists)) });
     }
     let url = answer["url"].as_str().ok_or("open() returned no url")?;
     let parsed = url::Url::parse(url).map_err(|e| format!("open() returned {url}: {e}"))?;
-    if !matches!(parsed.scheme(), "http" | "https") || !manifest.hosts.allows(parsed.host_str().unwrap_or("")) {
-        return Err(format!("open() returned {url}, which is not on the addon's hosts"));
+    let (host, port) = (parsed.host_str().unwrap_or(""), parsed.port_or_known_default().unwrap_or(0));
+    if !matches!(parsed.scheme(), "http" | "https") || !hosts.allows(host, port) {
+        return Err(format!("open() returned {url}, which is not on the addon's hosts{}", hosts.port_note(host, port)));
     }
     let headers = answer["headers"]
         .as_object()
@@ -1353,7 +1361,7 @@ impl App {
 
     /// The installed addons: id to (version, repository, hosts).
     fn installed(&self) -> HashMap<String, Installed> {
-        self.addons.lock().unwrap().values().map(|a| (a.manifest.id.clone(), (a.manifest.version.clone(), a.repo.clone(), a.manifest.hosts.0.clone()))).collect()
+        self.addons.lock().unwrap().values().map(|a| (a.manifest.id.clone(), (a.manifest.version.clone(), a.repo.clone(), a.manifest.hosts.listed.clone()))).collect()
     }
 
     /// A repository's addons as the API lists them: each with what is installed of it.
@@ -1531,13 +1539,13 @@ impl App {
 
     /// An addon as the API shows it: its state, and whether its repository has a newer version.
     pub fn status(&self, id: &str) -> Option<Json> {
-        let offers: HashMap<(String, String), (String, Vec<String>)> = self
+        let offers: HashMap<(String, String), repos::RepoAddon> = self
             .repos
             .lock()
             .unwrap()
             .list
             .iter()
-            .flat_map(|r| r.addons.iter().map(move |a| ((r.id.clone(), a.id.clone()), (a.version.clone(), a.hosts.clone()))))
+            .flat_map(|r| r.addons.iter().map(move |a| ((r.id.clone(), a.id.clone()), a.clone())))
             .collect();
         let addons = self.addons.lock().unwrap();
         let addon = addons.get(id)?;
@@ -1546,9 +1554,12 @@ impl App {
             let reason = unmet(&addons, r);
             json!({"id": r, "ok": reason.is_none(), "reason": reason})
         }).collect();
-        let update = addon.repo.as_ref().and_then(|r| offers.get(&(r.clone(), id.to_string()))).filter(|(v, _)| newer(v, &addon.manifest.version));
+        let update = addon.repo.as_ref().and_then(|r| offers.get(&(r.clone(), id.to_string()))).filter(|a| newer(&a.version, &addon.manifest.version));
         status["update_available"] = json!(update.is_some());
-        status["update_hosts"] = json!(update.map(|(_, hosts)| hosts));
+        status["update_hosts"] = json!(update.map(|a| &a.hosts));
+        // The host settings that version adds: each one more host the person may be asked for.
+        let has = |key: &str| addon.manifest.config.iter().any(|f| f.key == key && f.kind == "host");
+        status["update_host_settings"] = json!(update.map(|a| a.host_settings.iter().filter(|(key, _)| !has(key)).map(|(_, label)| label).collect::<Vec<_>>()));
         Some(status)
     }
 
@@ -1964,7 +1975,7 @@ mod sync_tests {
         let stored = read_json(&dir(&app, "ctx").join("storage.json")).unwrap();
         let ctx = |config: i64, reason: &str| json!({"config": {"n": config}, "host": env!("CARGO_PKG_VERSION"), "addon": {"id": "ctx", "version": "1.2.3"}, "reason": reason});
         assert_eq!(stored["items"], json!([ctx(1, "manual"), ctx(2, "settings")]));
-        assert_eq!(stored["open"], json!({"config": {"n": 2}, "host": "0.6.0", "addon": {"id": "ctx", "version": "1.2.3"}}));
+        assert_eq!(stored["open"], json!({"config": {"n": 2}, "host": "0.7.0", "addon": {"id": "ctx", "version": "1.2.3"}}));
         // A sync that failed is a retry once RETRY has passed; one that worked, a schedule once refresh_minutes have.
         let mut addons = app.addons.lock().unwrap();
         let addon = addons.get_mut("ctx").unwrap();
@@ -2322,6 +2333,43 @@ mod sync_tests {
         assert_eq!(app.repo_addons_json("two").unwrap()[0]["installed_repo"], "one");
         let nothing = app.repo_addons_json("two").unwrap();
         assert_eq!(nothing[0]["installed_hosts"], json!(["*"]));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// An update shows the host settings it adds, for the app to say so before updating; a value
+    /// saved in a setting that only becomes a host setting with it is dropped, never granted.
+    #[test]
+    fn updates_show_the_host_settings_they_add() {
+        let (rex, _) = stub_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-host-consent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+        let main = "export default { items() { return []; }, open() {} };";
+        let manifest = |version: &str, config: Json| json!({"id": "home", "name": "Home", "version": version, "host": "0.7", "config": config});
+        let offer = |version: &str, config: Json| {
+            let dir = app.repo_dir("one").join("addons/home");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("manifest.json"), manifest(version, config).to_string()).unwrap();
+            std::fs::write(dir.join("main.js"), main).unwrap();
+            add_local_repo(&app, "one");
+        };
+        let text = |key: &str, label: &str| json!({"key": key, "label": label, "type": "text"});
+        let host = |key: &str, label: &str| json!({"key": key, "label": label, "type": "host"});
+        offer("1.0.0", json!([text("server", "Server"), host("nas", "NAS")]));
+        app.install_from_repo("one", "home").unwrap();
+        app.addons.lock().unwrap().get_mut("home").unwrap().enabled = false;
+        app.set_config("home", &json!({"server": "10.0.0.2", "nas": "10.0.0.3:5005"})).unwrap();
+        let status = app.status("home").unwrap();
+        assert_eq!((&status["granted_hosts"], &status["update_host_settings"]), (&json!(["10.0.0.3:5005"]), &Json::Null));
+        // 1.1 turns the text setting into a host setting and adds another; NAS was one already.
+        offer("1.1.0", json!([host("server", "Server"), host("nas", "NAS"), host("backup", "Backup")]));
+        assert_eq!(app.status("home").unwrap()["update_host_settings"], json!(["Server", "Backup"]));
+        app.install_from_repo("one", "home").unwrap();
+        let status = app.status("home").unwrap();
+        assert_eq!((&status["granted_hosts"], &status["update_host_settings"]), (&json!(["10.0.0.3:5005"]), &Json::Null));
+        assert_eq!(read_json(&dir(&app, "home").join("config.json")).unwrap(), json!({"nas": "10.0.0.3:5005"}));
+        offer("1.2.0", json!([host("server", "Server"), host("nas", "NAS")]));
+        assert_eq!(app.status("home").unwrap()["update_host_settings"], json!([]));
         let _ = std::fs::remove_dir_all(&data);
     }
 

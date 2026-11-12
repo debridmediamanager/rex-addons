@@ -3,7 +3,7 @@ use std::path::Path;
 
 use serde_json::{json, Map, Value as Json};
 
-use crate::net::Hosts;
+use crate::net::{self, Hosts};
 
 /// What a secret setting is answered as. Sent back unchanged, it keeps the stored value.
 pub const MASK: &str = "********";
@@ -71,6 +71,8 @@ fn fits(field: &Field, value: &Json) -> bool {
         "bool" => value.is_boolean(),
         "number" => value.is_number(),
         "list" => value.as_array().is_some_and(|items| items.iter().all(Json::is_string)),
+        // Blank is no address: it grants nothing, and a required one is missing.
+        "host" => value.as_str().is_some_and(|text| text.trim().is_empty() || net::typed_grant(text).is_ok()),
         _ => false,
     }
 }
@@ -123,8 +125,8 @@ impl Manifest {
                 return Err(format!("manifest: config key {key} is listed twice"));
             }
             let kind = entry.get("type").and_then(Json::as_str).unwrap_or("");
-            if !matches!(kind, "text" | "secret" | "bool" | "number" | "list" | "select") {
-                return Err(format!("manifest: config {key}: type must be text, secret, bool, number, list or select"));
+            if !matches!(kind, "text" | "secret" | "bool" | "number" | "list" | "select" | "host") {
+                return Err(format!("manifest: config {key}: type must be text, secret, bool, number, list, select or host"));
             }
             let options = match (kind, entry.get("options")) {
                 ("select", Some(Json::Array(options))) if !options.is_empty() => {
@@ -156,6 +158,10 @@ impl Manifest {
                 secret: entry.get("secret").and_then(Json::as_bool).unwrap_or(false),
                 options,
             };
+            // Only what the person types is reached: an addon cannot grant itself a host.
+            if kind == "host" && !field.default.is_null() {
+                return Err(format!("manifest: config {key}: a host setting has no default: the person types it"));
+            }
             if !field.default.is_null() && !fits(&field, &field.default) {
                 return Err(match kind {
                     "select" => format!("manifest: config {key}: the default is not one of its options"),
@@ -221,7 +227,10 @@ impl Manifest {
         if config.iter().any(|field| field.kind == "select") && host.as_deref().is_none_or(|host| newer("0.6", host)) {
             return Err("manifest: a select setting needs \"host\": \"0.6\" or newer".into());
         }
-        Ok(Manifest { id, name, version, description, hosts: Hosts(hosts), config, refresh_minutes, host, sign_in, exports, requires, raw: raw.clone() })
+        if config.iter().any(|field| field.kind == "host") && host.as_deref().is_none_or(|host| newer("0.7", host)) {
+            return Err("manifest: a host setting needs \"host\": \"0.7\" or newer".into());
+        }
+        Ok(Manifest { id, name, version, description, hosts: Hosts::from(hosts), config, refresh_minutes, host, sign_in, exports, requires, raw: raw.clone() })
     }
 
     /// Installing refuses an addon that needs a newer rex-addons.
@@ -238,7 +247,7 @@ impl Manifest {
         self.config
             .iter()
             .map(|field| {
-                let saved = saved.get(&field.key).filter(|value| field.kind != "select" || fits(field, value));
+                let saved = saved.get(&field.key).filter(|value| !matches!(field.kind.as_str(), "select" | "host") || fits(field, value));
                 (field.key.clone(), saved.cloned().unwrap_or_else(|| field.default.clone()))
             })
             .collect()
@@ -260,6 +269,22 @@ impl Manifest {
             })
             .map(|field| field.label.clone())
             .collect()
+    }
+
+    /// What the addon reaches with these settings: its manifest's hosts, and each host and port
+    /// the person typed into its `host` settings.
+    pub fn reach(&self, saved: &Map<String, Json>) -> Hosts {
+        let effective = self.effective(saved);
+        let mut granted: Vec<(String, u16)> = self
+            .config
+            .iter()
+            .filter(|field| field.kind == "host")
+            .filter_map(|field| net::typed_grant(effective[&field.key].as_str()?).ok())
+            .flat_map(|(host, ports)| ports.into_iter().map(move |port| (host.clone(), port)))
+            .collect();
+        granted.sort();
+        granted.dedup();
+        Hosts { listed: self.hosts.listed.clone(), granted }
     }
 
     pub fn masked(&self, saved: &Map<String, Json>) -> Map<String, Json> {
@@ -328,8 +353,12 @@ impl Manifest {
             } else if fits(field, value) {
                 next.insert(key.clone(), value.clone());
             } else {
+                if let Some(Err(why)) = value.as_str().filter(|_| field.kind == "host").map(net::typed_grant) {
+                    return Err(format!("{}: {why}", field.label));
+                }
                 return Err(format!("{}: must be {}", field.label, match field.kind.as_str() {
                     "list" => "a list of text".to_string(),
+                    "host" => "an address, as text".into(),
                     "bool" => "true or false".into(),
                     "number" => "a number".into(),
                     "select" => format!("one of {}", field.options.join(", ")),
@@ -403,6 +432,9 @@ mod tests {
             (json!({"id": "a", "name": "x", "version": "1", "config": [{"key": "k", "type": "select", "options": [{"value": "1", "label": "One"}]}]}), "\"host\": \"0.6\""),
             (json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "config": [{"key": "k", "type": "select", "options": [{"value": "1", "label": "One"}]}]}), "\"host\": \"0.6\""),
             (json!({"id": "a", "name": "x", "version": "1", "config": [{"key": "k", "type": "text", "help": 5}]}), "help must be text"),
+            (json!({"id": "a", "name": "x", "version": "1", "config": [{"key": "k", "type": "host"}]}), "a host setting needs \"host\": \"0.7\" or newer"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.6", "config": [{"key": "k", "type": "host"}]}), "a host setting needs \"host\": \"0.7\" or newer"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.7", "config": [{"key": "k", "type": "host", "default": "192.168.1.1"}]}), "a host setting has no default"),
             (json!({"id": "a", "name": "x", "version": "1", "config": [{"key": "k", "type": "number", "default": "5"}]}), "default"),
             (json!({"id": "a", "name": "x", "version": "1", "refresh_minutes": 1}), "refresh_minutes"),
             (json!({"id": "a", "name": "x", "version": "1", "host": "v0.2"}), "host"),
@@ -479,6 +511,70 @@ mod tests {
         assert!(Manifest::parse(&json!({"id": "a", "name": "x", "version": "1", "config": [{"key": "k", "type": "text", "help": "Shown under it"}]})).is_ok());
     }
 
+    /// A host setting takes an address the person types, kept as typed; the host and port in it,
+    /// and only that, join what the addon reaches. Never a wildcard, a user, or this device.
+    #[test]
+    fn host_settings_take_an_address_and_grant_its_host_and_port() {
+        let m = Manifest::parse(&json!({"id": "h", "name": "H", "version": "1", "host": "0.7", "hosts": ["example.com"], "config": [
+            {"key": "server", "label": "Server", "type": "host", "required": true},
+            {"key": "backup", "label": "Backup server", "type": "host"}
+        ]}))
+        .unwrap();
+        let granted = |saved: &Map<String, Json>| m.reach(saved).granted;
+        let grant = |host: &str, ports: &[u16]| ports.iter().map(|port| (host.to_string(), *port)).collect::<Vec<_>>();
+        assert_eq!(m.missing(&Map::new()), ["Server"]);
+        assert!(granted(&Map::new()).is_empty());
+        for (typed, host, ports) in [
+            ("192.168.1.20:8096", "192.168.1.20", &[8096][..]),
+            (" http://NAS.Local:8096/jellyfin ", "nas.local", &[8096]),
+            ("https://[fd00::5]:8920", "fd00::5", &[8920]),
+            ("[fd00::5]:8920", "fd00::5", &[8920]),
+            // A scheme's own port; a bare name either scheme's; a bare port typed, that one.
+            ("http://nas", "nas", &[80]),
+            ("https://nas/", "nas", &[443]),
+            ("http://nas:443", "nas", &[443]),
+            ("nas", "nas", &[80, 443]),
+            ("[fd00::5]", "fd00::5", &[80, 443]),
+            ("nas:80", "nas", &[80]),
+            ("nas:443", "nas", &[443]),
+            ("http://192.168.010.1/", "192.168.8.1", &[80]),
+        ] {
+            let saved = m.apply(&Map::new(), &json!({"server": typed})).unwrap();
+            assert_eq!(m.effective(&saved)["server"], json!(typed), "kept as typed");
+            assert_eq!(granted(&saved), grant(host, ports), "{typed}");
+            let reach = m.reach(&saved);
+            assert!(ports.iter().all(|port| reach.allows(host, *port)) && reach.allows("example.com", 8080), "{typed}");
+            assert!(!reach.allows(host, 32400), "{typed}: another port of the same host");
+        }
+        // Two settings, each its own host and port; blank grants nothing and leaves a required one missing.
+        let both = m.apply(&Map::new(), &json!({"server": "10.0.0.2:8096", "backup": "10.0.0.3"})).unwrap();
+        assert_eq!(granted(&both), [("10.0.0.2".to_string(), 8096), ("10.0.0.3".into(), 80), ("10.0.0.3".into(), 443)]);
+        assert_eq!(m.reach(&both).port_note("10.0.0.3", 32400), ": its settings allow 10.0.0.3 on port 80 and 443 only, not 32400");
+        let blank = m.apply(&both, &json!({"server": "  ", "backup": null})).unwrap();
+        assert!(granted(&blank).is_empty());
+        assert_eq!(m.missing(&blank), ["Server"]);
+        assert!(!m.reach(&both).allows("10.0.0.4", 8096));
+        let shape = "Server: give an address such as 192.168.1.20:8096 or http://nas.local:8096";
+        let device = "Server: that is this device, which addons never reach";
+        for (typed, says) in [
+            (json!("*"), shape), (json!("*.lan"), shape), (json!("nas lan"), shape), (json!("http://"), shape), (json!("nas_box"), shape),
+            (json!("nas:0"), shape), (json!("nas:99999"), shape),
+            (json!("ftp://nas"), "Server: give an http:// or https:// address"),
+            (json!("user:pw@nas"), "Server: leave the user name and password out of the address"),
+            (json!("http://user@nas:8096"), "Server: leave the user name and password out of the address"),
+            (json!(5), "Server: must be an address, as text"), (json!(["nas"]), "Server: must be an address, as text"),
+            (json!("127.0.0.1:32410"), device), (json!("http://127.0.0.2/"), device), (json!("127.1"), device), (json!("0x7f.0.0.1"), device),
+            (json!("2130706433"), device), (json!("localhost:32400"), device), (json!("LOCALHOST"), device), (json!("rex.localhost"), device),
+            (json!("[::1]:32410"), device), (json!("[::ffff:127.0.0.1]"), device), (json!("0.0.0.0:32400"), device), (json!("[::]"), device),
+        ] {
+            assert_eq!(m.apply(&both, &json!({"server": typed})).unwrap_err(), says, "{typed}");
+        }
+        // Saved some other way (an older file, a hand edit), a value that is no address grants nothing.
+        let odd = json!({"server": "127.0.0.1", "backup": "*"}).as_object().unwrap().clone();
+        assert!(granted(&odd).is_empty());
+        assert_eq!(m.effective(&odd)["server"], Json::Null);
+    }
+
     #[test]
     fn secret_lists_are_redacted_entry_by_entry() {
         let m = Manifest::parse(&json!({"id": "s", "name": "S", "version": "1", "config": [
@@ -525,12 +621,12 @@ mod tests {
 
     #[test]
     fn host_version() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.6.0");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.7.0");
         let needing = |host: &str| Manifest::parse(&json!({"id": "a", "name": "x", "version": "1", "host": host})).unwrap();
-        for fits in ["0.6", "0.6.0", "0.5", "0.4", "0.3", "0.2", "0.1.9", "0"] {
+        for fits in ["0.7", "0.7.0", "0.6", "0.5", "0.4", "0.3", "0.2", "0.1.9", "0"] {
             assert_eq!(needing(fits).check_host(), Ok(()), "{fits}");
         }
-        for too_new in ["0.6.1", "0.7", "1"] {
+        for too_new in ["0.7.1", "0.8", "1"] {
             assert_eq!(needing(too_new).check_host().unwrap_err(), format!("this addon needs rex-addons {too_new} or newer"));
         }
         assert_eq!(manifest().host, None);

@@ -21,6 +21,8 @@ pub struct RepoAddon {
     pub dir: String,
     /// The lowest rex-addons it needs, if it says.
     pub host: Option<String>,
+    /// Its `host` settings, (key, label): each a host the person may let it reach.
+    pub host_settings: Vec<(String, String)>,
 }
 
 #[derive(Clone, Debug)]
@@ -66,11 +68,12 @@ fn walk(root: &Path, dir: &Path, depth: usize, found: &mut Vec<RepoAddon>, probl
     if depth > 0 && dir.join("manifest.json").is_file() && dir.join("main.js").is_file() {
         match read_json(&dir.join("manifest.json")).ok_or("manifest.json is not JSON".to_string()).and_then(|raw| Manifest::parse(&raw)) {
             Ok(m) => found.push(RepoAddon {
+                host_settings: m.config.iter().filter(|f| f.kind == "host").map(|f| (f.key.clone(), f.label.clone())).collect(),
                 id: m.id,
                 name: m.name,
                 version: m.version,
                 description: m.description,
-                hosts: m.hosts.0,
+                hosts: m.hosts.listed,
                 dir: relative,
                 host: m.host,
             }),
@@ -113,7 +116,7 @@ impl RepoAddon {
     pub fn to_json(&self) -> Json {
         json!({
             "id": self.id, "name": self.name, "version": self.version, "description": self.description, "hosts": self.hosts, "dir": self.dir,
-            "host": self.host, "compatible": self.compatible(),
+            "host": self.host, "compatible": self.compatible(), "host_settings": self.host_settings,
         })
     }
 
@@ -127,6 +130,7 @@ impl RepoAddon {
             hosts: serde_json::from_value(value["hosts"].clone()).unwrap_or_default(),
             dir: text("dir")?,
             host: text("host"),
+            host_settings: serde_json::from_value(value["host_settings"].clone()).unwrap_or_default(),
         })
     }
 }

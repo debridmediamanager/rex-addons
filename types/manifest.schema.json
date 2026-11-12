@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/debridmediamanager/rex-addons/main/types/manifest.schema.json",
   "title": "rex-addons manifest.json",
-  "description": "What an addon is, for rex-addons 0.6. The rules are the ones installing checks; four it checks that this file can't are that each config key is listed once, that requires doesn't name the addon's own id, that a select's option values are each given once, and that its default is one of them. https://github.com/debridmediamanager/rex-addons/blob/main/docs/writing-addons.md#manifestjson",
+  "description": "What an addon is, for rex-addons 0.7. The rules are the ones installing checks; four it checks that this file can't are that each config key is listed once, that requires doesn't name the addon's own id, that a select's option values are each given once, and that its default is one of them. https://github.com/debridmediamanager/rex-addons/blob/main/docs/writing-addons.md#manifestjson",
   "type": "object",
   "required": ["id", "name", "version"],
   "properties": {
@@ -30,7 +30,7 @@
       "pattern": "^[0-9]+(\\.[0-9]+)*$"
     },
     "hosts": {
-      "description": "The websites fetch() may reach, and that open() links may point at: example.com exactly, *.example.com for anything under it, or * for any public website. This device (127.0.0.1, localhost) is never reachable. An address on a private network is reachable only when you list it exactly; never through * or *.example.com.",
+      "description": "The websites fetch() may reach, and that open() links may point at: example.com exactly, *.example.com for anything under it, or * for any public website. This device (127.0.0.1, localhost) is never reachable. An address on a private network is reachable only when you list it exactly, or the person types it into a host setting (that port only); never through * or *.example.com.",
       "type": ["array", "null"],
       "items": {
         "type": "string",
@@ -48,7 +48,7 @@
       "minimum": 5
     },
     "host": {
-      "description": "The lowest rex-addons version your addon needs, such as \"0.2\". 0.2: sleep, atob, btoa, URL, URLSearchParams, hash, hmac, bytes(), a binary body. 0.3: sign_in. 0.4: playlists from open(). 0.5: \"kind\": \"spotify\", exports, requires. 0.6: select settings, storage.keys, TextEncoder, TextDecoder, crypto, md5 and bytes in hash and hmac, ctx.host, ctx.addon, ctx.reason, RETRY_AFTER.",
+      "description": "The lowest rex-addons version your addon needs, such as \"0.2\". 0.2: sleep, atob, btoa, URL, URLSearchParams, hash, hmac, bytes(), a binary body. 0.3: sign_in. 0.4: playlists from open(). 0.5: \"kind\": \"spotify\", exports, requires. 0.6: select settings, storage.keys, TextEncoder, TextDecoder, crypto, md5 and bytes in hash and hmac, ctx.host, ctx.addon, ctx.reason, RETRY_AFTER. 0.7: host settings.",
       "type": ["string", "null"],
       "pattern": "^[0-9]+(\\.[0-9]+)*$"
     },
@@ -104,6 +104,13 @@
       }
     },
     {
+      "if": { "required": ["config"], "properties": { "config": { "type": "array", "contains": { "type": "object", "required": ["type"], "properties": { "type": { "const": "host" } } } } } },
+      "then": {
+        "required": ["host"],
+        "properties": { "host": { "$ref": "#/definitions/host_0_7" } }
+      }
+    },
+    {
       "if": {
         "anyOf": [
           { "required": ["sign_in"], "properties": { "sign_in": { "type": "object", "required": ["kind"], "properties": { "kind": { "const": "spotify" } } } } },
@@ -133,6 +140,11 @@
       "type": "string",
       "pattern": "^(0*[1-9][0-9]*(\\.[0-9]+)*|0+\\.0*([6-9]|[1-9][0-9]+)(\\.[0-9]+)*)$"
     },
+    "host_0_7": {
+      "description": "A host setting needs \"host\": \"0.7\" or newer.",
+      "type": "string",
+      "pattern": "^(0*[1-9][0-9]*(\\.[0-9]+)*|0+\\.0*([7-9]|[1-9][0-9]+)(\\.[0-9]+)*)$"
+    },
     "setting": {
       "type": "object",
       "required": ["key", "type"],
@@ -147,8 +159,8 @@
           "type": "string"
         },
         "type": {
-          "description": "text, secret (shown masked), bool, number, list (a list of text) or select (one of its options; needs \"host\": \"0.6\").",
-          "enum": ["text", "secret", "bool", "number", "list", "select"]
+          "description": "text, secret (shown masked), bool, number, list (a list of text), select (one of its options; needs \"host\": \"0.6\") or host (an address the person types, such as 192.168.1.20:8096: the addon may then reach that host on that port; no default; needs \"host\": \"0.7\").",
+          "enum": ["text", "secret", "bool", "number", "list", "select", "host"]
         },
         "options": {
           "description": "A select's choices, such as [{\"value\": \"1080\", \"label\": \"1080p\"}]: the app shows each label, your code gets the value. Each value once.",
@@ -183,6 +195,7 @@
         { "if": { "properties": { "type": { "const": "bool" } } }, "then": { "properties": { "default": { "type": ["boolean", "null"] } } } },
         { "if": { "properties": { "type": { "const": "number" } } }, "then": { "properties": { "default": { "type": ["number", "null"] } } } },
         { "if": { "properties": { "type": { "const": "list" } } }, "then": { "properties": { "default": { "type": ["array", "null"], "items": { "type": "string" } } } } },
+        { "if": { "properties": { "type": { "const": "host" } } }, "then": { "properties": { "default": { "type": "null" } } } },
         {
           "if": { "properties": { "type": { "const": "select" } } },
           "then": { "required": ["options"], "properties": { "default": { "type": ["string", "null"] }, "options": { "type": "array", "minItems": 1 } } },

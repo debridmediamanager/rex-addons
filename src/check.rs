@@ -130,7 +130,7 @@ fn check(folder: &Path, config: Option<&str>, open: Option<&str>, ffprobe: Optio
             temp.join("storage.json")
         }
     }));
-    let env = app.env(&id, &manifest, &source, storage, true);
+    let env = app.env(&id, &manifest, &config, &source, storage, true);
     let shown = |value: &Json| app::masked(&id, &serde_json::to_string_pretty(value).unwrap());
 
     let mut failed = false;
@@ -159,7 +159,7 @@ fn check(folder: &Path, config: Option<&str>, open: Option<&str>, ffprobe: Optio
             Err(error) => failed = fail(&format!("open({item:?}): {}", app::masked(&id, &error))),
             Ok(answer) => {
                 println!("open({item:?}) returned:\n{}", shown(&answer));
-                match app::opened_from(&answer, &manifest) {
+                match app::opened_from(&answer, &manifest, &env.hosts) {
                     Ok(opened) if opened.playlists.is_some() => ok("open(): playlists, every link in them on the addon's hosts"),
                     Ok(_) => ok("open(): a link on the addon's hosts"),
                     Err(error) => failed = fail(&app::masked(&id, &error)),

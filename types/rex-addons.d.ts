@@ -1,4 +1,4 @@
-// What an addon's main.js can use inside rex-addons 0.6, for your editor: autocomplete and, with
+// What an addon's main.js can use inside rex-addons 0.7, for your editor: autocomplete and, with
 // `// @ts-check` at the top of main.js, a warning where code uses something that isn't there.
 // Plain JavaScript (ES2022) plus the globals below, and nothing else: no DOM, no Node, no timers.
 // The guide: https://github.com/debridmediamanager/rex-addons/blob/main/docs/writing-addons.md
@@ -41,7 +41,7 @@ interface Addon<Config = AddonConfig> {
 interface AddonContext<Config = AddonConfig> {
   /** The settings, each one its saved value or its default (`null` with neither). */
   config: Config;
-  /** This rex-addons' version, such as `"0.6.0"`. rex-addons 0.6. */
+  /** This rex-addons' version, such as `"0.7.0"`. rex-addons 0.6. */
   host: string;
   /** Which addon this is, from its manifest. rex-addons 0.6. */
   addon: { id: string; version: string };
@@ -58,7 +58,7 @@ interface ItemsContext<Config = AddonConfig> extends AddonContext<Config> {
   reason: "schedule" | "retry" | "manual" | "settings" | "install" | "sign_in";
 }
 
-/** A setting's value by its `type`: `text`, `secret` and `select` a string (a `select` one of its options' values), `bool` a boolean, `number` a number, `list` a list of strings. */
+/** A setting's value by its `type`: `text`, `secret` and `select` a string (a `select` one of its options' values), `host` the address as the person typed it, whose host and port your addon may reach (rex-addons 0.7), `bool` a boolean, `number` a number, `list` a list of strings. */
 type AddonConfig = { [key: string]: any };
 
 /** What `open()` returns. The link must be on your `hosts`. */

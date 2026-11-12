@@ -204,7 +204,7 @@ fn bytes(app: &Arc<App>, request: Request, rest: &str) {
     let item = {
         let addons = app.addons.lock().unwrap();
         let addon = addons.get(id).filter(|a| a.enabled);
-        let find = |path: &[String]| addon.and_then(|a| Some((a.paths.get(&path.join("/"))?.clone(), a.manifest.hosts.clone())));
+        let find = |path: &[String]| addon.and_then(|a| Some((a.paths.get(&path.join("/"))?.clone(), a.manifest.reach(&a.config))));
         // An item's own path, or a playlist under it.
         find(&decoded).map(|(item, hosts)| (item, hosts, None))
             .or_else(|| find(&decoded[..decoded.len() - 1]).filter(|_| decoded.len() > 1).map(|(item, hosts)| (item, hosts, decoded.last().cloned())))
@@ -536,7 +536,7 @@ mod tests {
         });
         let source = format!("export default {{ items() {{ return []; }}, open() {{ return {{ url: '{link}', headers: {{ Referer: 'https://archive.org/' }} }}; }} }};");
         let (app, addr) = start("127.0.0.1:0", json!([lan.to_string()]), &source);
-        let token = app.prober.hold(crate::probe::Relay { url: link, headers: Vec::new(), hosts: net::Hosts(vec![lan.to_string()]), playlists: None });
+        let token = app.prober.hold(crate::probe::Relay { url: link, headers: Vec::new(), hosts: net::Hosts::from(vec![lan.to_string()]), playlists: None });
         for path in [format!("/relay/{token}/his_girl_friday.mp4"), "/bytes/demo/films/a%20film.mp4".to_string()] {
             for answer in &exchange {
                 let range = answer["range"].as_str().unwrap();
@@ -654,6 +654,182 @@ mod tests {
         assert_eq!(last["lines"], json!([all["lines"].as_array().unwrap().last().unwrap()]));
         assert_eq!(read("?lines=many").0, 400);
         assert_eq!(status(agent().get(&format!("http://{addr}/api/addons/nope/log")).call()).status(), 404);
+    }
+
+    /// An addon for a server of the person's own: its `server` host setting is where it fetches
+    /// and plays from, its links needing a header so every read goes through its sandboxed client.
+    /// `b` always opens `fixed`; `c` a private address nobody typed; `d` the next port of the
+    /// address typed.
+    fn home_addon(fixed: &str) -> (Arc<App>, SocketAddr) {
+        let manifest = json!({"id": "home", "name": "Home", "version": "1.0.0", "host": "0.7", "hosts": ["*"],
+            "config": [{"key": "server", "label": "Server", "type": "host", "required": true}]});
+        let source = format!(
+            r#"const base = (ctx) => {{ if (!ctx.config.server) throw new Error("set Server first"); return /^https?:\/\//.test(ctx.config.server) ? ctx.config.server : "http://" + ctx.config.server; }};
+               export default {{
+                 async items(ctx) {{ return [await (await fetch(base(ctx) + "/a.mp4")).text()]; }},
+                 open(id, ctx) {{ return {{ url: {{ a: () => base(ctx) + "/a.mp4", b: () => "{fixed}", c: () => "http://192.168.255.254/c.mp4",
+                   d: () => {{ const u = new URL(base(ctx)); u.port = String(Number(u.port) + 1); return u.href + "d.mp4"; }} }}[id](), headers: {{ "X-Home": "1" }} }}; }} }};"#
+        );
+        let (app, addr) = start_manifest("127.0.0.1:0", manifest, &source, None);
+        let mut addons = app.addons.lock().unwrap();
+        let paths = &mut addons.get_mut("home").unwrap().paths;
+        paths.insert("films/b.mp4".into(), "b".into());
+        paths.insert("films/c.mp4".into(), "c".into());
+        paths.insert("films/d.mp4".into(), "d".into());
+        drop(addons);
+        (app, addr)
+    }
+
+    /// The address typed into a host setting is reachable, from fetch() and from open()'s links,
+    /// though `*` never reaches a private network; nothing else private is, and once the setting
+    /// changes the old address isn't either.
+    #[test]
+    fn a_host_setting_reaches_the_host_typed_and_no_other() {
+        let Some(lan) = lan_ip() else {
+            eprintln!("SKIP: no network address for the person's server (loopback is never fetched)");
+            return;
+        };
+        let upstream = tiny_http::Server::http("0.0.0.0:0").unwrap();
+        let typed = format!("{lan}:{}", upstream.server_addr().to_ip().unwrap().port());
+        std::thread::spawn(move || {
+            for request in upstream.incoming_requests() {
+                let header_sent = request.headers().iter().any(|h| h.field.equiv("X-Home"));
+                let _ = request.respond(Response::from_string(if header_sent { "film" } else { "fetched" }));
+            }
+        });
+        let (app, addr) = home_addon(&format!("http://{typed}/a.mp4"));
+        let read = |path: &str| {
+            let response = status(agent().get(&format!("http://{addr}{path}")).call());
+            (response.status(), response.into_string().unwrap())
+        };
+        let config = |value: Json| {
+            let response = status(agent().put(&format!("http://{addr}/api/addons/home/config")).send_string(&json!({"server": value}).to_string()));
+            (response.status(), serde_json::from_str::<Json>(&response.into_string().unwrap()).unwrap())
+        };
+        let fetched = |app: &Arc<App>| {
+            let addons = app.addons.lock().unwrap();
+            let addon = &addons["home"];
+            let env = app.env("home", &addon.manifest, &addon.config, &addon.source, Arc::new(crate::sandbox::Storage::open("/dev/null".into())), false);
+            crate::sandbox::call(&env, "items", &[app::call_ctx(&addon.manifest, &addon.config)], crate::sandbox::OPEN)
+        };
+        // Nothing typed: the same address is out of reach.
+        let (code, body) = read("/bytes/home/films/b.mp4");
+        assert_eq!(code, 502);
+        assert!(body.contains(&format!("http://{typed}/a.mp4, which is not on the addon's hosts")), "{body}");
+
+        let (code, answer) = config(json!(typed));
+        assert_eq!((code, &answer["config"]["server"]), (200, &json!(typed)));
+        let shown: Json = serde_json::from_str(&read("/api/addons/home").1).unwrap();
+        assert_eq!((&shown["hosts"], &shown["granted_hosts"]), (&json!(["*"]), &json!([typed])));
+        assert_eq!(read("/bytes/home/films/a%20film.mp4"), (200, "film".to_string()));
+        assert_eq!(read("/bytes/home/films/b.mp4"), (200, "film".to_string()));
+        assert_eq!(fetched(&app).unwrap(), json!(["fetched"]));
+        // Another private address, which nobody typed.
+        let (code, body) = read("/bytes/home/films/c.mp4");
+        assert_eq!(code, 502);
+        assert!(body.contains("http://192.168.255.254/c.mp4, which is not on the addon's hosts"), "{body}");
+        // Another port of the address typed.
+        let port: u16 = typed.rsplit_once(':').unwrap().1.parse().unwrap();
+        let (code, body) = read("/bytes/home/films/d.mp4");
+        assert_eq!(code, 502);
+        assert!(body.contains(&format!("which is not on the addon's hosts: its settings allow {lan} on port {port} only, not {}", port + 1)), "{body}");
+
+        // Typed elsewhere: the old address is out of reach again, cached open() or not.
+        assert_eq!(config(json!("http://nas.invalid:8096")).0, 200);
+        let (code, body) = read("/bytes/home/films/b.mp4");
+        assert_eq!(code, 502);
+        assert!(body.contains("which is not on the addon's hosts"), "{body}");
+        assert_eq!(read("/bytes/home/films/a%20film.mp4").0, 502);
+        assert!(fetched(&app).unwrap_err().contains("nas.invalid"));
+        let shown: Json = serde_json::from_str(&read("/api/addons/home").1).unwrap();
+        assert_eq!(shown["granted_hosts"], json!(["nas.invalid:8096"]));
+    }
+
+    /// What a PUT refuses for a host setting, with what the app shows; this device's own ports
+    /// first. Nothing refused is saved.
+    #[test]
+    fn host_settings_refuse_what_is_no_host_or_this_device() {
+        let (_, addr) = home_addon("http://192.168.255.254/b.mp4");
+        let url = format!("http://{addr}/api/addons/home/config");
+        let device = "Server: that is this device, which addons never reach";
+        let shape = "Server: give an address such as 192.168.1.20:8096 or http://nas.local:8096";
+        for (typed, says) in [
+            (json!(format!("127.0.0.1:{}", addr.port())), device),
+            (json!(format!("http://localhost:{}/api/status", addr.port())), device),
+            (json!("127.0.0.1:32400"), device),
+            (json!("[::1]:32400"), device),
+            (json!("[::ffff:127.0.0.1]:32400"), device),
+            (json!("0.0.0.0:32400"), device),
+            (json!("*"), shape),
+            (json!("*.lan"), shape),
+            (json!("my nas"), shape),
+            (json!("ftp://nas.lan"), "Server: give an http:// or https:// address"),
+            (json!("admin:hunter2@nas.lan"), "Server: leave the user name and password out of the address"),
+            (json!(8096), "Server: must be an address, as text"),
+        ] {
+            let refused = status(agent().put(&url).send_string(&json!({"server": typed}).to_string()));
+            assert_eq!(refused.status(), 400, "{typed}");
+            assert_eq!(serde_json::from_str::<Json>(&refused.into_string().unwrap()).unwrap()["error"], says, "{typed}");
+        }
+        let shown: Json = serde_json::from_str(&status(agent().get(&format!("http://{addr}/api/addons/home")).call()).into_string().unwrap()).unwrap();
+        assert_eq!((&shown["config"]["server"], &shown["granted_hosts"]), (&Json::Null, &json!([])));
+    }
+
+    /// addons.call: each addon reaches its own grant only. The callee runs with its own, never the
+    /// caller's; the caller can't reach the callee's; a link the callee returns on its own grant
+    /// is refused in the caller's open().
+    #[test]
+    fn addons_called_reach_only_their_own_grant() {
+        let Some(lan) = lan_ip() else {
+            eprintln!("SKIP: no network address for the servers (loopback is never fetched)");
+            return;
+        };
+        let serve = |says: &'static str| {
+            let server = tiny_http::Server::http("0.0.0.0:0").unwrap();
+            let port = server.server_addr().to_ip().unwrap().port();
+            std::thread::spawn(move || {
+                for request in server.incoming_requests() {
+                    let _ = request.respond(Response::from_string(says));
+                }
+            });
+            format!("{lan}:{port}")
+        };
+        let (mine, theirs) = (serve("caller's server"), serve("callee's server"));
+        let config = json!([{"key": "server", "label": "Server", "type": "host"}]);
+        let peek = "async peek(url) { try { return await (await fetch(url)).text(); } catch (e) { return e.message.split('\\n')[0]; } }";
+        let (app, _) = start_manifest(
+            "127.0.0.1:0",
+            json!({"id": "caller", "name": "Caller", "version": "1.0.0", "host": "0.7", "requires": ["callee"], "config": config}),
+            &format!("export default {{ items() {{ return []; }}, async open(id) {{ return {{ url: await addons.call('callee', 'link') }}; }}, {peek} }};"),
+            None,
+        );
+        app.install(
+            &json!({"id": "callee", "name": "Callee", "version": "1.0.0", "host": "0.7", "exports": ["link", "peek"], "config": config}),
+            &format!("export default {{ items() {{ return []; }}, open() {{}}, link(ctx) {{ return 'http://' + ctx.config.server + '/b.mp4'; }}, {peek} }};"),
+            None,
+        )
+        .unwrap();
+        app.set_config("caller", &json!({"server": mine})).unwrap();
+        app.set_config("callee", &json!({"server": theirs})).unwrap();
+        let peek_as = |id: &str, link: &str| {
+            let addons = app.addons.lock().unwrap();
+            let addon = &addons[id];
+            let env = app.env(id, &addon.manifest, &addon.config, &addon.source, Arc::new(crate::sandbox::Storage::open("/dev/null".into())), true);
+            crate::sandbox::call(&env, "peek", &[json!(link), app::call_ctx(&addon.manifest, &addon.config)], crate::sandbox::OPEN).unwrap()
+        };
+        let refused = |own: &str, other: &str| {
+            let (port, other_port) = (own.rsplit_once(':').unwrap().1, other.rsplit_once(':').unwrap().1);
+            json!(format!("fetch: {lan} is not in the addon's hosts: its settings allow {lan} on port {port} only, not {other_port}"))
+        };
+        assert_eq!(peek_as("caller", &format!("http://{mine}/")), json!("caller's server"));
+        assert_eq!(peek_as("caller", &format!("http://{theirs}/")), refused(&mine, &theirs));
+        assert_eq!(peek_as("callee", &format!("http://{theirs}/")), json!("callee's server"));
+        assert_eq!(peek_as("callee", &format!("http://{mine}/")), refused(&theirs, &mine));
+        // Through addons.call, the callee is still itself.
+        assert_eq!(app.call_export("caller", "callee", "peek", vec![json!(format!("http://{mine}/"))]).unwrap(), refused(&theirs, &mine));
+        assert_eq!(app.call_export("caller", "callee", "peek", vec![json!(format!("http://{theirs}/"))]).unwrap(), json!("callee's server"));
+        let error = app.open("caller", "a").err().unwrap();
+        assert!(error.starts_with(&format!("open() returned http://{theirs}/b.mp4, which is not on the addon's hosts")), "{error}");
     }
 
     #[test]

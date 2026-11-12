@@ -57,10 +57,11 @@ JSON in and out. It answers only this device: the socket's own peer address must
 {"version": "0.1.0", "rex": {"url": "http://127.0.0.1:32400", "reachable": true},
  "addons": [{"id": "internet-archive", "name": "Internet Archive", "version": "1.1.0",
              "description": "...", "enabled": true, "repo": "github-com-debridmediamanager-rex-addons",
-             "hosts": ["archive.org", "*.archive.org"],
+             "hosts": ["archive.org", "*.archive.org"], "granted_hosts": [],
              "state": "idle", "items": 100, "held": 0, "last_sync": 1794326938, "error": null,
              "error_kind": null, "warnings": {"count": 0, "first": []},
-             "update_available": false, "update_hosts": null, "sign_in": null, "requires": []}]}
+             "update_available": false, "update_hosts": null, "update_host_settings": null,
+             "sign_in": null, "requires": []}]}
 ```
 
 | Field | Meaning |
@@ -73,8 +74,10 @@ JSON in and out. It answers only this device: the socket's own peer address must
 | `last_sync` | Unix seconds of the last sync that worked, or `null` |
 | `repo` | The id of the repository it was installed from, or `null` for a bundled one. It stays when that repository is removed |
 | `hosts` | The hosts its installed manifest lets it reach |
+| `granted_hosts` | What the person typed into its `host` settings grants, as `host:port`, each reachable on that port only, private network included: `["192.168.1.20:8096", "nas.local:80", "nas.local:443", "[fd00::5]:8920"]`. `[]` when none is set. What it reaches now is `hosts` and these |
 | `update_available` | Its repository offers a higher `version` |
 | `update_hosts` | When `update_available`, the hosts that version would reach, so the app can ask before an update widens them; `null` otherwise |
+| `update_host_settings` | When `update_available`, the labels of the `host` settings that version adds (a setting it turns into one counts, and its saved value is cleared), such as `["Server"]`; `[]` when none, `null` otherwise. Each is an address the person may be asked for, which the addon would then reach |
 | `requires` | One entry per addon its manifest `requires`: `{"id": "youtube", "ok": true, "reason": null}`, or `ok: false` with `reason` `"not installed"`, `"disabled"` or `"sign in needed"`, for the app to say what to do first. `[]` for an addon that requires none |
 | `sign_in` | `null` for an addon that needs no account. Else `{"label": "Sign in to Example", "kind": "code", "account": "name" or null, "pending": {"code": "ABCD-EFGH", "url": "https://example.com/device", "expires_at": 1794330057} or null, "error": "..." or null}`: `label` for the button; `kind` how it signs in, `code` or `spotify`; `account` the name it is signed in as (for Spotify the account's display name, else its username); `pending`, while a sign-in waits, the code to show and the address to type it at, until `expires_at` (Unix seconds), or for `spotify` `{"device": "rex", "expires_at": ...}`: the name to pick in the Spotify app ([below](#spotify-pairing)); `error` why the last sign-in failed or the website signed it out. An addon with `sign_in` and no `account` doesn't sync (its error is `sign in first`, kind `sign_in`) and isn't retried, and its titles answer `502` to rex. Read the addon every couple of seconds while `pending` is set: it turns `null` with `account` set once the person entered the code, or with `error` set when the sign-in failed or expired |
 
@@ -85,7 +88,9 @@ person deleted in a Plex app, which it no longer pushes) and `config`: every set
 saved value or default, a set `secret` answered as `"********"`. How to show each setting is in
 `manifest.config`, in order: its `key`, `label` and `type`, and as the manifest gives them its
 `default`, `required`, `help` (a line to show with it) and, for a `select`, `options`
-(`[{"value": "1080", "label": "1080p"}, ...]`: show the `label`s, send the `value`). A `list` the manifest marks
+(`[{"value": "1080", "label": "1080p"}, ...]`: show the `label`s, send the `value`). A `host`
+setting is an address the person types, answered as typed: show `granted_hosts`, which the addon
+will reach. A `list` the manifest marks
 `"secret": true` (the stremio addon's `addons`, whose links carry account tokens) is answered
 entry by entry: an http(s) link as `<scheme>://<host>/********`, anything else as `"********"`.
 
@@ -113,7 +118,23 @@ an entry sent back as it was answered keeps the saved entry it stands for (the f
 kept, so two links on one host both stay, in the order sent); any other entry is taken as typed.
 So the app can remove, reorder and add entries without ever seeing the saved ones. A key the manifest
 doesn't list, or a value of the wrong type, is `400`, as is a `select` value that isn't one of its
-options (`Highest quality: must be one of 1080, 720`). Answers `{"config": ...}` as `GET` shows it
+options (`Highest quality: must be one of 1080, 720`). A `host` setting takes text: blank (no
+address), `http(s)://name-or-ip[:port][/path]` or `name-or-ip[:port]`, an IPv6 address in `[ ]`.
+It grants its host on the port typed; with none, its scheme's (80 for `http://`, 443 for
+`https://`), and with neither a scheme nor a port both 80 and 443. Anything else is `400` with one
+of, after the label (`Server: ...`):
+
+| Error | For |
+|---|---|
+| `give an address such as 192.168.1.20:8096 or http://nas.local:8096` | Not one address: `*`, `*.lan`, spaces, `_`, an empty host, port 0 or over 65535 |
+| `give an http:// or https:// address` | Another scheme, such as `ftp://` |
+| `leave the user name and password out of the address` | `user:password@nas` |
+| `that is this device, which addons never reach` | `127.0.0.1` and all of 127/8 however written (`127.1`, `2130706433`), `localhost`, `*.localhost`, `[::1]`, `[::ffff:127.0.0.1]`, `0.0.0.0`, `[::]` |
+| `must be an address, as text` | Not text |
+
+A name that is accepted but leads to this device is refused when the addon connects.
+
+Answers `{"config": ...}` as `GET` shows it
 and starts a sync, which may remove more than half of the addon's titles (new settings can).
 
 ### `GET /api/addons/{id}/log`

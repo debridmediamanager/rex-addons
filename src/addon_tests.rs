@@ -62,7 +62,7 @@ fn serve() -> Option<Fixture> {
     let path = std::env::temp_dir().join(format!("rex-addons-stremio-{}.json", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let prober = Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap()));
-    Some(Fixture { hosts: Hosts(vec![lan.to_string()]), base, dead, storage: Arc::new(Storage::open(path)), prober })
+    Some(Fixture { hosts: Hosts::from(vec![lan.to_string()]), base, dead, storage: Arc::new(Storage::open(path)), prober })
 }
 
 impl Fixture {
@@ -70,7 +70,7 @@ impl Fixture {
         let env = Env {
             addon: "stremio",
             source: include_str!("../addons/stremio/main.js"),
-            hosts: &self.hosts,
+            hosts: self.hosts.clone(),
             storage: self.storage.clone(),
             prober: self.prober.clone(),
             spotify: None,
@@ -162,7 +162,7 @@ fn unread_fetches_are_closed_past_the_cap() {
          }}, open() {{}} }};",
         fx.base
     );
-    let env = Env { addon: "t", source: &source, hosts: &fx.hosts, storage: fx.storage.clone(), prober: fx.prober.clone(), spotify: None, calls: None };
+    let env = Env { addon: "t", source: &source, hosts: fx.hosts.clone(), storage: fx.storage.clone(), prober: fx.prober.clone(), spotify: None, calls: None };
     let got = sandbox::call(&env, "items", &[], sandbox::ITEMS).unwrap();
     assert_eq!(got, json!(["the body was already read, or closed after 32 newer unread ones", "Cinemeta"]));
 }
@@ -235,7 +235,7 @@ fn ffprobe_reads_through_the_relay() {
     let env = Env {
         addon: "t",
         source,
-        hosts: &Hosts(vec![lan]),
+        hosts: Hosts::from(vec![lan]),
         storage: Arc::new(Storage::open(root.join("storage.json"))),
         prober: app.prober.clone(),
         spotify: None,

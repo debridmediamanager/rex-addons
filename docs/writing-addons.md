@@ -33,8 +33,8 @@ that talks to rex's feed API directly is a rex addon too: see
 | `id` | Lowercase letters, digits and `-`, starting with a letter or digit, at most 64 characters. It's the addon's name in rex too (`addon-my-films`), so never change it |
 | `name`, `description` | What people see in the app |
 | `version` | Numbers and dots. Raise it with every change: people see an update when the version in your repository is higher than theirs |
-| `hosts` | The websites `fetch()` may reach, and that `open()` links may point at: `example.com` exactly, `*.example.com` for anything under it, or `*` for any public website. This device (`127.0.0.1`, `localhost`) is never reachable. An address on a private network (a NAS at `192.168.1.20`, a Tailscale address) is reachable only when you list it exactly, by its address or by a name that leads to it; never through `*` or `*.example.com` |
-| `config` | The settings the app shows. Each has a `key` (letters, digits and `_`, each key once), a `label`, a `type` (`text`, `secret`, `bool`, `number`, `list`, a list of text, or `select`, one of its `options`), and optionally a `default`, `required: true` and `help`, a line of text the app shows with it. A `secret` is shown masked; a `list` with `secret: true` shows only each link's website, for links that carry a key. A `select` has `options`, such as `[{"value": "1080", "label": "1080p"}, {"value": "720", "label": "720p"}]`: each `value` is text, given once, and its `label` is what the app shows. Your code gets the `value`, always one of them: one a newer version of your addon drops gives the `default` |
+| `hosts` | The websites `fetch()` may reach, and that `open()` links may point at: `example.com` exactly, `*.example.com` for anything under it, or `*` for any public website. This device (`127.0.0.1`, `localhost`) is never reachable. An address on a private network (a NAS at `192.168.1.20`, a Tailscale address) is reachable only when you list it exactly, by its address or by a name that leads to it, or when the person types it into a `host` setting ([below](#a-server-on-your-home-network)); never through `*` or `*.example.com` |
+| `config` | The settings the app shows. Each has a `key` (letters, digits and `_`, each key once), a `label`, a `type` (`text`, `secret`, `bool`, `number`, `list`, a list of text, `select`, one of its `options`, or `host`, an address the person types, which your addon may then reach: [below](#a-server-on-your-home-network)), and optionally a `default` (never for a `host`), `required: true` and `help`, a line of text the app shows with it. A `secret` is shown masked; a `list` with `secret: true` shows only each link's website, for links that carry a key. A `select` has `options`, such as `[{"value": "1080", "label": "1080p"}, {"value": "720", "label": "720p"}]`: each `value` is text, given once, and its `label` is what the app shows. Your code gets the `value`, always one of them: one a newer version of your addon drops gives the `default` |
 | `refresh_minutes` | How often `items()` runs. Default 360, at least 5 |
 | `host` | Optional: the lowest rex-addons version your addon needs, such as `"0.2"` ([below](#which-rex-addons-it-needs)) |
 | `directories` | Optional: libraries of the addon's own, in rex's [`directories`](https://github.com/debridmediamanager/rex/blob/main/docs/feed-api.md#libraries-a-source-declares) shape, such as `[{"name": "youtube", "shows": "YouTube"}]`: titles whose `path` starts with `youtube/` go to a TV library called YouTube instead of your Movies or TV Shows. rex-addons sends it when the addon registers |
@@ -58,6 +58,7 @@ repository's list. rex-addons 0.1 doesn't know the field.
 | `0.5` | `"kind": "spotify"`, `exports`, `requires` | Installing refuses it |
 | `0.6` | `select` settings | Installing refuses it |
 | `0.6` | `storage.keys`, `TextEncoder`, `TextDecoder`, `crypto`, `md5` and bytes in `hash` and `hmac`, `ctx.host`, `ctx.addon`, `ctx.reason`, `RETRY_AFTER` | Not checked: it installs, and fails where it uses them on an older rex-addons (`RETRY_AFTER` is just an error there, tried again in 5 minutes) |
+| `0.7` | `host` settings | Installing refuses it |
 
 A setting's `help` needs no `host`: an older rex-addons doesn't show it.
 
@@ -76,7 +77,7 @@ argument:
 | | |
 |---|---|
 | `ctx.config` | The settings, each one its saved value or its default |
-| `ctx.host` | This rex-addons' version, such as `"0.6.0"` |
+| `ctx.host` | This rex-addons' version, such as `"0.7.0"` |
 | `ctx.addon` | `{id, version}`, from your manifest |
 | `ctx.reason` | Only for `items()`: why this sync runs ([below](#why-a-sync-runs)) |
 
@@ -370,6 +371,75 @@ export default {
   },
 };
 ```
+
+## A server on your home network
+
+An addon for the person's own server (Jellyfin, Navidrome, a NAS over WebDAV) can't list its
+address in `hosts`: you don't know it. Give it a `host` setting instead, and the person types
+the address in the app: `192.168.1.20:8096`, `http://nas.local:8096/jellyfin` or `https://[fd00::5]:8920`.
+That host, on that port only, is then reachable as if your manifest listed it exactly:
+`fetch()`, each redirect, `open()` links, playlists and `ffprobe()`, until the person types
+another address. Your code gets the text as typed, in `ctx.config`, and builds its links from it.
+
+| Typed | Reachable |
+|---|---|
+| `192.168.1.20:8096`, `http://192.168.1.20:8096/jellyfin` | `192.168.1.20` on port 8096 |
+| `http://nas.local`, `https://nas.local` | `nas.local` on port 80, or 443 |
+| `nas.local`, with no scheme and no port | `nas.local` on port 80 and 443, as your code may put either scheme before it |
+| `[fd00::5]:8920` | `fd00::5` on port 8920 |
+
+A link or redirect to another port of that host is refused, naming the port: so a server that
+redirects from `:8096` to `:8920` needs both typed, in two settings.
+
+```json
+{
+  "id": "home-videos",
+  "name": "Home videos",
+  "version": "1.0.0",
+  "host": "0.7",
+  "config": [
+    {"key": "server", "label": "Server", "type": "host", "required": true, "help": "Such as 192.168.1.20:8080"}
+  ]
+}
+```
+
+```js
+// A plain file server whose /videos.json lists [{"id": "beach", "title": "Beach 2024", "file": "beach.mp4"}].
+const base = (ctx) => (/^https?:\/\//.test(ctx.config.server) ? ctx.config.server : `http://${ctx.config.server}`).replace(/\/$/, "");
+
+export default {
+  async items(ctx) {
+    const answer = await fetch(`${base(ctx)}/videos.json`);
+    if (!answer.ok) throw new Error(`the server answered ${answer.status}`);
+    return (await answer.json()).map((video) => ({
+      id: video.id,
+      path: `home-videos/${video.id}/${video.file}`,
+      display: { title: video.title },
+    }));
+  },
+
+  async open(id, ctx) {
+    const video = (await (await fetch(`${base(ctx)}/videos.json`)).json()).find((one) => one.id === id);
+    if (!video) throw new Error(`no video ${id}`);
+    return { url: `${base(ctx)}/${encodeURIComponent(video.file)}` };
+  },
+};
+```
+
+- Saving the setting refuses anything that isn't one `http(s)` address: no `*`, no user name or
+  password in it, and never this device (`127.0.0.1`, `localhost`, `[::1]`). A server on the same
+  device is typed by its network address. A name that turns out to lead to this device is still
+  refused, when the addon connects.
+- Only what the person typed counts: a `host` setting has no `default`, and an update that turns
+  another setting into a `host` setting clears it, so it is typed again.
+- Several `host` settings each add their own host and port. One that's empty adds nothing; with
+  `required: true` the sync then fails with `set Server first`.
+- On the device rex runs on, only the port typed is reached, so a server there doesn't hand the
+  addon rex or rex-addons. But an address typed with rex's own port (`192.168.1.20:32400`) gives
+  the addon rex's feed on that address, which takes any program on the network: titles in,
+  titles out. Type the server's own port.
+- Another addon calling yours through `addons.call` reaches only its own hosts, and a link you
+  return to it must be on them.
 
 ## Signing in with a code
 
@@ -669,7 +739,7 @@ build step:
   isn't there (`setTimeout`, `document`), a call with the wrong arguments, an item without a
   `path` and an `open()` that returns neither `{ url }` nor playlists.
 
-The types are rex-addons 0.6's, and they keep a browser's globals out even where a
+The types are rex-addons 0.7's, and they keep a browser's globals out even where a
 `jsconfig.json` asks for them. The [bundled addons](../addons) use both files (the YouTube addon
 only the schema).
 
@@ -692,7 +762,11 @@ only the schema).
 | `items() never finished: it waits on something that never comes (there are no timers)` | A promise nothing resolves, such as one waiting on `setTimeout`. Use `await sleep(ms)` |
 | `out of memory` | The call went past 64 MB |
 | `fetch: example.com is not in the addon's hosts` | Add the host to `hosts`. A redirect to another host needs that one too |
-| `fetch: nas.lan: ...: nas.lan is on this device or a private network` | Listed through a wildcard, or on this device. List a private address exactly ([`hosts`](#manifestjson)) |
+| `fetch: nas.lan: ...: nas.lan is on this device or a private network` | Listed through a wildcard, or on this device. List a private address exactly ([`hosts`](#manifestjson)), or let the person type it ([a server on your home network](#a-server-on-your-home-network)) |
+| `fetch: 192.168.1.20 is not in the addon's hosts`, from an addon with a `host` setting | The setting is empty or names another address, or your code builds the link from something else |
+| `fetch: 192.168.1.20 is not in the addon's hosts: its settings allow 192.168.1.20 on port 8096 only, not 8920` | The link, or a redirect, goes to another port of the address typed. Have the person type that one too, in a setting of its own. Also in `open()` and playlist errors |
+| `Server: that is this device, which addons never reach` | The person typed `127.0.0.1`, `localhost` or the like: a server on the same device needs its network address, such as `192.168.1.20` |
+| `Server: give an address such as 192.168.1.20:8096 or http://nas.local:8096` | What was typed into a `host` setting isn't one address: no `*`, no spaces, an IPv6 address in `[ ]` |
 | `fetch: method OPTIONS is not allowed` | Only `GET`, `HEAD`, `POST`, `PUT`, `PATCH` and `DELETE` |
 | `the body was already read` | `text()`, `json()` and `bytes()` read the body once. Keep what the first one gave |
 | `the body was already read, or closed after 32 newer unread ones` | A response kept unread while 32 more were fetched ([more on fetch](#more-on-fetch)) |
@@ -708,6 +782,7 @@ only the schema).
 | `manifest: ...` | The manifest breaks a rule: the message says which ([manifest.json](#manifestjson)) |
 | `this addon needs rex-addons 0.5 or newer` | Its `host` is newer than this rex-addons |
 | `manifest: a select setting needs "host": "0.6" or newer` | Set `"host": "0.6"` or higher |
+| `manifest: a host setting needs "host": "0.7" or newer` | Set `"host": "0.7"` or higher |
 | `hash: crc32 is not md5, sha1, sha256 or sha512` | Only those four |
 | `TextDecoder: latin1 is not supported, only utf-8` | Decode other encodings yourself, from `bytes()` |
 | `WARN [host] dev <folder>: ...` | `--dev` couldn't install what you saved: the rest of the line says why. The last version that installed stays |

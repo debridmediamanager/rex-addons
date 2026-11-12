@@ -250,7 +250,7 @@ impl Rig {
             youtube.lock().unwrap().answer(function, args)
         });
         let env = Env {
-            addon: "spotify", source, hosts: &Hosts::default(), storage: self.storage.clone(),
+            addon: "spotify", source, hosts: Hosts::default(), storage: self.storage.clone(),
             prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())), spotify: Some(spotify), calls: Some(calls),
         };
         sandbox::call(&env, method, args, sandbox::ITEMS)

@@ -50,10 +50,7 @@ impl Prober {
         if !matches!(parsed.scheme(), "http" | "https") {
             return Err(format!("{}: only http and https", parsed.scheme()));
         }
-        let host = parsed.host_str().unwrap_or("");
-        if !hosts.allows(host) {
-            return Err(format!("{host} is not in the addon's hosts"));
-        }
+        hosts.check(&parsed)?;
         // The relay URL ends in the link's own file name, so ffprobe resolves a playlist's
         // relative segments under the relay.
         let name = parsed.path_segments().and_then(|mut s| s.next_back()).filter(|s| !s.is_empty()).unwrap_or("media").to_string();
@@ -232,11 +229,11 @@ impl Playlists {
         }
         let on_hosts = |uri: &str| -> Result<String, String> {
             let link = url::Url::parse(uri).map_err(|_| format!("{uri:.80} is no playlist of its own and no http(s) link"))?;
-            let host = link.host_str().unwrap_or("");
-            if matches!(link.scheme(), "http" | "https") && hosts.allows(host) {
+            let (host, port) = (link.host_str().unwrap_or(""), link.port_or_known_default().unwrap_or(0));
+            if matches!(link.scheme(), "http" | "https") && hosts.allows(host, port) {
                 Ok(uri.to_string())
             } else {
-                Err(format!("a link in its playlists, {}://{host}/..., is not on the addon's hosts", link.scheme()))
+                Err(format!("a link in its playlists, {}://{host}/..., is not on the addon's hosts{}", link.scheme(), hosts.port_note(host, port)))
             }
         };
         map_uris(master, |uri| if children.contains_key(uri) { Ok(uri.to_string()) } else { on_hosts(uri) })?;
@@ -288,7 +285,7 @@ mod tests {
 
     #[test]
     fn an_addons_playlists_are_served_as_written_their_children_beside_them() {
-        let hosts = Hosts(vec!["*.cdn.example.com".into()]);
+        let hosts = Hosts::from(vec!["*.cdn.example.com".into()]);
         let link = "https://r1.cdn.example.com/videoplayback?itag=137&n=x";
         let answer = json!({"playlist": MASTER_TEXT, "playlists": {"video.m3u8": media(link), "audio.m3u8": media(link)}});
         let playlists = Playlists::parse(&answer, &hosts).unwrap();
@@ -307,10 +304,15 @@ mod tests {
 
     #[test]
     fn an_addons_playlists_are_refused_unless_every_link_is_on_its_hosts() {
-        let hosts = Hosts(vec!["cdn.example.com".into()]);
+        // A host a setting granted counts on its port only.
+        let hosts = Hosts { listed: vec!["cdn.example.com".into()], granted: vec![("192.168.1.20".into(), 8096)] };
         let good = media("https://cdn.example.com/v.mp4");
+        let lan = media("http://192.168.1.20:8096/v.mp4");
+        assert!(Playlists::parse(&json!({"playlist": MASTER_TEXT, "playlists": {"video.m3u8": lan, "audio.m3u8": good}}), &hosts).is_ok());
         let refused = |answer: Json| Playlists::parse(&answer, &hosts).unwrap_err();
         let cases = [
+            (json!({"playlist": MASTER_TEXT, "playlists": {"video.m3u8": media("http://192.168.1.20:32400/v.mp4"), "audio.m3u8": good}}),
+             "http://192.168.1.20/..., is not on the addon's hosts: its settings allow 192.168.1.20 on port 8096 only, not 32400"),
             (json!({"playlist": MASTER_TEXT, "playlists": {"video.m3u8": media("https://evil.example/v.mp4"), "audio.m3u8": good}}), "https://evil.example/..., is not on the addon's hosts"),
             (json!({"playlist": MASTER_TEXT, "playlists": {"video.m3u8": media("http://127.0.0.1:32400/rex/sources"), "audio.m3u8": good}}), "http://127.0.0.1/..., is not on the addon's hosts"),
             (json!({"playlist": MASTER_TEXT, "playlists": {"video.m3u8": media("file:///etc/passwd"), "audio.m3u8": good}}), "file:///..., is not on the addon's hosts"),
@@ -334,7 +336,7 @@ mod tests {
     #[test]
     fn without_ffprobe_or_off_the_hosts() {
         let prober = Prober::new(None, "127.0.0.1:32410".parse().unwrap());
-        let hosts = Hosts(vec!["cdn.example.com".into()]);
+        let hosts = Hosts::from(vec!["cdn.example.com".into()]);
         assert_eq!(prober.probe("https://cdn.example.com/a.mp4", vec![], &hosts).unwrap_err(), "ffprobe() is not available: rex-addons runs without --ffprobe");
         let prober = Prober::new(Some("ffprobe".into()), "127.0.0.1:32410".parse().unwrap());
         assert_eq!(prober.probe("https://elsewhere.example.org/a.mp4", vec![], &hosts).unwrap_err(), "elsewhere.example.org is not in the addon's hosts");

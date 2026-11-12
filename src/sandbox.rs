@@ -104,7 +104,8 @@ impl Storage {
 pub struct Env<'a> {
     pub addon: &'a str,
     pub source: &'a str,
-    pub hosts: &'a Hosts,
+    /// What it may reach: its manifest's hosts and the ones its settings grant.
+    pub hosts: Hosts,
     pub storage: Arc<Storage>,
     pub prober: Arc<Prober>,
     /// The `spotify` global, for an addon that signs in with Spotify: (`GET`, `POST` or `USER`,
@@ -415,7 +416,7 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
         })?,
     )?;
 
-    let agent = net::sandboxed_agent(env.hosts);
+    let agent = net::sandboxed_agent(&env.hosts);
     let hosts = env.hosts.clone();
     let bodies: Rc<RefCell<Vec<Option<ureq::Response>>>> = Rc::default();
     let (fetch_bodies, fetch_waited) = (bodies.clone(), waited.clone());
@@ -676,7 +677,7 @@ mod tests {
         let env = Env {
             addon: "test",
             source,
-            hosts: &Hosts(hosts.iter().map(|h| h.to_string()).collect()),
+            hosts: Hosts::from(hosts.iter().map(|h| h.to_string()).collect::<Vec<_>>()),
             storage: Arc::new(Storage::open(path)),
             prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())),
             spotify: None,
@@ -724,7 +725,7 @@ mod tests {
                  await addons.call('other', 'find', 'a song', 2, {x: [1]}), await addons.call('other', 'nothing'),
                  await thrown(() => spotify.get('/fail')), await thrown(() => addons.call('other', 'fail'))];
              }, open() {} };",
-            hosts: &Hosts::default(),
+            hosts: Hosts::default(),
             storage: Arc::new(Storage::open(PathBuf::from("/dev/null"))),
             prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())),
             spotify: Some(Arc::new(move |method: &str, path: &str, args: Vec<Json>| {
@@ -947,7 +948,7 @@ mod tests {
             let env = Env {
                 addon: "test",
                 source,
-                hosts: &Hosts::default(),
+                hosts: Hosts::default(),
                 storage: Arc::new(Storage::open(path.clone())),
                 prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())),
                 spotify: None,
@@ -974,7 +975,7 @@ mod tests {
         let env = Env {
             addon: "test",
             source: "export default { async items() { return await ffprobe('http://127.0.0.1:32400/library/parts/1/file.mp4'); }, open() {} };",
-            hosts: &Hosts(vec!["*".into()]),
+            hosts: Hosts::from(vec!["*".into()]),
             storage: Arc::new(Storage::open(PathBuf::from("/dev/null"))),
             prober: Arc::new(Prober::new(Some("ffprobe".into()), "127.0.0.1:9".parse().unwrap())),
             spotify: None,

@@ -323,7 +323,7 @@ fn serve(name: &str) -> Option<Rig> {
     let served = app.clone();
     std::thread::spawn(move || crate::server::serve(served, listener, None));
     let storage = Arc::new(Storage::open(root.join("storage.json")));
-    Some(Rig { hosts: Hosts(vec![lan.to_string()]), base, site, storage, app, root })
+    Some(Rig { hosts: Hosts::from(vec![lan.to_string()]), base, site, storage, app, root })
 }
 
 impl Rig {
@@ -336,7 +336,7 @@ impl Rig {
     }
 
     fn run(&self, source: &str, method: &str, args: &[Json]) -> Result<Json, String> {
-        let env = Env { addon: "youtube", source, hosts: &self.hosts, storage: self.storage.clone(), prober: self.app.prober.clone(), spotify: None, calls: None };
+        let env = Env { addon: "youtube", source, hosts: self.hosts.clone(), storage: self.storage.clone(), prober: self.app.prober.clone(), spotify: None, calls: None };
         sandbox::call(&env, method, args, sandbox::ITEMS)
     }
 
@@ -722,7 +722,7 @@ fn pure(js: &str) -> Json {
     let source = include_str!("../addons/youtube/main.js").replace("export default {", "const addon = {")
         + &format!("\nexport default {{ async items() {{ {js} }}, open() {{}} }};");
     let env = Env {
-        addon: "youtube", source: &source, hosts: &Hosts::default(), storage: Arc::new(Storage::open(PathBuf::from("/dev/null"))),
+        addon: "youtube", source: &source, hosts: Hosts::default(), storage: Arc::new(Storage::open(PathBuf::from("/dev/null"))),
         prober: Arc::new(crate::probe::Prober::new(None, "127.0.0.1:9".parse().unwrap())), spotify: None, calls: None,
     };
     sandbox::call(&env, "items", &[], sandbox::ITEMS).unwrap()

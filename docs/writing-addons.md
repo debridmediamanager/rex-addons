@@ -64,7 +64,6 @@ Each title is a rex feed item. The fields that matter most:
 | `kind`, `ids` | `"movie"` with `{"imdb": "tt…"}` or `{"tmdb": 123}`, and Plex names and pictures it. `"episode"` with `season` and `episode` and the **show's** ids for an episode |
 | `display` | `title`, `summary`, `date` (`YYYY-MM-DD` or `YYYY`), `thumb` (a poster URL), `art`. Shown for what Plex doesn't know. For an episode, also `show: {title, summary, poster, art}` |
 | `name` | The release name, shown as is for an unplaced episode's show |
-
 | `media_info` | What's in the file: ffprobe's output, as `ffprobe()` returns it. rex shows nothing it hasn't been told this about |
 
 The rest (`release`, `subtitles`, `collections`, `channel` for live TV, music `track`s and so on)
@@ -76,7 +75,8 @@ through your `open()` instead, and that probe is remembered by the title's `id`.
 
 ### open(id, ctx)
 
-Called when rex reads a title, and once before that when it's checked. Return where it plays from:
+Called when rex reads a title, and when rex-addons probes a title you sent without
+`media_info`. Return where it plays from:
 
 - `{ url }`: rex is sent straight there.
 - `{ url, headers }`: for a link that needs headers (a `Referer`, a token). rex-addons then
@@ -139,10 +139,10 @@ Limits, per call:
 | Memory | 64 MB |
 | JavaScript time | 30 s for `items()`, 10 s for `open()`. Time spent waiting on `fetch`, `ffprobe` or `sleep` doesn't count |
 | Whole call | 20 minutes for `items()`, 90 s for `open()`. A `fetch` or body read still waiting then fails |
-
-`signIn()`, `signInPoll()`, `signOut()` and functions other addons call get `open()`'s limits.
 | A fetched body | 16 MB |
 | `storage` | 16 MB in all, written to disk when the call ends |
+
+`signIn()`, `signInPoll()`, `signOut()` and functions other addons call get `open()`'s limits.
 
 ## A complete example
 

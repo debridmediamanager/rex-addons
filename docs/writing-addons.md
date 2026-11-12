@@ -328,10 +328,12 @@ somewhere else, such as YouTube ([calling another addon](#calling-another-addon)
 Your code gets a `spotify` global, talking to Spotify's own API (`spclient`) as Spotify's
 desktop app does, with the person's session. It is Spotify's own, undocumented API: paths can
 change without notice, so throw (and keep what rex has) when an answer isn't what you expect.
+The paths that list a library, and how to turn a uri into the id they take, are in
+[Listing a Spotify library](spotify.md).
 
 | Call | What it does |
 |---|---|
-| `spotify.user()` | The account's Spotify username, which the paths below take |
+| `spotify.user()` | The account's Spotify username, which those paths take |
 | `await spotify.get(path)` | `GET` the path, answered as JSON |
 | `await spotify.post(path, body)` | `POST` `body` as JSON, answered as JSON |
 
@@ -339,53 +341,6 @@ change without notice, so throw (and keep what rex has) when an answer isn't wha
 /metadata/4/track/...`, or, when Spotify no longer takes the sign-in, an error starting with
 `SIGN_IN_REQUIRED`, which signs the addon out if you let it through. librespot, which talks to
 Spotify for rex-addons, waits out a `429` by itself when Spotify asks for 10 seconds or less.
-
-What lists a library (measured 2026-11-11 with a Premium account; each answered in 40 to 260 ms
-and 20 track lookups in a row at 4 a second were all answered):
-
-| Path | Gives |
-|---|---|
-| `GET /playlist/v2/user/{user}/rootlist?decorate=revision,length,attributes,timestamp,owner` | The person's playlists: `contents.items[].uri` (`spotify:playlist:<id>`, plus folder markers), and in `contents.metaItems[]` each one's `attributes.name`, `attributes.picture` and `length` |
-| `GET /playlist/v2/playlist/{id}?decorate=length,attributes` | One playlist: `attributes.name`, `length`, and `contents.items[].uri` (tracks, episodes) with `attributes.timestamp`, when it was added. `contents.truncated` says when it holds only part (not seen with 82 tracks; untested past that) |
-| `POST /collection/v2/paging` `{"username": user, "set": "collection", "limit": 300}` | Liked songs (`spotify:track:` uris) and saved albums (`spotify:album:` uris) together, with `added_at`, and a `sync_token`. Past `limit` the answer should carry a `next_page_token` to send back as `pagination_token` (librespot's protocol says so; untested). `"set": "artist"` lists followed artists |
-| `GET /metadata/4/track/{gid}?market=from_token` | A track: `name`, `artist[].name`, `album` (`name`, `artist`, `date.year`, `cover_group.image[].file_id`), `number`, `disc_number`, `duration` (ms), `external_id` (`{"type": "isrc", "id": ...}`) |
-| `GET /metadata/4/album/{gid}?market=from_token` | An album: `name`, `artist`, `date`, `cover_group`, and `disc[].track[].gid` |
-
-A cover is `https://i.scdn.co/image/<file_id>`. `gid` is the id in hex; the uris carry it in
-base 62:
-
-```js
-const B62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-const gid = (uri) => {
-  let n = 0n;
-  for (const c of uri.split(":").pop()) n = n * 62n + BigInt(B62.indexOf(c));
-  return n.toString(16).padStart(32, "0");
-};
-
-export default {
-  async items(ctx) {
-    const user = spotify.user();
-    const library = await spotify.post("/collection/v2/paging", { username: user, set: "collection", limit: 300 });
-    const items = [];
-    for (const liked of library.items.filter((item) => item.uri.startsWith("spotify:track:"))) {
-      // A track doesn't change: look it up once.
-      let track = storage.get(liked.uri);
-      if (!track) {
-        track = await spotify.get(`/metadata/4/track/${gid(liked.uri)}?market=from_token`);
-        storage.set(liked.uri, { name: track.name, artist: track.artist[0].name, album: track.album.name, duration: track.duration });
-        track = storage.get(liked.uri);
-      }
-      items.push(/* a rex music track, played from wherever you find it */);
-    }
-    return items;
-  },
-  // ...
-};
-```
-
-Spotify's public Web API (`api.spotify.com`) is not offered: it wants a developer app of the
-person's own, and the session's tokens don't work there (measured: the old token service answers
-`Invalid client`, and a login5 token gets `429` from its first call).
 
 ## Calling another addon
 
@@ -420,15 +375,8 @@ const found = await addons.call("youtube", "findSong", { title: "...", artists: 
 - One level: an addon called by another cannot call a third.
 - A link it returns that your `open()` returns must be on **your** `hosts`, as always.
 
-Installing checks that `main.js` exports each function `exports` names.
-
-The [YouTube addon](../addons/youtube/main.js) exports two, which the
-[Spotify addon](../addons/spotify/main.js) plays its songs with:
-
-| Function | What it does |
-|---|---|
-| `findSong({title, artists, album, duration_ms, isrc})` | A recording of the song on YouTube, or `null`: `{video_id, title, channel, duration_ms, kind, score, via, size, bitrate, mime, sample_rate, channels}`. `kind` is `song` for YouTube Music's own recording, `video` for an upload; the length, size and rates are its AAC file's, from one player call. A search and one or two player calls; ask for each song once and keep the answer |
-| `songAudio(video_id)` | Its AAC file to play now: `{url, mime, bitrate, duration_ms, size}`, a plain file read with `Range`, its link good for six hours. One player call |
+Installing checks that `main.js` exports each function `exports` names. What the YouTube addon
+exports, and what each function returns: [The YouTube addon's exports](youtube.md).
 
 ## A repository of addons
 

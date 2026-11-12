@@ -63,10 +63,38 @@ pub fn masked(tag: &str, text: &str) -> String {
     secrets.get(tag).into_iter().flatten().fold(text.to_string(), |text, secret| text.replace(secret.as_str(), MASK))
 }
 
-/// Writes a log line: stdout, or stderr for a warning or an error.
-pub fn emit(line: &str, problem: bool) {
+/// How many of each addon's last log lines `GET /api/addons/{id}/log` can show...
+pub const LOG_LINES: usize = 300;
+/// ...each cut to this many bytes: an addon can print megabytes in one line.
+const LOG_LINE_BYTES: usize = 4096;
+/// Each tag's last LOG_LINES lines as they were logged, with when (Unix seconds).
+static RECENT: Mutex<BTreeMap<String, VecDeque<(u64, String)>>> = Mutex::new(BTreeMap::new());
+
+/// The last `lines` lines logged about the addon `id`, oldest first.
+pub fn recent(id: &str, lines: usize) -> Json {
+    let recent = RECENT.lock().unwrap();
+    let kept = recent.get(id).into_iter().flatten();
+    let skip = kept.clone().count().saturating_sub(lines);
+    kept.skip(skip).map(|(at, line)| json!({"at": at, "line": line})).collect()
+}
+
+/// Writes a log line, already masked, about `tag` (an addon, a repository or `host`): stdout, or
+/// stderr for a warning or an error.
+pub fn emit(tag: &str, line: &str, problem: bool) {
     #[cfg(test)]
     LOGGED.lock().unwrap().push(line.to_string());
+    if tag != "host" {
+        let mut cut = line.len().min(LOG_LINE_BYTES);
+        while !line.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let mut recent = RECENT.lock().unwrap();
+        let kept = recent.entry(tag.to_string()).or_default();
+        if kept.len() == LOG_LINES {
+            kept.pop_front();
+        }
+        kept.push_back((now(), line[..cut].to_string()));
+    }
     if problem {
         eprintln!("{line}");
     } else {
@@ -78,11 +106,11 @@ pub fn emit(line: &str, problem: bool) {
 pub static LOGGED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 pub fn log(tag: &str, message: &str) {
-    emit(&format!("[{tag}] {}", masked(tag, message)), false);
+    emit(tag, &format!("[{tag}] {}", masked(tag, message)), false);
 }
 
 pub fn warn(tag: &str, message: &str) {
-    emit(&format!("WARN [{tag}] {}", masked(tag, message)), true);
+    emit(tag, &format!("WARN [{tag}] {}", masked(tag, message)), true);
 }
 
 pub fn now() -> u64 {
@@ -353,6 +381,7 @@ impl App {
             return Err("no such addon".into());
         }
         self.spotify.forget(id);
+        RECENT.lock().unwrap().remove(id);
         let rex = self.delete_source(id);
         std::fs::remove_dir_all(dir(self, id)).map_err(|e| e.to_string())?;
         self.set_removed(id, true);

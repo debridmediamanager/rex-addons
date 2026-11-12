@@ -409,8 +409,8 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
         Function::new(ctx.clone(), move |level: String, text: String| {
             let line = format!("[addon {addon}] {}", crate::app::masked(&addon, &text));
             match level.as_str() {
-                "info" => crate::app::emit(&line, false),
-                _ => crate::app::emit(&format!("{} {line}", level.to_uppercase()), true),
+                "info" => crate::app::emit(&addon, &line, false),
+                _ => crate::app::emit(&addon, &format!("{} {line}", level.to_uppercase()), true),
             }
         })?,
     )?;

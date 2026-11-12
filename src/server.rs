@@ -89,7 +89,8 @@ fn handle(app: &Arc<App>, mut request: Request, token: Option<&str>) {
         return;
     }
     let method = request.method().clone();
-    let response = match api(app, &method, &path, &body) {
+    let query = url.split_once('?').map_or("", |(_, query)| query);
+    let response = match api(app, &method, &path, query, &body) {
         Ok((status, answer)) => json_response(status, answer),
         Err((status, message)) => error(status, &message),
     };
@@ -112,7 +113,7 @@ fn detail(app: &App, id: &str) -> Answer {
     Ok((200, answer))
 }
 
-fn api(app: &Arc<App>, method: &Method, path: &str, body: &str) -> Answer {
+fn api(app: &Arc<App>, method: &Method, path: &str, query: &str, body: &str) -> Answer {
     let parts: Vec<&str> = path.trim_end_matches('/').split('/').skip(2).collect();
     let text = |body: &Json, key: &str| body[key].as_str().map(str::to_string).ok_or((400, format!("give {key}")));
     match (method, parts.as_slice()) {
@@ -139,6 +140,16 @@ fn api(app: &Arc<App>, method: &Method, path: &str, body: &str) -> Answer {
             detail(app, &id).map(|(_, answer)| (status, answer))
         }
         (Method::Get, ["addons", id]) => detail(app, id),
+        (Method::Get, ["addons", id, "log"]) => {
+            if !app.addons.lock().unwrap().contains_key(*id) {
+                return Err((404, "no such addon".into()));
+            }
+            let lines = match query.split('&').find_map(|pair| pair.strip_prefix("lines=")) {
+                None => app::LOG_LINES,
+                Some(n) => n.parse().map_err(|_| (400, "lines must be a whole number".to_string()))?,
+            };
+            Ok((200, json!({"lines": app::recent(id, lines)})))
+        }
         (Method::Delete, ["addons", id]) => {
             let answer = app.remove(id).map_err(|e| (if e == "no such addon" { 404 } else { 500 }, e))?;
             Ok((200, answer))
@@ -349,7 +360,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data);
         let app = App::new(data, "http://127.0.0.1:9".into(), addr, None, None);
         app.install(&manifest, source, None).unwrap();
-        app.addons.lock().unwrap().get_mut("demo").unwrap().paths.insert("films/a film.mp4".into(), "a".into());
+        app.addons.lock().unwrap().get_mut(manifest["id"].as_str().unwrap()).unwrap().paths.insert("films/a film.mp4".into(), "a".into());
         let served = app.clone();
         let token = token.map(str::to_string);
         std::thread::spawn(move || serve(served, server, token));
@@ -609,6 +620,40 @@ mod tests {
         let saved = crate::addons::read_json(&app.data.join("addons/demo/state.json")).unwrap();
         assert_eq!(saved["deleted"], json!([]));
         assert_eq!(status(agent().post(&format!("http://{addr}/api/addons/nope/restore")).call()).status(), 404);
+    }
+
+    /// An addon's recent log: its own console output and the host's lines about it, masked as
+    /// they were logged, the last `lines` of them; nothing of another addon's.
+    #[test]
+    fn an_addons_log_is_its_last_lines_as_logged() {
+        let (app, addr) = start_manifest(
+            "127.0.0.1:0",
+            json!({"id": "logged", "name": "Logged", "version": "1.0.0", "config": [{"key": "token", "label": "Token", "type": "secret"}]}),
+            "export default { items() { return []; }, open(id, ctx) { console.log('opening', id, 'with', ctx.config.token); console.warn('x'.repeat(10000)); throw new Error('nope'); } };",
+            None,
+        );
+        // Disabled, so the new settings start no sync whose lines would land among these.
+        app.addons.lock().unwrap().get_mut("logged").unwrap().enabled = false;
+        app.set_config("logged", &json!({"token": "SECRET-123"})).unwrap();
+        app::log("other", "another addon's line");
+        let _ = app.open("logged", "a");
+        app::warn("logged", "open(a): nope");
+        let read = |query: &str| -> (u16, Json) {
+            let response = status(agent().get(&format!("http://{addr}/api/addons/logged/log{query}")).call());
+            (response.status(), serde_json::from_str(&response.into_string().unwrap()).unwrap())
+        };
+        let (code, all) = read("");
+        assert_eq!(code, 200);
+        let lines: Vec<&str> = all["lines"].as_array().unwrap().iter().map(|l| l["line"].as_str().unwrap()).collect();
+        assert!(lines.contains(&"[addon logged] opening a with ********"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.starts_with("WARN [addon logged] xxx") && l.len() == 4096), "{lines:?}");
+        assert_eq!(lines.last(), Some(&"WARN [logged] open(a): nope"));
+        assert!(!lines.iter().any(|l| l.contains("SECRET-123") || l.contains("another addon")), "{lines:?}");
+        assert!(all["lines"][0]["at"].as_u64().unwrap() > 1_700_000_000);
+        let (_, last) = read("?lines=1");
+        assert_eq!(last["lines"], json!([all["lines"].as_array().unwrap().last().unwrap()]));
+        assert_eq!(read("?lines=many").0, 400);
+        assert_eq!(status(agent().get(&format!("http://{addr}/api/addons/nope/log")).call()).status(), 404);
     }
 
     #[test]

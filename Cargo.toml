@@ -16,6 +16,10 @@ percent-encoding = "2"
 # Already ureq's and rustls': a repository's pack is inflated and its objects hashed with them.
 flate2 = "1"
 ring = "0.17"
+# ring has no MD5, which older APIs still sign with: an addon's hash("md5") and hmac("md5").
+# hmac is already librespot-core's.
+md-5 = "0.10"
+hmac = "0.12"
 # Spotify sign-in by Connect pairing and the session a spotify addon lists with (src/spotify.rs).
 # Pinned to the master revision that paired and signed in on 2026-11-11 (the 0.8.0 release is
 # older). Pure-Rust TLS, so it cross-compiles for Android; no playback or discovery crates.

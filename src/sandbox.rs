@@ -218,8 +218,47 @@ const PRELUDE: &str = r#"
     toString() { return this.href; }
     toJSON() { return this.href; }
   }
-  const hash = (algorithm, text) => host.hash(String(algorithm), "", String(text), false);
-  const hmac = (algorithm, key, text) => host.hash(String(algorithm), String(key), String(text), true);
+  // Bytes as they are; anything else as text, in UTF-8.
+  const view = (value) => value instanceof ArrayBuffer ? new Uint8Array(value)
+    : ArrayBuffer.isView(value) ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength) : null;
+  const utf8 = (text) => host.encode(String(text).toWellFormed());
+  const bytesOf = (value) => view(value) ?? utf8(value);
+  const hash = (algorithm, data) => host.hash(String(algorithm), null, bytesOf(data), false);
+  const hmac = (algorithm, key, data) => host.hash(String(algorithm), bytesOf(key), bytesOf(data), true);
+  class TextEncoder {
+    get encoding() { return "utf-8"; }
+    encode(text = "") { return utf8(text); }
+  }
+  class TextDecoder {
+    constructor(label = "utf-8") {
+      if (!["utf-8", "utf8", "unicode-1-1-utf-8"].includes(String(label).trim().toLowerCase())) {
+        throw new RangeError(`TextDecoder: ${label} is not supported, only utf-8`);
+      }
+    }
+    get encoding() { return "utf-8"; }
+    decode(bytes) {
+      if (bytes === undefined) return "";
+      const bytesView = view(bytes);
+      if (!bytesView) throw new TypeError("TextDecoder: decode() takes an ArrayBuffer or a typed array");
+      return host.decode(bytesView);
+    }
+  }
+  const integers = [Int8Array, Uint8Array, Uint8ClampedArray, Int16Array, Uint16Array, Int32Array, Uint32Array, BigInt64Array, BigUint64Array];
+  const crypto = Object.freeze({
+    getRandomValues(array) {
+      if (!integers.some((type) => array instanceof type)) throw new TypeError("crypto.getRandomValues: give an integer typed array");
+      if (array.byteLength > 65536) throw new RangeError("crypto.getRandomValues: at most 65536 bytes at a time");
+      new Uint8Array(array.buffer, array.byteOffset, array.byteLength).set(host.random(array.byteLength));
+      return array;
+    },
+    randomUUID() {
+      const b = host.random(16);
+      b[6] = (b[6] & 0x0f) | 0x40;
+      b[8] = (b[8] & 0x3f) | 0x80;
+      const hex = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+    },
+  });
   for (const name of ["href", "origin", "protocol", "username", "password", "host", "hostname", "port", "pathname", "search", "hash"]) {
     Object.defineProperty(URL.prototype, name, {
       get() { return parts.get(this)[name]; },
@@ -236,7 +275,7 @@ const PRELUDE: &str = r#"
     delete: (key) => { host.storageDelete(String(key)); },
     keys: (prefix = "") => JSON.parse(host.storageKeys(String(prefix))),
   });
-  const globals = { console, fetch, ffprobe, storage, sleep, URL, URLSearchParams, hash, hmac };
+  const globals = { console, fetch, ffprobe, storage, sleep, URL, URLSearchParams, hash, hmac, TextEncoder, TextDecoder, crypto };
   if (host.spotify) {
     const ask = (method, path, body) => JSON.parse(host.spotify(method, String(path), body === undefined ? null : JSON.stringify(body)));
     globals.spotify = Object.freeze({
@@ -491,19 +530,57 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
     )?;
     host.set(
         "hash",
-        Function::new(ctx.clone(), |ctx: Ctx<'js>, algorithm: String, key: String, text: String, keyed: bool| -> rquickjs::Result<String> {
-            use ring::{digest, hmac};
-            // ring has no md5, so neither do addons.
-            let (plain, keyed_with) = match algorithm.to_ascii_lowercase().replace('-', "").as_str() {
-                "sha1" => (&digest::SHA1_FOR_LEGACY_USE_ONLY, hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY),
-                "sha256" => (&digest::SHA256, hmac::HMAC_SHA256),
-                "sha512" => (&digest::SHA512, hmac::HMAC_SHA512),
-                _ => return Err(throw(&ctx, &format!("{}: {algorithm} is not sha1, sha256 or sha512", if keyed { "hmac" } else { "hash" }))),
-            };
-            Ok(match keyed {
-                true => crate::git::hex(hmac::sign(&hmac::Key::new(keyed_with, key.as_bytes()), text.as_bytes()).as_ref()),
-                false => crate::git::hex(digest::digest(plain, text.as_bytes()).as_ref()),
-            })
+        Function::new(
+            ctx.clone(),
+            |ctx: Ctx<'js>, algorithm: String, key: Option<TypedArray<'js, u8>>, data: TypedArray<'js, u8>, keyed: bool| -> rquickjs::Result<String> {
+                use hmac::Mac;
+                use md5::Digest;
+                use ring::{digest, hmac as ring_hmac};
+                // Copies: no JavaScript runs while they're taken.
+                let key = key.and_then(|key| unsafe { key.as_bytes() }.map(<[u8]>::to_vec)).unwrap_or_default();
+                let data = unsafe { data.as_bytes() }.map(<[u8]>::to_vec).unwrap_or_default();
+                let (plain, keyed_with) = match algorithm.to_ascii_lowercase().replace('-', "").as_str() {
+                    "md5" => {
+                        return Ok(crate::git::hex(&match keyed {
+                            true => hmac::Hmac::<md5::Md5>::new_from_slice(&key).expect("any key length").chain_update(&data).finalize().into_bytes().to_vec(),
+                            false => md5::Md5::digest(&data).to_vec(),
+                        }))
+                    }
+                    "sha1" => (&digest::SHA1_FOR_LEGACY_USE_ONLY, ring_hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY),
+                    "sha256" => (&digest::SHA256, ring_hmac::HMAC_SHA256),
+                    "sha512" => (&digest::SHA512, ring_hmac::HMAC_SHA512),
+                    _ => return Err(throw(&ctx, &format!("{}: {algorithm} is not md5, sha1, sha256 or sha512", if keyed { "hmac" } else { "hash" }))),
+                };
+                Ok(match keyed {
+                    true => crate::git::hex(ring_hmac::sign(&ring_hmac::Key::new(keyed_with, &key), &data).as_ref()),
+                    false => crate::git::hex(digest::digest(plain, &data).as_ref()),
+                })
+            },
+        )?,
+    )?;
+    // TextEncoder and TextDecoder: UTF-8 only. A lone surrogate is encoded as U+FFFD and bytes
+    // that aren't UTF-8 decode as U+FFFD, as in browsers; a leading BOM is dropped.
+    host.set(
+        "encode",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, text: String| -> rquickjs::Result<Value<'js>> {
+            Ok(TypedArray::<u8>::new_copy(ctx, text.into_bytes())?.into_value())
+        })?,
+    )?;
+    host.set(
+        "decode",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, bytes: TypedArray<'js, u8>| -> rquickjs::Result<Value<'js>> {
+            // Read in place: no JavaScript runs while it's taken.
+            let bytes = unsafe { bytes.as_bytes() }.unwrap_or_default();
+            let text = String::from_utf8_lossy(bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)).into_owned();
+            Ok(rquickjs::String::from_str(ctx, &text)?.into_value())
+        })?,
+    )?;
+    host.set(
+        "random",
+        Function::new(ctx.clone(), |ctx: Ctx<'js>, length: usize| -> rquickjs::Result<Value<'js>> {
+            let mut bytes = vec![0u8; length.min(65536)];
+            ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes).map_err(|_| throw(&ctx, "crypto: no randomness"))?;
+            Ok(TypedArray::<u8>::new_copy(ctx, bytes)?.into_value())
         })?,
     )?;
     let sleep_waited = waited.clone();
@@ -620,13 +697,17 @@ mod tests {
     fn only_the_host_globals_beyond_ecmascript() {
         let got = run(
             "export default { items() { return ['setTimeout', 'setInterval', 'require', 'process', 'XMLHttpRequest', 'WebSocket', '__rex', 'os', 'std', 'print',
-               'queueMicrotask', 'performance', 'DOMException', 'TextEncoder', 'TextDecoder', 'spotify', 'addons']
+               'queueMicrotask', 'performance', 'DOMException', 'spotify', 'addons']
                .filter((name) => typeof globalThis[name] !== 'undefined')
-               .concat([typeof fetch, typeof console.log, typeof storage.get, typeof ffprobe, typeof sleep, typeof atob, typeof btoa, typeof URL, typeof URLSearchParams, typeof hash, typeof hmac]); }, open() {} };",
+               .concat([typeof fetch, typeof console.log, typeof storage.get, typeof storage.keys, typeof ffprobe, typeof sleep, typeof atob, typeof btoa, typeof URL,
+                 typeof URLSearchParams, typeof hash, typeof hmac, typeof TextEncoder, typeof TextDecoder, typeof crypto.getRandomValues, typeof crypto.randomUUID,
+                 typeof crypto.subtle]); }, open() {} };",
             &[],
             QUICK,
         );
-        assert_eq!(got.unwrap(), serde_json::json!(["function", "function", "function", "function", "function", "function", "function", "function", "function", "function", "function"]));
+        let mut want = vec!["function"; 16];
+        want.push("undefined");
+        assert_eq!(got.unwrap(), serde_json::json!(want));
     }
 
     /// The bridges an addon gets only when its manifest asks: their answers come back as
@@ -736,23 +817,72 @@ mod tests {
             "export default { items() {
                const fox = 'The quick brown fox jumps over the lazy dog';
                const thrown = (f) => { try { f(); return 'no error'; } catch (e) { return e.message; } };
+               const abc = new Uint8Array([0x61, 0x62, 0x63]);
                return [hash('sha1', 'abc'), hash('sha256', 'abc'), hash('SHA-512', 'abc'), hash('sha256', '\\u00e9'),
-                 hmac('sha1', 'key', fox), hmac('sha256', 'key', fox), hmac('sha512', 'key', fox), thrown(() => hash('md5', 'abc'))];
+                 hmac('sha1', 'key', fox), hmac('sha256', 'key', fox), hmac('sha512', 'key', fox), thrown(() => hash('crc32', 'abc')),
+                 hash('md5', 'abc'), hmac('MD5', 'key', fox),
+                 // Bytes as they are: a Uint8Array, a view into a larger buffer, an ArrayBuffer.
+                 hash('sha256', abc), hash('sha256', new Uint8Array([0, 0x61, 0x62, 0x63, 0]).subarray(1, 4)), hash('md5', abc.buffer),
+                 hmac('sha256', new TextEncoder().encode('key'), fox), hash('sha256', new Uint8Array([0xff])) === hash('sha256', '\\u00ff')];
              }, open() {} };",
+            &[],
+            QUICK,
+        );
+        let abc256 = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+        let fox256 = "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8";
+        assert_eq!(
+            got.unwrap(),
+            serde_json::json!([
+                "a9993e364706816aba3e25717850c26c9cd0d89d",
+                abc256,
+                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
+                "4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c",
+                "de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9",
+                fox256,
+                "b42af09057bac1e2d41708e48a902e09b5ff7f12ab428a4fe86653c73dd248fb82f948a549f7b791a5b41915ee4d1ec3935357e4e2317250d0372afa2ebeeb3a",
+                "hash: crc32 is not md5, sha1, sha256 or sha512",
+                "900150983cd24fb0d6963f7d28e17f72",
+                "80070713463e7749b90c2dc24911e275",
+                abc256, abc256, "900150983cd24fb0d6963f7d28e17f72", fox256,
+                // Text is UTF-8: U+00FF is two bytes, not the byte 0xff.
+                false
+            ])
+        );
+    }
+
+    #[test]
+    fn text_encoding_and_random_values_as_browsers_do_them() {
+        let got = run(
+            r#"export default { items() {
+               const thrown = (f) => { try { f(); return 'no error'; } catch (e) { return e.name; } };
+               const encoded = new TextEncoder().encode('aé€😀');
+               const decoder = new TextDecoder();
+               const ints = new Uint32Array(4), view = new Uint8Array(32).subarray(8, 24);
+               const filled = crypto.getRandomValues(ints) === ints && crypto.getRandomValues(view) === view;
+               const uuid = crypto.randomUUID();
+               return [encoded instanceof Uint8Array, Array.from(encoded), Array.from(new TextEncoder().encode('\ud800x')), new TextEncoder().encode().length,
+                 new TextEncoder().encoding, decoder.encoding, decoder.decode(encoded), decoder.decode(encoded.buffer), decoder.decode(new Uint8Array([0xef, 0xbb, 0xbf, 0x68, 0xff])),
+                 decoder.decode(), new TextDecoder('UTF8').decode(new Uint8Array([0x6f, 0x6b])),
+                 thrown(() => new TextDecoder('latin1')), thrown(() => decoder.decode('text')),
+                 filled, ints.some((n) => n !== 0), view.some((n) => n !== 0),
+                 /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(uuid), uuid !== crypto.randomUUID(),
+                 thrown(() => crypto.getRandomValues(new Float32Array(2))), thrown(() => crypto.getRandomValues(new Uint8Array(65537))),
+                 crypto.getRandomValues(new Uint8Array(65536)).length];
+             }, open() {} };"#,
             &[],
             QUICK,
         );
         assert_eq!(
             got.unwrap(),
             serde_json::json!([
-                "a9993e364706816aba3e25717850c26c9cd0d89d",
-                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-                "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f",
-                "4a99557e4033c3539de2eb65472017cad5f9557f7a0625a09f1c3f6e2ba69c4c",
-                "de7c9b85b8b78aa6bc8a7a36f70a90701c9db4d9",
-                "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8",
-                "b42af09057bac1e2d41708e48a902e09b5ff7f12ab428a4fe86653c73dd248fb82f948a549f7b791a5b41915ee4d1ec3935357e4e2317250d0372afa2ebeeb3a",
-                "hash: md5 is not sha1, sha256 or sha512"
+                true, [0x61, 0xc3, 0xa9, 0xe2, 0x82, 0xac, 0xf0, 0x9f, 0x98, 0x80], [0xef, 0xbf, 0xbd, 0x78], 0,
+                "utf-8", "utf-8", "a\u{e9}\u{20ac}\u{1f600}", "a\u{e9}\u{20ac}\u{1f600}", "h\u{fffd}",
+                "", "ok",
+                "RangeError", "TypeError",
+                true, true, true,
+                true, true,
+                "TypeError", "RangeError",
+                65536
             ])
         );
     }

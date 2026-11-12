@@ -107,8 +107,8 @@ fn main() {
         let due = scheduler.due();
         // rex may start after this host: nothing is tried, and nothing counts as failed, until it answers.
         if !due.is_empty() && scheduler.rex_reachable() {
-            for id in due {
-                scheduler.start_sync(&id, false);
+            for (id, reason) in due {
+                scheduler.start_sync(&id, false, reason);
             }
         }
         for id in scheduler.due_repos() {

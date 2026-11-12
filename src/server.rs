@@ -135,7 +135,7 @@ fn api(app: &Arc<App>, method: &Method, path: &str, body: &str) -> Answer {
                 return Err((400, "addons install from a repository: add it with POST /api/repos, then send {\"repo\", \"addon\"}".into()));
             }
             let (status, id) = app.install_from_repo(&text(&body, "repo")?, &text(&body, "addon")?)?;
-            app.start_sync(&id, false);
+            app.start_sync(&id, false, "install");
             detail(app, &id).map(|(_, answer)| (status, answer))
         }
         (Method::Get, ["addons", id]) => detail(app, id),
@@ -154,7 +154,7 @@ fn api(app: &Arc<App>, method: &Method, path: &str, body: &str) -> Answer {
                 None => Err((404, "no such addon".into())),
                 Some(false) => Err((409, "the addon is disabled".into())),
                 Some(true) => {
-                    app.start_sync(id, force);
+                    app.start_sync(id, force, "manual");
                     Ok((202, json!({"syncing": true})))
                 }
             }

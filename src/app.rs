@@ -135,8 +135,8 @@ pub struct Addon {
     pub syncing: bool,
     /// The next sync may remove more than half of the addon's items.
     pub force: bool,
-    /// Asked for while one was running (new settings): run again when it ends.
-    pub again: bool,
+    /// Asked for while one was running (new settings): run again when it ends, for this reason.
+    pub again: Option<&'static str>,
     pub attempted: Option<Instant>,
     pub opened: HashMap<String, (Opened, Instant)>,
     /// The `open()` running for each item: callers for the same item wait for it and share it.
@@ -445,8 +445,7 @@ impl App {
 
     fn call_open(self: &Arc<Self>, id: &str, item: &str, manifest: &Manifest, source: &str, config: &Map<String, Json>, storage: Arc<Storage>) -> Result<Opened, String> {
         let env = self.env(id, manifest, source, storage, true);
-        let ctx = json!({"config": manifest.effective(config)});
-        let answer = sandbox::call(&env, "open", &[json!(item), ctx], sandbox::OPEN)?;
+        let answer = sandbox::call(&env, "open", &[json!(item), call_ctx(manifest, config)], sandbox::OPEN)?;
         if !answer["playlist"].is_null() {
             // An older rex-addons answers it with "open() returned no url".
             if manifest.host.as_deref().is_none_or(|host| newer("0.4", host)) {
@@ -485,42 +484,48 @@ impl App {
         log(id, &format!("{item} deleted in a Plex app: no longer pushed"));
     }
 
-    /// Starts a sync on its own thread; one asked for while another runs follows it.
-    pub fn start_sync(self: &Arc<Self>, id: &str, force: bool) -> bool {
+    /// Starts a sync on its own thread; one asked for while another runs follows it. `reason` is
+    /// what `items()` gets as `ctx.reason`: `schedule`, `retry`, `manual`, `settings`, `install`
+    /// or `sign_in`.
+    pub fn start_sync(self: &Arc<Self>, id: &str, force: bool, reason: &'static str) -> bool {
         {
             let mut addons = self.addons.lock().unwrap();
             let Some(addon) = addons.get_mut(id) else { return false };
             addon.force |= force;
             if addon.syncing {
-                addon.again = true;
+                addon.again = Some(reason);
                 return false;
             }
             addon.syncing = true;
         }
         let (app, id) = (self.clone(), id.to_string());
-        std::thread::spawn(move || app.sync(&id));
+        std::thread::spawn(move || app.sync(&id, reason));
         true
     }
 
-    /// Every enabled addon whose refresh is due, or whose last sync failed RETRY ago.
-    pub fn due(&self) -> Vec<String> {
+    /// Every enabled addon whose refresh is due, or whose last sync failed RETRY ago, with why.
+    pub fn due(&self) -> Vec<(String, &'static str)> {
         let addons = self.addons.lock().unwrap();
         addons
             .values()
             // One waiting to be signed in is synced by the sign-in.
             .filter(|a| a.enabled && !a.syncing && a.signed_in())
-            .filter(|a| match (a.error.is_some(), a.attempted, a.last_sync) {
-                (true, Some(at), _) => at.elapsed() >= RETRY,
-                // A failure from before a restart is tried again at once.
-                (true, None, _) | (false, None, None) => true,
-                (false, _, Some(last)) => now() >= last + a.manifest.refresh_minutes * 60,
-                (false, Some(at), None) => at.elapsed() >= RETRY,
+            .filter_map(|a| {
+                let reason = match (a.error.is_some(), a.attempted, a.last_sync) {
+                    (true, Some(at), _) => (at.elapsed() >= RETRY).then_some("retry"),
+                    // A failure from before a restart is tried again at once.
+                    (true, None, _) => Some("retry"),
+                    // Installed, or updated, and not synced since.
+                    (false, None, None) => Some("install"),
+                    (false, _, Some(last)) => (now() >= last + a.manifest.refresh_minutes * 60).then_some("schedule"),
+                    (false, Some(at), None) => (at.elapsed() >= RETRY).then_some("retry"),
+                };
+                Some((a.manifest.id.clone(), reason?))
             })
-            .map(|a| a.manifest.id.clone())
             .collect()
     }
 
-    fn sync(self: &Arc<Self>, id: &str) {
+    fn sync(self: &Arc<Self>, id: &str, reason: &'static str) {
         let started = Instant::now();
         // Force is for this attempt only: the retries of one that fails are not forced.
         let force = match self.addons.lock().unwrap().get_mut(id) {
@@ -530,7 +535,7 @@ impl App {
             }
             None => return,
         };
-        let result = self.run_sync(id, force);
+        let result = self.run_sync(id, force, reason);
         let mut addons = self.addons.lock().unwrap();
         let Some(addon) = addons.get_mut(id) else { return };
         addon.syncing = false;
@@ -550,13 +555,13 @@ impl App {
             }
         }
         save_state(self, addon);
-        if std::mem::take(&mut addon.again) {
+        if let Some(reason) = addon.again.take() {
             drop(addons);
-            self.start_sync(id, false);
+            self.start_sync(id, false, reason);
         }
     }
 
-    fn run_sync(self: &Arc<Self>, id: &str, force: bool) -> Result<(usize, usize), String> {
+    fn run_sync(self: &Arc<Self>, id: &str, force: bool, reason: &str) -> Result<(usize, usize), String> {
         let (manifest, source, config, storage, deleted) = {
             let mut addons = self.addons.lock().unwrap();
             let a = addons.get_mut(id).ok_or("removed")?;
@@ -570,7 +575,9 @@ impl App {
             return Err(format!("set {label} first"));
         }
         let env = self.env(id, &manifest, &source, storage, true);
-        let returned = sandbox::call(&env, "items", &[json!({"config": manifest.effective(&config)})], sandbox::ITEMS).map_err(|error| {
+        let mut ctx = call_ctx(&manifest, &config);
+        ctx["reason"] = json!(reason);
+        let returned = sandbox::call(&env, "items", &[ctx], sandbox::ITEMS).map_err(|error| {
             let mut addons = self.addons.lock().unwrap();
             match addons.get_mut(id).and_then(|a| Some((sign_in_required(a, &error)?, a))) {
                 Some((reason, addon)) => {
@@ -761,7 +768,7 @@ impl App {
         drop(addons);
         if enabled {
             // New settings can take more than half of the items away on purpose.
-            self.start_sync(id, true);
+            self.start_sync(id, true, "settings");
         }
         Ok(Json::Object(masked))
     }
@@ -776,7 +783,7 @@ impl App {
         drop(addons);
         log(id, &format!("{restored} deleted titles restored"));
         if enabled {
-            self.start_sync(id, false);
+            self.start_sync(id, false, "manual");
         }
         Ok(())
     }
@@ -793,7 +800,7 @@ impl App {
                 .collect()
         };
         for dependent in waiting {
-            self.start_sync(&dependent, false);
+            self.start_sync(&dependent, false, "retry");
         }
     }
 
@@ -807,7 +814,7 @@ impl App {
         save_state(self, addon);
         drop(addons);
         if enabled {
-            self.start_sync(id, false);
+            self.start_sync(id, false, "manual");
             self.wake_dependents(id);
         }
         Ok(())
@@ -825,7 +832,7 @@ impl App {
         };
         let env = self.env(id, &manifest, &source, storage, true);
         let mut args = args.to_vec();
-        args.push(json!({"config": manifest.effective(&config)}));
+        args.push(call_ctx(&manifest, &config));
         sandbox::call(&env, method, &args, sandbox::OPEN).map_err(|error| masked(id, &error))
     }
 
@@ -903,7 +910,7 @@ impl App {
             end_sign_in(self, addon, outcome);
             drop(addons);
             if done {
-                self.start_sync(id, false);
+                self.start_sync(id, false, "sign_in");
                 self.wake_dependents(id);
             }
             return;
@@ -996,7 +1003,7 @@ impl App {
         end_sign_in(self, addon, signed);
         drop(addons);
         if done {
-            self.start_sync(id, false);
+            self.start_sync(id, false, "sign_in");
             self.wake_dependents(id);
         }
     }
@@ -1044,7 +1051,7 @@ impl App {
         };
         let env = self.env(callee, &manifest, &source, storage, false);
         let mut args = args;
-        args.push(json!({"config": manifest.effective(&config)}));
+        args.push(call_ctx(&manifest, &config));
         sandbox::call(&env, function, &args, sandbox::OPEN).map_err(|error| {
             let mut addons = self.addons.lock().unwrap();
             match addons.get_mut(callee).and_then(|a| Some((sign_in_required(a, &error)?, a))) {
@@ -1165,6 +1172,15 @@ fn signed_out(app: &App, addon: &mut Addon, reason: &str) {
     addon.sign_in_error = Some(reason.to_string());
     addon.opened.clear();
     save_state(app, addon);
+}
+
+/// What every call of an addon gets as `ctx`: its settings, this rex-addons' version and which
+/// addon and version it is.
+fn call_ctx(manifest: &Manifest, config: &Map<String, Json>) -> Json {
+    json!({
+        "config": manifest.effective(config), "host": env!("CARGO_PKG_VERSION"),
+        "addon": {"id": manifest.id, "version": manifest.version},
+    })
 }
 
 fn first_line(text: &str) -> String {
@@ -1529,7 +1545,7 @@ fn load(path: &Path) -> Result<Addon, String> {
         probe_failures: object("probe_failures.json"),
         syncing: false,
         force: false,
-        again: false,
+        again: None,
         attempted: None,
         opened: HashMap::new(),
         opening: HashMap::new(),
@@ -1683,7 +1699,7 @@ mod sync_tests {
         let source = "export default { items() { return [{id: 'a', path: 'clips/a.mp4'}]; }, open() {} };";
         let directories = json!([{"name": "clips", "shows": "Clips"}]);
         app.install(&json!({"id": "clips", "name": "Clips", "version": "1.0.0", "directories": directories}), source, None).unwrap();
-        assert!(app.start_sync("clips", true));
+        assert!(app.start_sync("clips", true, "manual"));
         wait_idle(&app, "clips");
         assert_eq!(registered.lock().unwrap()[0]["directories"], directories);
         assert!(Manifest::parse(&json!({"id": "x", "name": "X", "version": "1.0.0", "directories": {"name": "clips"}})).is_err());
@@ -1700,7 +1716,7 @@ mod sync_tests {
         let source = "export default { items() { return [{id: 'a', path: 'films/a.mp4'}]; }, open() {} };";
         app.install(&json!({"id": "demo", "name": "Demo", "version": "1.0.0"}), source, None).unwrap();
 
-        assert!(app.start_sync("demo", false));
+        assert!(app.start_sync("demo", false, "manual"));
         let status = wait_idle(&app, "demo");
         assert_eq!(status["state"], "error");
         let error = status["error"].as_str().unwrap();
@@ -1709,7 +1725,7 @@ mod sync_tests {
         assert_eq!(seen.lock().unwrap()[0]["items"][0], json!({"id": "a", "path": "films/a.mp4"}));
         assert!(seen.lock().unwrap()[0].get("force").is_none());
 
-        assert!(app.start_sync("demo", true));
+        assert!(app.start_sync("demo", true, "manual"));
         let status = wait_idle(&app, "demo");
         assert_eq!((status["state"].as_str(), status["items"].as_u64(), status["held"].as_u64()), (Some("idle"), Some(0), Some(1)));
         assert_eq!(seen.lock().unwrap()[1]["force"], json!(true));
@@ -1765,7 +1781,7 @@ mod sync_tests {
         let source = "export default { items(ctx) { const end = Date.now() + 300; while (Date.now() < end); return [{id: 'a' + ctx.config.n, path: 'films/a.mp4'}]; }, open() {} };";
         let manifest = json!({"id": "slow", "name": "Slow", "version": "1.0.0", "config": [{"key": "n", "label": "N", "type": "number", "default": 1}]});
         app.install(&manifest, source, None).unwrap();
-        assert!(app.start_sync("slow", false));
+        assert!(app.start_sync("slow", false, "manual"));
         std::thread::sleep(Duration::from_millis(100));
         app.set_config("slow", &json!({"n": 2})).unwrap();
         for _ in 0..200 {
@@ -1778,6 +1794,45 @@ mod sync_tests {
         assert_eq!(seen.len(), 2, "{seen:?}");
         assert_eq!((seen[0]["items"][0]["id"].as_str(), seen[0].get("force")), (Some("a1"), None));
         assert_eq!((seen[1]["items"][0]["id"].as_str(), &seen[1]["force"]), (Some("a2"), &json!(true)));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Every call's ctx names this rex-addons and the addon; items() also gets why it runs.
+    #[test]
+    fn ctx_says_which_host_which_addon_and_why_it_syncs() {
+        let (rex, _) = stub_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-ctx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+        let source = "export default {
+            items(ctx) { storage.set('items', [...(storage.get('items') ?? []), ctx]); return []; },
+            open(id, ctx) { storage.set('open', ctx); return { url: 'https://cdn.example.com/a.mp4' }; } };";
+        let manifest = json!({"id": "ctx", "name": "Ctx", "version": "1.2.3", "hosts": ["cdn.example.com"], "config": [{"key": "n", "label": "N", "type": "number", "default": 1}]});
+        app.install(&manifest, source, None).unwrap();
+        // Installed and never synced: due, as an install.
+        assert_eq!(app.due(), [("ctx".to_string(), "install")]);
+        assert!(app.start_sync("ctx", false, "manual"));
+        wait_idle(&app, "ctx");
+        app.set_config("ctx", &json!({"n": 2})).unwrap();
+        wait_idle(&app, "ctx");
+        app.open("ctx", "a").unwrap();
+        let stored = read_json(&dir(&app, "ctx").join("storage.json")).unwrap();
+        let ctx = |config: i64, reason: &str| json!({"config": {"n": config}, "host": env!("CARGO_PKG_VERSION"), "addon": {"id": "ctx", "version": "1.2.3"}, "reason": reason});
+        assert_eq!(stored["items"], json!([ctx(1, "manual"), ctx(2, "settings")]));
+        assert_eq!(stored["open"], json!({"config": {"n": 2}, "host": "0.6.0", "addon": {"id": "ctx", "version": "1.2.3"}}));
+        // A sync that failed is a retry once RETRY has passed; one that worked, a schedule once refresh_minutes have.
+        let mut addons = app.addons.lock().unwrap();
+        let addon = addons.get_mut("ctx").unwrap();
+        addon.error = Some("down".into());
+        addon.attempted = Instant::now().checked_sub(RETRY);
+        drop(addons);
+        assert_eq!(app.due(), [("ctx".to_string(), "retry")]);
+        let mut addons = app.addons.lock().unwrap();
+        let addon = addons.get_mut("ctx").unwrap();
+        addon.error = None;
+        addon.last_sync = Some(now() - addon.manifest.refresh_minutes * 60);
+        drop(addons);
+        assert_eq!(app.due(), [("ctx".to_string(), "schedule")]);
         let _ = std::fs::remove_dir_all(&data);
     }
 
@@ -1830,13 +1885,13 @@ mod sync_tests {
         let manifest = json!({"id": "flaky", "name": "Flaky", "version": "1.0.0", "config": [{"key": "n", "label": "N", "type": "number", "default": 1}]});
         app.install(&manifest, source, None).unwrap();
 
-        assert!(app.start_sync("flaky", true));
+        assert!(app.start_sync("flaky", true, "manual"));
         wait_idle(&app, "flaky");
         assert_eq!(runs(), 1);
         let saved = read_json(&dir(&app, "flaky").join("probe_failures.json")).unwrap();
         assert_eq!(saved["a"]["count"], 1);
         // The next sync, a moment later, leaves it held rather than probing it again.
-        assert!(app.start_sync("flaky", true));
+        assert!(app.start_sync("flaky", true, "manual"));
         assert_eq!(wait_idle(&app, "flaky")["held"], 1);
         assert_eq!(runs(), 1);
 
@@ -1872,13 +1927,13 @@ mod sync_tests {
         app.addons.lock().unwrap().get_mut("keep").unwrap().paths = old;
 
         // rex refuses and keeps "old": it must still be readable at /bytes.
-        assert!(app.start_sync("keep", false));
+        assert!(app.start_sync("keep", false, "manual"));
         assert_eq!(wait_idle(&app, "keep")["error_kind"], "would_remove");
         let paths = app.addons.lock().unwrap()["keep"].paths.clone();
         assert_eq!((paths.get("films/old.mp4"), paths.get("films/a.mp4")), (Some(&"old".to_string()), Some(&"a".to_string())));
 
         // Once rex takes it, "old" is gone, from the index on disk too.
-        assert!(app.start_sync("keep", true));
+        assert!(app.start_sync("keep", true, "manual"));
         assert_eq!(wait_idle(&app, "keep")["state"], "idle");
         assert!(!app.addons.lock().unwrap()["keep"].paths.contains_key("films/old.mp4"));
         assert!(read_json(&dir(&app, "keep").join("index.json")).unwrap().get("films/old.mp4").is_none());
@@ -1896,21 +1951,21 @@ mod sync_tests {
         app.install(&manifest, source, None).unwrap();
 
         // A forced sync that fails before rex is asked leaves nothing forced behind.
-        assert!(app.start_sync("need", true));
+        assert!(app.start_sync("need", true, "manual"));
         let status = wait_idle(&app, "need");
         assert_eq!((status["error"].as_str(), &status["error_kind"]), (Some("set N first"), &Json::Null));
         assert!(!app.addons.lock().unwrap()["need"].force);
 
         // Its retry is unforced and meets the guard, which the status names.
         app.addons.lock().unwrap().get_mut("need").unwrap().config.insert("n".into(), json!(1));
-        assert!(app.start_sync("need", false));
+        assert!(app.start_sync("need", false, "manual"));
         let status = wait_idle(&app, "need");
         assert_eq!(status["error_kind"], "would_remove");
         assert!(seen.lock().unwrap()[0].get("force").is_none());
         let saved = read_json(&dir(&app, "need").join("state.json")).unwrap();
         assert_eq!(saved["error_kind"], "would_remove");
 
-        assert!(app.start_sync("need", true));
+        assert!(app.start_sync("need", true, "manual"));
         assert_eq!(wait_idle(&app, "need")["error_kind"], Json::Null);
         let _ = std::fs::remove_dir_all(&data);
     }

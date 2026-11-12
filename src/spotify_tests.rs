@@ -262,7 +262,7 @@ fn pairing_signs_in_keeps_the_credentials_to_itself_and_syncs() {
     rig.stub.forget("spotify");
     let again = App::with_spotify(rig.app.data.clone(), rig.app.rex.clone(), "127.0.0.1:9".parse().unwrap(), None, None, "rex-test".into(), rig.stub.clone());
     assert_eq!(again.status("spotify").unwrap()["sign_in"]["account"], "Someone Listening");
-    assert!(again.start_sync("spotify", false));
+    assert!(again.start_sync("spotify", false, "manual"));
     for _ in 0..400 {
         if again.status("spotify").unwrap()["state"] != "syncing" { break }
         std::thread::sleep(Duration::from_millis(25));
@@ -329,7 +329,7 @@ fn a_session_spotify_ends_signs_the_addon_out() {
     rig.signed_in();
     let rex_calls = rig.rex.lock().unwrap().len();
     rig.stub.revoke();
-    assert!(rig.app.start_sync("spotify", false));
+    assert!(rig.app.start_sync("spotify", false, "manual"));
     let status = rig.until("spotify", "the sync", |s| s["state"] != "syncing");
     assert_eq!(status["error"], "sign in again: Spotify no longer accepts this sign-in (Bad credentials)");
     assert_eq!(status["error_kind"], "sign_in");
@@ -495,7 +495,7 @@ fn an_addon_syncs_as_soon_as_the_one_it_requires_can_be_called() {
     rig.app.install(&callee_manifest(json!({})), CALLEE, None).unwrap();
     signed_in(&rig, "tube", Some("someone"));
     rig.app.set_enabled("tube", false).unwrap();
-    rig.app.start_sync("caller", false);
+    rig.app.start_sync("caller", false, "manual");
     let failed = rig.until("caller", "the failed sync", |s| s["state"] == "error");
     // The reason alone: the stack of the throw stays in the log.
     assert_eq!(failed["error"], "Tube is disabled: enable it first");

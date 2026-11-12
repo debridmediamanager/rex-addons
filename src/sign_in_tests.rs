@@ -287,7 +287,7 @@ fn a_code_shows_until_entered_then_the_account_is_kept_and_synced() {
 #[test]
 fn an_unsigned_addon_neither_syncs_nor_plays() {
     let rig = rig!("sign-none");
-    assert!(rig.app.start_sync("sign-none", false));
+    assert!(rig.app.start_sync("sign-none", false, "manual"));
     let status = rig.until("the sync", |s| s["state"] != "syncing");
     assert_eq!((status["error"].as_str(), status["error_kind"].as_str()), (Some("sign in first"), Some("sign_in")));
     assert!(rig.hits("GET /list").is_empty());
@@ -371,7 +371,7 @@ fn sign_in_required_from_items_signs_the_addon_out() {
     rig.signed_in();
     let rex_calls = rig.rex.lock().unwrap().len();
     rig.site.lock().unwrap().revoked = true;
-    assert!(rig.app.start_sync("sign-revoked", false));
+    assert!(rig.app.start_sync("sign-revoked", false, "manual"));
     let status = rig.until("the sync", |s| s["state"] != "syncing");
     assert_eq!(status["error"], "sign in again: the website revoked access");
     assert_eq!(status["error_kind"], "sign_in");

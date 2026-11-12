@@ -59,6 +59,7 @@ repository's list. rex-addons 0.1 doesn't know the field.
 | `0.6` | `select` settings | Installing refuses it |
 | `0.6` | `storage.keys`, `TextEncoder`, `TextDecoder`, `crypto`, `md5` and bytes in `hash` and `hmac`, `ctx.host`, `ctx.addon`, `ctx.reason`, `RETRY_AFTER` | Not checked: it installs, and fails where it uses them on an older rex-addons (`RETRY_AFTER` is just an error there, tried again in 5 minutes) |
 | `0.7` | `host` settings | Installing refuses it |
+| `0.8` | `items()` in pages and with changes only: `{items, next}`, `{partial, items, removed}`, `ctx.cursor`, `ctx.full`, `ctx.last_sync` ([a large library](#a-large-library)) | Not checked at install, as a return value can't be: the sync fails, here with `items() returned {items: [...]}, which needs "host": "0.8" in the manifest`, on an older rex-addons with `items() must return a list` |
 
 A setting's `help` needs no `host`: an older rex-addons doesn't show it.
 
@@ -77,13 +78,15 @@ argument:
 | | |
 |---|---|
 | `ctx.config` | The settings, each one its saved value or its default |
-| `ctx.host` | This rex-addons' version, such as `"0.7.0"` |
+| `ctx.host` | This rex-addons' version, such as `"0.8.0"` |
 | `ctx.addon` | `{id, version}`, from your manifest |
 | `ctx.reason` | Only for `items()`: why this sync runs ([below](#why-a-sync-runs)) |
+| `ctx.full`, `ctx.last_sync`, `ctx.cursor` | Only for `items()`: whether this sync needs every title, when the last sync that worked began, and which page to return ([a large library](#a-large-library)) |
 
 ### items(ctx)
 
-Returns everything the addon has, as a list, every time. rex takes what's gone out of the
+Returns everything the addon has, as a list, every time; a large library can return it in pages,
+or only what changed ([a large library](#a-large-library)). rex takes what's gone out of the
 library, so **throw an error rather than return half a list** when a website doesn't answer: the
 sync then fails, shows the error in the app, and rex keeps what it had. As a second guard, rex
 refuses a sync that would take away more than half of the titles. An empty list changes nothing
@@ -249,6 +252,7 @@ the useful part first: `archive.org answered 503`, not `Error in step 3`.
 | Memory | 64 MB |
 | JavaScript time | 30 s for `items()`, 10 s for `open()`. Time spent waiting on `fetch`, `ffprobe` or `sleep` doesn't count |
 | Whole call | 20 minutes for `items()`, 90 s for `open()`. A `fetch` or body read still waiting then fails |
+| One sync's pages | 10,000 pages, 500,000 titles, 128 MB of ids and paths, and an hour of `items()` calls, waiting included |
 | A fetched body | 16 MB |
 | `storage` | 16 MB in all, written to disk when the call ends |
 | `crypto.getRandomValues` | 65,536 bytes a call |
@@ -309,10 +313,77 @@ function link(film) {
 
 ## A large library
 
-`items()` has 30 s of JavaScript and 64 MB, and a website won't answer a thousand lookups at
-once. So do the costly part (a lookup, a probe) for a few new titles each sync and keep what it
-found in `storage` by the title's id. Return every title done so far, from `storage`, each time;
-the rest arrive with later syncs. Forget what left the list, so `storage` stays under its 16 MB.
+One `items()` call has 30 s of JavaScript and 64 MB, which is about 12,000 titles that carry
+their `media_info`. Past that, or when listing every title every time costs too much, return them
+in pages, or only what changed, or both. Each needs `"host": "0.8"`.
+
+### Pages
+
+Return `{items: [...], next}` instead of a list. While an answer has a `next` (any JSON but
+`null`), rex-addons calls `items()` again, a fresh call with limits of its own, with `ctx.cursor`
+set to that `next`. The first call has no `ctx.cursor`.
+
+```js
+async items(ctx) {
+  const answer = await fetch(`https://api.example.com/videos?limit=2000&after=${ctx.cursor ?? ""}`);
+  if (!answer.ok) throw new Error(`api.example.com answered ${answer.status}`);
+  const page = await answer.json();
+  return { items: page.videos.map(toItem), next: page.next_cursor ?? null };
+}
+```
+
+All the pages together are every title, as one list would be: a title no page names leaves rex
+once the last page is in, the half guard counts every page, and an entry whose id or path an
+earlier page had is left out. Each page reaches rex as soon as it is checked, so rex-addons holds
+one page at a time. A page that throws fails the whole sync, and rex removes nothing (it keeps the
+titles of the pages before it, added or updated).
+
+### Changes only
+
+Every `items()` call gets `ctx.full` and `ctx.last_sync`. When `ctx.full` is `false`, you may
+return only what changed:
+
+```js
+return { partial: true, items: [/* new or changed titles, whole */], removed: ["id", /* ... */] };
+```
+
+`items` are the titles that are new or changed, each whole, as a full list has it, and probed as
+usual; `removed` the ids that are gone. A partial answer may have a `next` too; then every page
+is partial. A plain list, or `{items}` without `partial`, is always every title, also when
+`ctx.full` is `false`.
+
+`ctx.last_sync` is when the last sync that worked began (Unix seconds), or `null`: ask the website
+for what changed since then. When `ctx.full` is `false`, **everything your last `items()`
+returned reached rex**, so a list in `storage` of what you returned is what rex has.
+
+`ctx.full` is `true`, and a partial answer fails the sync, when:
+
+- the addon has never synced, or was installed or updated since;
+- its settings changed, it was just signed in, a person restored its deleted titles, or a sync
+  was forced;
+- the last sync failed after `items()` had answered, or rex-addons stopped during one;
+- the last sync that got every title is a day old, so rex catches up even if it lost something;
+- a title rex holds is due for another probe ([held titles](#probing-and-held-titles));
+- rex-addons was just updated from a version before 0.8.
+
+The rest:
+
+- `removed` is applied once the last page is in. An id that is in `items` too stays.
+- `removed` can't take more than half of the addon's titles: nothing is removed and the sync
+  fails, `error_kind` `would_remove`. A forced sync asks for every title instead, and meets
+  rex's own guard.
+- A title whose `path` another title already has is left out, as rex would refuse it: move or
+  remove the other one in an earlier sync.
+- A title a person deleted in a Plex app stays left out.
+
+### Costly work per title
+
+Pages and changes take care of how many titles there are. A lookup or a probe for each title is
+still slow, and a website won't answer a thousand of them at once. So do the costly part for a few
+new titles each sync and keep what it found in `storage` by the title's id; the rest arrive with
+later syncs. Forget what left the list, so `storage` stays under its 16 MB. Or leave
+`media_info` out: rex-addons then probes each title itself and keeps the probe, outside your
+`storage`.
 
 The [YouTube addon](../addons/youtube/main.js) checks at most 30 new videos a sync, 1.5 s apart,
 returns only videos it has checked, and reads its playlists again only every six hours, keeping
@@ -650,15 +721,17 @@ raise the addon's `version` and push; people see the update when they refresh th
 ## Trying it
 
 `rex-addons check` tries an addon folder once, without rex: it parses the manifest, does what
-installing checks, runs `items()` and tells you what came back.
+installing checks, runs `items()`, every page of it with `ctx.full` `true`, and tells you what came
+back. `--since <unix seconds>` runs it as a sync that may answer with changes only: `ctx.full`
+`false`, `ctx.last_sync` that time.
 
 ```bash
 rex-addons check ~/my-addons/my-films --ffprobe "$(command -v ffprobe)"
 rex-addons check ~/my-addons/my-films --config '{"pawnshop": false}' --open his-girl-friday
 ```
 
-It prints a line for each step, `ok`, `FAIL` or `note`: how many titles `items()` returned and how
-long it took, every entry left out and why, every required setting not given, and the first title
+It prints a line for each step, `ok`, `FAIL` or `note`: how many titles `items()` returned, over
+how many pages and how long it took (for changes only, also how many ids it removed), every entry left out and why, every required setting not given, and the first title
 as JSON. With `--open <id>` it runs `open()` for that title too, prints what it returned and
 whether the link is on your `hosts`. What your addon prints is there too. It exits with 1 when a
 step failed.
@@ -739,7 +812,7 @@ build step:
   isn't there (`setTimeout`, `document`), a call with the wrong arguments, an item without a
   `path` and an `open()` that returns neither `{ url }` nor playlists.
 
-The types are rex-addons 0.7's, and they keep a browser's globals out even where a
+The types are rex-addons 0.8's, and they keep a browser's globals out even where a
 `jsconfig.json` asks for them. The [bundled addons](../addons) use both files (the YouTube addon
 only the schema).
 
@@ -757,7 +830,18 @@ only the schema).
 | `the website asked to wait 3600 s` | `items()` threw `RETRY_AFTER 3600`: the next try is an hour later |
 | `sign in first` | An addon with `sign_in` isn't signed in |
 | `rex kept everything: this sync would remove 80 of the 100 items it has from this addon, more than half. If that is right, sync with force` | `items()` returned under half of what it did before. If a website gave a short answer, throw instead. If it's right, sync with `{"force": true}` |
-| `items() ran JavaScript for longer than 30 s` | Too much work in one call. Do less each sync ([a large library](#a-large-library)) |
+| `items() ran JavaScript for longer than 30 s` | Too much work in one call. Return pages, or do less each sync ([a large library](#a-large-library)) |
+| `items() returned {items: [...]}, which needs "host": "0.8" in the manifest` | Pages and changes only need `"host": "0.8"` |
+| `items() returned partial: true, but this sync needs every title (ctx.full is true)` | Return every title when `ctx.full` is `true` ([changes only](#changes-only)) |
+| `items(): a sync's pages are all partial, or none is` | One page said `partial: true` and another didn't |
+| `items(): removed needs partial: true`, `items(): removed must be a list of ids` | `removed` goes with `partial: true`, as a list of id strings |
+| `items() must return a list, or {items: [...]}` | The answer was an object without an `items` list |
+| `rex-addons removed nothing: items() removed 80 of the 100 titles the addon has, more than half. If that is right, sync with force` | A partial answer's `removed` took more than half. A forced sync asks for every title |
+| `items() returned 10000 pages and still a next: at most 10000 a sync` | The last page needs `next: null`, or none. Return bigger pages |
+| `items() ran for longer than 3600 s over all its pages` | The pages took over an hour together. Return changes only ([a large library](#a-large-library)) |
+| `items() returned more than 500000 titles: at most 500000 a sync`, `... more than 128 MB of ids and paths ...` | Too many titles for one addon, or very long ids and paths |
+| `items(): x has the path "a/b.mp4", which y has; left out` | A partial answer gave a title the path another title has ([changes only](#changes-only)) |
+| `rex refused the snapshot (409): no such snapshot session at this part: start again from part 0` | rex restarted during a sync of several pages. The next try, 5 minutes later, starts again |
 | `items() took longer than 1200 s` | The whole call ran past 20 minutes, waiting included |
 | `items() never finished: it waits on something that never comes (there are no timers)` | A promise nothing resolves, such as one waiting on `setTimeout`. Use `await sleep(ms)` |
 | `out of memory` | The call went past 64 MB |

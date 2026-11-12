@@ -1,4 +1,4 @@
-// What an addon's main.js can use inside rex-addons 0.7, for your editor: autocomplete and, with
+// What an addon's main.js can use inside rex-addons 0.8, for your editor: autocomplete and, with
 // `// @ts-check` at the top of main.js, a warning where code uses something that isn't there.
 // Plain JavaScript (ES2022) plus the globals below, and nothing else: no DOM, no Node, no timers.
 // The guide: https://github.com/debridmediamanager/rex-addons/blob/main/docs/writing-addons.md
@@ -22,9 +22,10 @@ interface Addon<Config = AddonConfig> {
    * Every title you have, as a list, every time. Throw rather than return half a list. 30 s of
    * JavaScript, 20 minutes in all. Throw an error whose message starts with `RETRY_AFTER <seconds>`
    * (`RETRY_AFTER 3600: answered 429`) and the next try waits that long, 1 minute to 24 hours,
-   * instead of 5 minutes (rex-addons 0.6).
+   * instead of 5 minutes (rex-addons 0.6). With `"host": "0.8"`, a page of them (`{items, next}`)
+   * or, when `ctx.full` is false, only what changed (`{partial: true, items, removed}`).
    */
-  items(ctx: ItemsContext<Config>): Awaitable<Item[]>;
+  items(ctx: ItemsContext<Config>): Awaitable<Item[] | ItemsPage | ItemsChanges>;
   /** Where one title plays from. The answer is reused for 10 minutes. 10 s of JavaScript, 90 s in all. */
   open(id: string, ctx: AddonContext<Config>): Awaitable<Opened>;
   /** With `sign_in` (kind `code`): starts a sign-in and returns the code the person types. Needs `"host": "0.3"`. */
@@ -41,7 +42,7 @@ interface Addon<Config = AddonConfig> {
 interface AddonContext<Config = AddonConfig> {
   /** The settings, each one its saved value or its default (`null` with neither). */
   config: Config;
-  /** This rex-addons' version, such as `"0.7.0"`. rex-addons 0.6. */
+  /** This rex-addons' version, such as `"0.8.0"`. rex-addons 0.6. */
   host: string;
   /** Which addon this is, from its manifest. rex-addons 0.6. */
   addon: { id: string; version: string };
@@ -56,6 +57,36 @@ interface ItemsContext<Config = AddonConfig> extends AddonContext<Config> {
    * they changed; `install`, installed or updated and not synced since; `sign_in`, just signed in.
    */
   reason: "schedule" | "retry" | "manual" | "settings" | "install" | "sign_in";
+  /**
+   * Whether this sync needs every title (rex-addons 0.8): a partial answer then fails it. False
+   * only after a sync that worked, and then everything the last `items()` returned reached rex.
+   */
+  full: boolean;
+  /** When the last sync that worked began, in Unix seconds, or `null` (rex-addons 0.8). */
+  last_sync: number | null;
+  /** The `next` of the page before; absent on the first page (rex-addons 0.8). */
+  cursor?: any;
+}
+
+/**
+ * A page of every title (`"host": "0.8"`). While `next` is set (anything but `null`), `items()` is
+ * called again with it as `ctx.cursor`; all pages together are every title.
+ */
+interface ItemsPage {
+  items: Item[];
+  next?: any;
+  partial?: false;
+}
+
+/**
+ * Only what changed since the last sync, when `ctx.full` is false (`"host": "0.8"`): the new or
+ * changed titles, whole, and the ids that are gone. May have `next`, every page partial.
+ */
+interface ItemsChanges {
+  partial: true;
+  items: Item[];
+  removed?: string[];
+  next?: any;
 }
 
 /** A setting's value by its `type`: `text`, `secret` and `select` a string (a `select` one of its options' values), `host` the address as the person typed it, whose host and port your addon may reach (rex-addons 0.7), `bool` a boolean, `number` a number, `list` a list of strings. */

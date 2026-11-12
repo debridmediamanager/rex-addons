@@ -15,7 +15,7 @@ rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [-
 |---|---|---|
 | `--listen` | `127.0.0.1:32410` | Where the API and the byte paths answer. This address is also what each addon registers with rex as its byte URL (`0.0.0.0` registers as `127.0.0.1`) |
 | `--rex` | `http://127.0.0.1:32400` | rex. rex-addons waits for it: nothing syncs, and nothing counts as failed, until it answers |
-| `--data` | `./rex-addons-data` | `<dir>/addons/<id>/` holds each installed addon: `manifest.json`, `main.js`, `config.json`, `storage.json`, and the host's own `state.json`, `probes.json`, `probe_failures.json`, `index.json`, and for a Spotify addon `spotify-credentials.json` (the sign-in, mode 600, never served or given to the addon). `<dir>/repos/<repo id>/` holds each repository's fetched files, `<dir>/repos.json` the list. `<dir>/removed.json` lists bundled addons the person removed |
+| `--data` | `./rex-addons-data` | `<dir>/addons/<id>/` holds each installed addon: `manifest.json`, `main.js`, `config.json`, `storage.json`, and the host's own `state.json`, `probes.json`, `probe_failures.json`, `index.json`, `held.json`, and for a Spotify addon `spotify-credentials.json` (the sign-in, mode 600, never served or given to the addon). `<dir>/repos/<repo id>/` holds each repository's fetched files, `<dir>/repos.json` the list. `<dir>/removed.json` lists bundled addons the person removed |
 | `--ffprobe` | none | The ffprobe behind addons' `ffprobe()` and the host's own check of a title that arrives without `media_info`. Without it `ffprobe()` fails, those titles reach rex unprobed, and rex holds unprobed titles without showing them |
 | `--bundled` | none | Addon folders installed on the first start, and updated whenever the bundled `version` is higher. A person can remove one; it then stays removed. Installing the same addon from a repository later makes it that repository's |
 | `--dev` | none | Addon folders installed on every start, whatever their `version`, and installed again, then synced (`ctx.reason` `install`), within a second of their `manifest.json` or `main.js` changing. For writing an addon; one it can't install is a `WARN [host] dev <folder>: ...` line and the last one installed stays |
@@ -26,11 +26,12 @@ rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [-
 one line each, tagged `[host]`, `[<addon id>]` or `[addon <id>]` for what the addon itself printed.
 
 ```
-rex-addons check <addon folder> [--config '<json>'] [--open <item id>] [--ffprobe <path>] [--data <dir>]
+rex-addons check <addon folder> [--config '<json>'] [--since <unix seconds>] [--open <item id>] [--ffprobe <path>] [--data <dir>]
 ```
 
 tries one addon folder without rex or a running rex-addons: the manifest, what installing checks,
-one `items()` (`ctx.reason` `manual`) and, with `--open`, one `open()`, each printed as an `ok`,
+`items()` (`ctx.reason` `manual`, every page, `ctx.full` `true`, or with `--since` `false` and
+`ctx.last_sync` that time) and, with `--open`, one `open()`, each printed as an `ok`,
 `FAIL` or `note` line. It exits with 0 when every step worked, 1 when one failed, 2 when asked
 wrongly. `--data` names a rex-addons data directory whose storage, and installed addons, the
 addon uses; without it storage starts empty and is thrown away. What it prints is in
@@ -67,8 +68,8 @@ JSON in and out. It answers only this device: the socket's own peer address must
 | Field | Meaning |
 |---|---|
 | `state` | `syncing`, `error` (the last sync failed: `error` says why), or `idle` |
-| `error_kind` | `would_remove` when the last sync failed because rex refused a snapshot that would remove more than half of the addon's titles (offer a forced sync), `sign_in` when it failed because the addon needs signing in (offer that), else `null` |
-| `items` | Titles in rex from the last sync, probed |
+| `error_kind` | `would_remove` when the last sync failed because it would have removed more than half of the addon's titles, refused by rex's snapshot guard or, for changes only, by rex-addons (offer a forced sync), `sign_in` when it failed because the addon needs signing in (offer that), else `null` |
+| `items` | Titles in rex, probed, after the last sync that worked (one of changes only included) |
 | `warnings` | Entries the last sync left out, which show nowhere else: `count`, every one of them, and `first`, the messages of the first five, such as `items(): "a" has the path "/a.mp4", which is not relative; left out` or `rex rejected "a": ...`. `{"count": 0, "first": []}` when none was. The next sync that runs `items()` replaces them |
 | `held` | Titles sent without a probe, which rex holds unshown (no ffprobe, or one that failed). A title whose probe failed is probed again after one sync interval (`refresh_minutes`), doubled for each failure after that, at most a week; new settings or a new version of the addon try them all again at the next sync |
 | `last_sync` | Unix seconds of the last sync that worked, or `null` |
@@ -154,7 +155,8 @@ most the last 300 are kept, in memory only, each cut to 4 KB.
 
 Starts a sync now: `202 {"syncing": true}`, also when one is already running. `409` when the addon
 is disabled. Body `{"force": true}` lets this sync remove more than half of the addon's titles,
-for when rex refused one that was right (`error_kind` is `would_remove`). Force is for that one
+for when rex refused one that was right (`error_kind` is `would_remove`), and asks the addon for
+every title. Force is for that one
 attempt: if it fails for another reason, the automatic retries are not forced.
 
 ### `POST /api/addons/{id}/restore`

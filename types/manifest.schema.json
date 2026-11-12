@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://raw.githubusercontent.com/debridmediamanager/rex-addons/main/types/manifest.schema.json",
   "title": "rex-addons manifest.json",
-  "description": "What an addon is, for rex-addons 0.7. The rules are the ones installing checks; four it checks that this file can't are that each config key is listed once, that requires doesn't name the addon's own id, that a select's option values are each given once, and that its default is one of them. https://github.com/debridmediamanager/rex-addons/blob/main/docs/writing-addons.md#manifestjson",
+  "description": "What an addon is, for rex-addons 0.8. The rules are the ones installing checks; four it checks that this file can't are that each config key is listed once, that requires doesn't name the addon's own id, that a select's option values are each given once, and that its default is one of them. https://github.com/debridmediamanager/rex-addons/blob/main/docs/writing-addons.md#manifestjson",
   "type": "object",
   "required": ["id", "name", "version"],
   "properties": {
@@ -48,7 +48,7 @@
       "minimum": 5
     },
     "host": {
-      "description": "The lowest rex-addons version your addon needs, such as \"0.2\". 0.2: sleep, atob, btoa, URL, URLSearchParams, hash, hmac, bytes(), a binary body. 0.3: sign_in. 0.4: playlists from open(). 0.5: \"kind\": \"spotify\", exports, requires. 0.6: select settings, storage.keys, TextEncoder, TextDecoder, crypto, md5 and bytes in hash and hmac, ctx.host, ctx.addon, ctx.reason, RETRY_AFTER. 0.7: host settings.",
+      "description": "The lowest rex-addons version your addon needs, such as \"0.2\". 0.2: sleep, atob, btoa, URL, URLSearchParams, hash, hmac, bytes(), a binary body. 0.3: sign_in. 0.4: playlists from open(). 0.5: \"kind\": \"spotify\", exports, requires. 0.6: select settings, storage.keys, TextEncoder, TextDecoder, crypto, md5 and bytes in hash and hmac, ctx.host, ctx.addon, ctx.reason, RETRY_AFTER. 0.7: host settings. 0.8: items() in pages and with changes only ({items, next}, {partial, items, removed}, ctx.cursor, ctx.full, ctx.last_sync), which installing can't check.",
       "type": ["string", "null"],
       "pattern": "^[0-9]+(\\.[0-9]+)*$"
     },

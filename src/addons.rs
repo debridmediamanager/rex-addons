@@ -17,6 +17,8 @@ pub struct Field {
     pub label: String,
     /// A `list` answered redacted entry by entry (`"secret": true`).
     pub secret: bool,
+    /// A `select`'s option values.
+    pub options: Vec<String>,
 }
 
 /// How an addon signs in to the person's account.
@@ -62,8 +64,9 @@ fn valid_id(id: &str) -> bool {
         && id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-fn fits(kind: &str, value: &Json) -> bool {
-    match kind {
+fn fits(field: &Field, value: &Json) -> bool {
+    match field.kind.as_str() {
+        "select" => value.as_str().is_some_and(|value| field.options.iter().any(|option| option == value)),
         "text" | "secret" => value.is_string(),
         "bool" => value.is_boolean(),
         "number" => value.is_number(),
@@ -120,21 +123,46 @@ impl Manifest {
                 return Err(format!("manifest: config key {key} is listed twice"));
             }
             let kind = entry.get("type").and_then(Json::as_str).unwrap_or("");
-            if !matches!(kind, "text" | "secret" | "bool" | "number" | "list") {
-                return Err(format!("manifest: config {key}: type must be text, secret, bool, number or list"));
+            if !matches!(kind, "text" | "secret" | "bool" | "number" | "list" | "select") {
+                return Err(format!("manifest: config {key}: type must be text, secret, bool, number, list or select"));
             }
-            let default = entry.get("default").cloned().unwrap_or(Json::Null);
-            if !default.is_null() && !fits(kind, &default) {
-                return Err(format!("manifest: config {key}: the default is no {kind}"));
+            let options = match (kind, entry.get("options")) {
+                ("select", Some(Json::Array(options))) if !options.is_empty() => {
+                    let mut values: Vec<String> = Vec::new();
+                    for option in options {
+                        let (Some(value), Some(_)) = (option.get("value").and_then(Json::as_str), option.get("label").and_then(Json::as_str)) else {
+                            return Err(format!("manifest: config {key}: each option must be {{\"value\": text, \"label\": text}}"));
+                        };
+                        if values.iter().any(|v| v == value) {
+                            return Err(format!("manifest: config {key}: the option {value:?} is listed twice"));
+                        }
+                        values.push(value.to_string());
+                    }
+                    values
+                }
+                ("select", _) => return Err(format!("manifest: config {key}: a select needs options, a list of {{\"value\", \"label\"}}")),
+                (_, None | Some(Json::Null)) => Vec::new(),
+                (_, Some(_)) => return Err(format!("manifest: config {key}: only a select has options")),
+            };
+            if entry.get("help").is_some_and(|help| !help.is_null() && !help.is_string()) {
+                return Err(format!("manifest: config {key}: help must be text"));
             }
-            config.push(Field {
+            let field = Field {
                 key: key.into(),
                 kind: kind.into(),
-                default,
+                default: entry.get("default").cloned().unwrap_or(Json::Null),
                 required: entry.get("required").and_then(Json::as_bool).unwrap_or(false),
                 label: entry.get("label").and_then(Json::as_str).unwrap_or(key).into(),
                 secret: entry.get("secret").and_then(Json::as_bool).unwrap_or(false),
-            });
+                options,
+            };
+            if !field.default.is_null() && !fits(&field, &field.default) {
+                return Err(match kind {
+                    "select" => format!("manifest: config {key}: the default is not one of its options"),
+                    _ => format!("manifest: config {key}: the default is no {kind}"),
+                });
+            }
+            config.push(field);
         }
         if raw.get("config").is_some_and(|c| !c.is_null() && !c.is_array()) {
             return Err("manifest: config must be a list".into());
@@ -189,6 +217,10 @@ impl Manifest {
         if (spotify || !exports.is_empty() || !requires.is_empty()) && host.as_deref().is_none_or(|host| newer("0.5", host)) {
             return Err("manifest: sign_in kind spotify, exports and requires need \"host\": \"0.5\" or newer".into());
         }
+        // An older rex-addons refuses the type with a message that doesn't say why.
+        if config.iter().any(|field| field.kind == "select") && host.as_deref().is_none_or(|host| newer("0.6", host)) {
+            return Err("manifest: a select setting needs \"host\": \"0.6\" or newer".into());
+        }
         Ok(Manifest { id, name, version, description, hosts: Hosts(hosts), config, refresh_minutes, host, sign_in, exports, requires, raw: raw.clone() })
     }
 
@@ -200,11 +232,15 @@ impl Manifest {
         }
     }
 
-    /// The settings an addon is called with: each field's default, then what was saved.
+    /// The settings an addon is called with: each field's default, then what was saved. A saved
+    /// option a new version no longer offers gives the default.
     pub fn effective(&self, saved: &Map<String, Json>) -> Map<String, Json> {
         self.config
             .iter()
-            .map(|field| (field.key.clone(), saved.get(&field.key).cloned().unwrap_or_else(|| field.default.clone())))
+            .map(|field| {
+                let saved = saved.get(&field.key).filter(|value| field.kind != "select" || fits(field, value));
+                (field.key.clone(), saved.cloned().unwrap_or_else(|| field.default.clone()))
+            })
             .collect()
     }
 
@@ -278,7 +314,7 @@ impl Manifest {
                 next.remove(key);
             } else if field.kind == "secret" && value.as_str() == Some(MASK) {
                 continue;
-            } else if field.kind == "list" && field.secret && fits("list", value) {
+            } else if field.kind == "list" && field.secret && value.as_array().is_some_and(|items| items.iter().all(Json::is_string)) {
                 // An entry sent back as it was answered keeps the saved one it stands for.
                 let effective = self.effective(saved);
                 let mut unused: Vec<Option<&str>> = effective[key].as_array().into_iter().flatten().map(Json::as_str).collect();
@@ -288,14 +324,15 @@ impl Manifest {
                     json!(kept.unwrap_or(entry))
                 });
                 next.insert(key.clone(), entries.collect());
-            } else if fits(&field.kind, value) {
+            } else if fits(field, value) {
                 next.insert(key.clone(), value.clone());
             } else {
                 return Err(format!("{}: must be {}", field.label, match field.kind.as_str() {
-                    "list" => "a list of text",
-                    "bool" => "true or false",
-                    "number" => "a number",
-                    _ => "text",
+                    "list" => "a list of text".to_string(),
+                    "bool" => "true or false".into(),
+                    "number" => "a number".into(),
+                    "select" => format!("one of {}", field.options.join(", ")),
+                    _ => "text".into(),
                 }));
             }
         }
@@ -355,6 +392,16 @@ mod tests {
             (json!({"id": "a", "name": "x", "version": "v1"}), "version"),
             (json!({"id": "a", "name": "x", "version": "1", "hosts": ["http://x.com/"]}), "host"),
             (json!({"id": "a", "name": "x", "version": "1", "config": [{"key": "k", "type": "color"}]}), "type"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.6", "config": [{"key": "k", "type": "select"}]}), "a select needs options"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.6", "config": [{"key": "k", "type": "select", "options": []}]}), "a select needs options"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.6", "config": [{"key": "k", "type": "select", "options": [{"value": 1, "label": "One"}]}]}), "each option must be"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.6", "config": [{"key": "k", "type": "select", "options": [{"value": "1"}]}]}), "each option must be"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.6", "config": [{"key": "k", "type": "select", "options": [{"value": "1", "label": "a"}, {"value": "1", "label": "b"}]}]}), "\"1\" is listed twice"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.6", "config": [{"key": "k", "type": "select", "default": "2", "options": [{"value": "1", "label": "One"}]}]}), "the default is not one of its options"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.6", "config": [{"key": "k", "type": "text", "options": [{"value": "1", "label": "One"}]}]}), "only a select has options"),
+            (json!({"id": "a", "name": "x", "version": "1", "config": [{"key": "k", "type": "select", "options": [{"value": "1", "label": "One"}]}]}), "\"host\": \"0.6\""),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "config": [{"key": "k", "type": "select", "options": [{"value": "1", "label": "One"}]}]}), "\"host\": \"0.6\""),
+            (json!({"id": "a", "name": "x", "version": "1", "config": [{"key": "k", "type": "text", "help": 5}]}), "help must be text"),
             (json!({"id": "a", "name": "x", "version": "1", "config": [{"key": "k", "type": "number", "default": "5"}]}), "default"),
             (json!({"id": "a", "name": "x", "version": "1", "refresh_minutes": 1}), "refresh_minutes"),
             (json!({"id": "a", "name": "x", "version": "1", "host": "v0.2"}), "host"),
@@ -406,6 +453,29 @@ mod tests {
             let error = m.apply(&saved, &bad).unwrap_err();
             assert!(error.contains(says), "{bad}: {error}");
         }
+    }
+
+    /// A select takes one of its options' values, on install and on a PUT; `help` is any field's
+    /// text for the app, and needs no newer rex-addons.
+    #[test]
+    fn select_settings_take_only_their_options() {
+        let m = Manifest::parse(&json!({"id": "s", "name": "S", "version": "1", "host": "0.6", "config": [
+            {"key": "quality", "label": "Highest quality", "type": "select", "default": "1080", "help": "720 uses less data",
+             "options": [{"value": "1080", "label": "1080p"}, {"value": "720", "label": "720p"}]},
+            {"key": "lang", "label": "Language", "type": "select", "options": [{"value": "en", "label": "English"}]}
+        ]}))
+        .unwrap();
+        assert_eq!(m.config[0].options, ["1080", "720"]);
+        assert_eq!(m.effective(&Map::new()), json!({"quality": "1080", "lang": null}).as_object().unwrap().clone());
+        let saved = m.apply(&Map::new(), &json!({"quality": "720"})).unwrap();
+        assert_eq!(m.effective(&saved)["quality"], json!("720"));
+        for bad in [json!({"quality": "480"}), json!({"quality": 720}), json!({"quality": ["720"]})] {
+            assert_eq!(m.apply(&saved, &bad).unwrap_err(), "Highest quality: must be one of 1080, 720");
+        }
+        // A saved option a newer version dropped gives the default.
+        let dropped = json!({"quality": "2160"}).as_object().unwrap().clone();
+        assert_eq!(m.effective(&dropped)["quality"], json!("1080"));
+        assert!(Manifest::parse(&json!({"id": "a", "name": "x", "version": "1", "config": [{"key": "k", "type": "text", "help": "Shown under it"}]})).is_ok());
     }
 
     #[test]

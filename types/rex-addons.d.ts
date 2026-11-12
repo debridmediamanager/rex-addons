@@ -1,4 +1,4 @@
-// What an addon's main.js can use inside rex-addons 0.5, for your editor: autocomplete and, with
+// What an addon's main.js can use inside rex-addons 0.6, for your editor: autocomplete and, with
 // `// @ts-check` at the top of main.js, a warning where code uses something that isn't there.
 // Plain JavaScript (ES2022) plus the globals below, and nothing else: no DOM, no Node, no timers.
 // The guide: https://github.com/debridmediamanager/rex-addons/blob/main/docs/writing-addons.md
@@ -18,8 +18,13 @@ type Awaitable<T> = T | Promise<T>;
  * `Config` types `ctx.config`, such as `Addon<{count: number}>`.
  */
 interface Addon<Config = AddonConfig> {
-  /** Every title you have, as a list, every time. Throw rather than return half a list. 30 s of JavaScript, 20 minutes in all. */
-  items(ctx: AddonContext<Config>): Awaitable<Item[]>;
+  /**
+   * Every title you have, as a list, every time. Throw rather than return half a list. 30 s of
+   * JavaScript, 20 minutes in all. Throw an error whose message starts with `RETRY_AFTER <seconds>`
+   * (`RETRY_AFTER 3600: answered 429`) and the next try waits that long, 1 minute to 24 hours,
+   * instead of 5 minutes (rex-addons 0.6).
+   */
+  items(ctx: ItemsContext<Config>): Awaitable<Item[]>;
   /** Where one title plays from. The answer is reused for 10 minutes. 10 s of JavaScript, 90 s in all. */
   open(id: string, ctx: AddonContext<Config>): Awaitable<Opened>;
   /** With `sign_in` (kind `code`): starts a sign-in and returns the code the person types. Needs `"host": "0.3"`. */
@@ -36,9 +41,24 @@ interface Addon<Config = AddonConfig> {
 interface AddonContext<Config = AddonConfig> {
   /** The settings, each one its saved value or its default (`null` with neither). */
   config: Config;
+  /** This rex-addons' version, such as `"0.6.0"`. rex-addons 0.6. */
+  host: string;
+  /** Which addon this is, from its manifest. rex-addons 0.6. */
+  addon: { id: string; version: string };
 }
 
-/** A setting's value by its `type`: `text` and `secret` a string, `bool` a boolean, `number` a number, `list` a list of strings. */
+/** What `items()` gets: also why this sync runs. */
+interface ItemsContext<Config = AddonConfig> extends AddonContext<Config> {
+  /**
+   * Why this sync runs (rex-addons 0.6): `schedule`, `refresh_minutes` passed; `retry`, the last
+   * failed, or an addon this one requires was just signed in or enabled; `manual`, a person asked
+   * (a sync from the app, enabling it, restoring deleted titles, `rex-addons check`); `settings`,
+   * they changed; `install`, installed or updated and not synced since; `sign_in`, just signed in.
+   */
+  reason: "schedule" | "retry" | "manual" | "settings" | "install" | "sign_in";
+}
+
+/** A setting's value by its `type`: `text`, `secret` and `select` a string (a `select` one of its options' values), `bool` a boolean, `number` a number, `list` a list of strings. */
 type AddonConfig = { [key: string]: any };
 
 /** What `open()` returns. The link must be on your `hosts`. */
@@ -307,6 +327,8 @@ declare const storage: {
   /** Setting `undefined` deletes the key. */
   readonly set: (key: string, value: any) => void;
   readonly delete: (key: string) => void;
+  /** Every key, sorted; with `prefix`, only those starting with it. rex-addons 0.6. */
+  readonly keys: (prefix?: string) => string[];
 };
 
 /** Waits, for backing off on a 429. Doesn't count as JavaScript time; a sleep past the end of the call fails at once. */
@@ -317,11 +339,35 @@ declare function atob(data: string): string;
 /** Text whose characters are bytes (0 to 255) to base64. rex-addons 0.2. */
 declare function btoa(data: string): string;
 
-type HashAlgorithm = "sha1" | "sha256" | "sha512";
-/** A digest of the text (as UTF-8) in lowercase hex. There's no `md5`. rex-addons 0.2. */
-declare function hash(algorithm: HashAlgorithm, text: string): string;
-/** An HMAC of the text (as UTF-8) with `key`, in lowercase hex. rex-addons 0.2. */
-declare function hmac(algorithm: HashAlgorithm, key: string, text: string): string;
+/** `md5` is rex-addons 0.6's. */
+type HashAlgorithm = "md5" | "sha1" | "sha256" | "sha512";
+/** Text, taken as UTF-8, or bytes (rex-addons 0.6). */
+type HashInput = string | ArrayBuffer | ArrayBufferView;
+/** A digest of `data` in lowercase hex. rex-addons 0.2. */
+declare function hash(algorithm: HashAlgorithm, data: HashInput): string;
+/** An HMAC of `data` with `key`, in lowercase hex. rex-addons 0.2. */
+declare function hmac(algorithm: HashAlgorithm, key: HashInput, data: HashInput): string;
+
+/** Text to UTF-8 bytes, as in browsers. rex-addons 0.6. */
+declare class TextEncoder {
+  readonly encoding: "utf-8";
+  encode(text?: string): Uint8Array;
+}
+
+/** UTF-8 bytes to text, as in browsers; bytes that aren't UTF-8 become U+FFFD. UTF-8 only: another label throws. rex-addons 0.6. */
+declare class TextDecoder {
+  constructor(label?: "utf-8" | "utf8" | "unicode-1-1-utf-8");
+  readonly encoding: "utf-8";
+  decode(bytes?: ArrayBuffer | ArrayBufferView): string;
+}
+
+/** Random numbers, as in browsers. No `subtle`. rex-addons 0.6. */
+declare const crypto: {
+  /** Fills an integer typed array, at most 65,536 bytes, and returns it. */
+  readonly getRandomValues: <T extends Int8Array | Uint8Array | Uint8ClampedArray | Int16Array | Uint16Array | Int32Array | Uint32Array | BigInt64Array | BigUint64Array>(array: T) => T;
+  /** A random version 4 UUID, lowercase. */
+  readonly randomUUID: () => string;
+};
 
 /** A link, as in browsers but smaller. rex-addons 0.2. */
 declare class URL {

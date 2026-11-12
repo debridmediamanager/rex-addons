@@ -667,7 +667,7 @@ build step:
   isn't there (`setTimeout`, `document`), a call with the wrong arguments, an item without a
   `path` and an `open()` that returns neither `{ url }` nor playlists.
 
-The types are rex-addons 0.5's, and they keep a browser's globals out even where a
+The types are rex-addons 0.6's, and they keep a browser's globals out even where a
 `jsconfig.json` asks for them. The [bundled addons](../addons) use both files (the YouTube addon
 only the schema).
 

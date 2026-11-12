@@ -244,12 +244,12 @@ impl Manifest {
             .collect()
     }
 
-    /// The first required setting that is empty, by its label.
-    pub fn missing(&self, saved: &Map<String, Json>) -> Option<String> {
+    /// The required settings that are empty, by their labels.
+    pub fn missing(&self, saved: &Map<String, Json>) -> Vec<String> {
         let effective = self.effective(saved);
         self.config
             .iter()
-            .find(|field| {
+            .filter(|field| {
                 field.required
                     && match &effective[&field.key] {
                         Json::Null => true,
@@ -259,6 +259,7 @@ impl Manifest {
                     }
             })
             .map(|field| field.label.clone())
+            .collect()
     }
 
     pub fn masked(&self, saved: &Map<String, Json>) -> Map<String, Json> {
@@ -438,9 +439,9 @@ mod tests {
     #[test]
     fn config_validation_defaults_and_secrets() {
         let m = manifest();
-        assert_eq!(m.missing(&Map::new()).as_deref(), Some("Links"));
+        assert_eq!(m.missing(&Map::new()), ["Links"]);
         let saved = m.apply(&Map::new(), &json!({"urls": ["https://a/manifest.json"], "token": "s3cret"})).unwrap();
-        assert_eq!(m.missing(&saved), None);
+        assert!(m.missing(&saved).is_empty());
         assert_eq!(m.effective(&saved)["limit"], json!(50));
         assert_eq!(m.masked(&saved)["token"], json!(MASK));
         // The app sends the masked value back: the secret stays.

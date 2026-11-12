@@ -4,6 +4,7 @@
 mod addon_tests;
 mod addons;
 mod app;
+mod check;
 mod git;
 mod net;
 mod probe;
@@ -35,7 +36,10 @@ const USAGE: &str = "rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:
   --default-repo  an addon repository added once, the first time it is given; repeatable
   --device-name   the name this device shows in the Spotify app while a Spotify addon pairs (default rex)
 
-  REX_ADDONS_TOKEN  when set, every /api/ request must carry Authorization: Bearer <it>";
+  REX_ADDONS_TOKEN  when set, every /api/ request must carry Authorization: Bearer <it>
+
+rex-addons check <addon folder> [--config '<json>'] [--open <item id>] [--ffprobe <path>] [--data <dir>]
+  tries an addon once, without rex: rex-addons check --help says more";
 
 fn main() {
     let mut listen: SocketAddr = "127.0.0.1:32410".parse().unwrap();
@@ -43,7 +47,15 @@ fn main() {
     let mut data = PathBuf::from("rex-addons-data");
     let (mut ffprobe, mut bundled, mut dev, mut defaults) = (None, None, None, Vec::new());
     let mut device_name = "rex".to_string();
-    let mut args = std::env::args().skip(1);
+    let all: Vec<String> = std::env::args().skip(1).collect();
+    if all.first().map(String::as_str) == Some("check") {
+        if all.iter().any(|arg| arg == "--help" || arg == "-h") {
+            println!("{}", check::USAGE);
+            return;
+        }
+        std::process::exit(check::run(&all[1..]));
+    }
+    let mut args = all.into_iter();
     while let Some(flag) = args.next() {
         if matches!(flag.as_str(), "-h" | "--help") {
             println!("{USAGE}");

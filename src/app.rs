@@ -53,8 +53,13 @@ fn remember_secrets(addon: &Addon) {
     let mut secrets = addon.manifest.secrets(&addon.config);
     // The code a person types to sign in is theirs to see, not the log's.
     secrets.extend(addon.pending.as_ref().map(|pending| pending.code.clone()).filter(|code| !code.is_empty()));
+    mask_secrets(&addon.manifest.id, secrets);
+}
+
+/// Every line logged for the addon `id` from now on has these masked.
+pub fn mask_secrets(id: &str, mut secrets: Vec<String>) {
     secrets.sort_by_key(|secret| std::cmp::Reverse(secret.len()));
-    SECRETS.lock().unwrap().insert(addon.manifest.id.clone(), secrets);
+    SECRETS.lock().unwrap().insert(id.to_string(), secrets);
 }
 
 /// `text` with the secret settings of the addon `tag` masked.
@@ -369,14 +374,7 @@ impl App {
     pub fn install(&self, raw: &Json, source: &str, repo: Option<&str>) -> Result<String, String> {
         let manifest = Manifest::parse(raw)?;
         manifest.check_host()?;
-        let storage = Arc::new(Storage::open(PathBuf::from("/dev/null")));
-        let env = Env { addon: &manifest.id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone(), spotify: None, calls: None };
-        let mut needed = vec![json!("items"), json!("open")];
-        if manifest.sign_in.as_ref().is_some_and(|s| !s.spotify()) {
-            needed.extend([json!("signIn"), json!("signInPoll")]);
-        }
-        needed.extend(manifest.exports.iter().map(|name| json!(name)));
-        sandbox::call(&env, "", &needed, sandbox::OPEN).map_err(|error| format!("main.js: {error}"))?;
+        self.loads(&manifest, source)?;
         let path = dir(self, &manifest.id);
         std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
         write_atomic(&path.join("main.js"), source.as_bytes()).map_err(|e| e.to_string())?;
@@ -406,6 +404,21 @@ impl App {
         drop(addons);
         self.set_removed(&id, false);
         Ok(id)
+    }
+
+    /// What installing checks of `main.js`: it loads, and exports `items` and `open`, `signIn` and
+    /// `signInPoll` with a code sign-in, and each of `exports`. The names checked, or why not.
+    pub fn loads(&self, manifest: &Manifest, source: &str) -> Result<Vec<String>, String> {
+        let storage = Arc::new(Storage::open(PathBuf::from("/dev/null")));
+        let env = Env { addon: &manifest.id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone(), spotify: None, calls: None };
+        let mut needed = vec!["items".to_string(), "open".into()];
+        if manifest.sign_in.as_ref().is_some_and(|s| !s.spotify()) {
+            needed.extend(["signIn".to_string(), "signInPoll".into()]);
+        }
+        needed.extend(manifest.exports.iter().cloned());
+        let names: Vec<Json> = needed.iter().map(|name| json!(name)).collect();
+        sandbox::call(&env, "", &names, sandbox::OPEN).map_err(|error| format!("main.js: {error}"))?;
+        Ok(needed)
     }
 
     /// Removes an addon and, through rex's two-step delete, its source and everything it pushed.
@@ -520,24 +533,7 @@ impl App {
     fn call_open(self: &Arc<Self>, id: &str, item: &str, manifest: &Manifest, source: &str, config: &Map<String, Json>, storage: Arc<Storage>) -> Result<Opened, String> {
         let env = self.env(id, manifest, source, storage, true);
         let answer = sandbox::call(&env, "open", &[json!(item), call_ctx(manifest, config)], sandbox::OPEN)?;
-        if !answer["playlist"].is_null() {
-            // An older rex-addons answers it with "open() returned no url".
-            if manifest.host.as_deref().is_none_or(|host| newer("0.4", host)) {
-                return Err("open() returned playlists, which need \"host\": \"0.4\" in the manifest".into());
-            }
-            let playlists = probe::Playlists::parse(&answer, &manifest.hosts).map_err(|e| format!("open() returned playlists: {e}"))?;
-            return Ok(Opened { url: String::new(), headers: Vec::new(), playlists: Some(Arc::new(playlists)) });
-        }
-        let url = answer["url"].as_str().ok_or("open() returned no url")?;
-        let parsed = url::Url::parse(url).map_err(|e| format!("open() returned {url}: {e}"))?;
-        if !matches!(parsed.scheme(), "http" | "https") || !manifest.hosts.allows(parsed.host_str().unwrap_or("")) {
-            return Err(format!("open() returned {url}, which is not on the addon's hosts"));
-        }
-        let headers = answer["headers"]
-            .as_object()
-            .map(|h| h.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
-            .unwrap_or_default();
-        Ok(Opened { url: url.to_string(), headers, playlists: None })
+        opened_from(&answer, manifest)
     }
 
     pub fn forget_open(&self, id: &str, item: &str) {
@@ -650,7 +646,7 @@ impl App {
             }
             (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone(), a.deleted.clone())
         };
-        if let Some(label) = manifest.missing(&config) {
+        if let Some(label) = manifest.missing(&config).first() {
             return Err(format!("set {label} first"));
         }
         let env = self.env(id, &manifest, &source, storage, true);
@@ -667,7 +663,10 @@ impl App {
                 None => error,
             }
         })?;
-        let (mut items, left_out) = checked_items(id, returned, &deleted)?;
+        let (mut items, left_out) = checked_items(returned, &deleted)?;
+        for why in &left_out {
+            warn(id, why);
+        }
         if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
             (addon.warned, addon.warnings) = (0, Vec::new());
             warned(addon, left_out);
@@ -1161,7 +1160,7 @@ impl App {
 
     /// The sandbox an addon's call runs in, with the globals its manifest asks for. `calls`:
     /// whether `addons.call` reaches other addons (false inside a call from another one).
-    fn env<'a>(self: &Arc<Self>, id: &'a str, manifest: &'a Manifest, source: &'a str, storage: Arc<Storage>, calls: bool) -> Env<'a> {
+    pub fn env<'a>(self: &Arc<Self>, id: &'a str, manifest: &'a Manifest, source: &'a str, storage: Arc<Storage>, calls: bool) -> Env<'a> {
         let spotify = manifest.sign_in.as_ref().filter(|s| s.spotify()).map(|_| {
             let (app, id) = (self.clone(), id.to_string());
             Arc::new(move |method: &str, path: &str, body: Vec<Json>| app.spotify_call(&id, method, path, body.first())) as Bridge
@@ -1175,6 +1174,29 @@ impl App {
         });
         Env { addon: id, source, hosts: &manifest.hosts, storage, prober: self.prober.clone(), spotify, calls }
     }
+}
+
+/// What `open()` returned, checked: playlists (`"host": "0.4"`, every link on the addon's hosts),
+/// or a link on its hosts and the headers it needs.
+pub fn opened_from(answer: &Json, manifest: &Manifest) -> Result<Opened, String> {
+    if !answer["playlist"].is_null() {
+        // An older rex-addons answers it with "open() returned no url".
+        if manifest.host.as_deref().is_none_or(|host| newer("0.4", host)) {
+            return Err("open() returned playlists, which need \"host\": \"0.4\" in the manifest".into());
+        }
+        let playlists = probe::Playlists::parse(answer, &manifest.hosts).map_err(|e| format!("open() returned playlists: {e}"))?;
+        return Ok(Opened { url: String::new(), headers: Vec::new(), playlists: Some(Arc::new(playlists)) });
+    }
+    let url = answer["url"].as_str().ok_or("open() returned no url")?;
+    let parsed = url::Url::parse(url).map_err(|e| format!("open() returned {url}: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || !manifest.hosts.allows(parsed.host_str().unwrap_or("")) {
+        return Err(format!("open() returned {url}, which is not on the addon's hosts"));
+    }
+    let headers = answer["headers"]
+        .as_object()
+        .map(|h| h.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
+        .unwrap_or_default();
+    Ok(Opened { url: url.to_string(), headers, playlists: None })
 }
 
 /// Why the addon `id` cannot be called now: `not installed`, `disabled` or `sign in needed`.
@@ -1281,7 +1303,7 @@ fn signed_out(app: &App, addon: &mut Addon, reason: &str) {
 
 /// What every call of an addon gets as `ctx`: its settings, this rex-addons' version and which
 /// addon and version it is.
-fn call_ctx(manifest: &Manifest, config: &Map<String, Json>) -> Json {
+pub fn call_ctx(manifest: &Manifest, config: &Map<String, Json>) -> Json {
     json!({
         "config": manifest.effective(config), "host": env!("CARGO_PKG_VERSION"),
         "addon": {"id": manifest.id, "version": manifest.version},
@@ -1546,6 +1568,9 @@ fn index_of(items: &[Map<String, Json>], deleted: &BTreeSet<String>) -> HashMap<
     items.iter().filter(|i| !deleted.contains(&id_of(i))).flat_map(|i| [(path_of(i), id_of(i)), (id_of(i), id_of(i))]).collect()
 }
 
+/// The items kept, and why each entry left out was.
+pub type Checked = (Vec<Map<String, Json>>, Vec<String>);
+
 /// Adds to the addon's warnings: each counted, the first few kept, masked and cut short.
 fn warned(addon: &mut Addon, messages: Vec<String>) {
     addon.warned += messages.len();
@@ -1555,9 +1580,8 @@ fn warned(addon: &mut Addon, messages: Vec<String>) {
 }
 
 /// What `items()` returned, kept to what rex can take: objects with an `id` and a relative
-/// `path`, each id and path once, none a person deleted. Each entry left out is logged, and
-/// returned with why.
-fn checked_items(id: &str, returned: Json, deleted: &BTreeSet<String>) -> Result<(Vec<Map<String, Json>>, Vec<String>), String> {
+/// `path`, each id and path once, none a person deleted; and why each entry left out was.
+pub fn checked_items(returned: Json, deleted: &BTreeSet<String>) -> Result<Checked, String> {
     let Json::Array(list) = returned else {
         return Err("items() must return a list".into());
     };
@@ -1577,10 +1601,7 @@ fn checked_items(id: &str, returned: Json, deleted: &BTreeSet<String>) -> Result
             _ => Some("items(): an entry is not an object; left out".to_string()),
         };
         match (why, entry) {
-            (Some(why), _) => {
-                warn(id, &why);
-                left_out.push(why);
-            }
+            (Some(why), _) => left_out.push(why),
             (None, Json::Object(item)) if !deleted.contains(item["id"].as_str().unwrap_or_default()) => kept.push(item),
             _ => {}
         }
@@ -1711,7 +1732,6 @@ mod tests {
     fn items_are_checked() {
         let deleted = BTreeSet::from(["gone".to_string()]);
         let (kept, left_out) = checked_items(
-            "t",
             json!([
                 {"id": "a", "path": "movies/a.mp4"},
                 {"id": "a", "path": "movies/a2.mp4"},
@@ -1735,7 +1755,7 @@ mod tests {
             "items(): an entry has no id or path; left out",
             "items(): an entry is not an object; left out",
         ]);
-        assert!(checked_items("t", json!({"id": "a"}), &deleted).is_err());
+        assert!(checked_items(json!({"id": "a"}), &deleted).is_err());
     }
 
     #[test]

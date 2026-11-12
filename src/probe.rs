@@ -97,7 +97,7 @@ impl Prober {
     }
 }
 
-fn token() -> String {
+pub fn token() -> String {
     let mut bytes = [0u8; 16];
     ring::rand::SecureRandom::fill(&ring::rand::SystemRandom::new(), &mut bytes).expect("no randomness");
     bytes.iter().map(|b| format!("{b:02x}")).collect()

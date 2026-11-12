@@ -386,6 +386,7 @@ impl App {
                 addon.manifest = Arc::new(manifest);
                 addon.source = Arc::new(source.to_string());
                 addon.opened.clear();
+                addon.opening.clear();
                 addon.last_sync = None;
                 clear_probe_failures(self, addon);
                 if repo.is_some() {
@@ -854,7 +855,9 @@ impl App {
         remember_secrets(addon);
         write_atomic(&dir(self, id).join("config.json"), Json::Object(addon.config.clone()).to_string().as_bytes())
             .map_err(|e| e.to_string())?;
+        // Nothing opened with the old settings is served again, not even an open() still running.
         addon.opened.clear();
+        addon.opening.clear();
         clear_probe_failures(self, addon);
         let masked = addon.manifest.masked(&addon.config);
         let enabled = addon.enabled;
@@ -2319,6 +2322,34 @@ mod sync_tests {
         assert_eq!(app.repo_addons_json("two").unwrap()[0]["installed_repo"], "one");
         let nothing = app.repo_addons_json("two").unwrap();
         assert_eq!(nothing[0]["installed_hosts"], json!(["*"]));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Once the settings change, nothing open() answered before is served again, not even an
+    /// answer still being worked out while they changed.
+    #[test]
+    fn new_settings_drop_what_open_answered() {
+        let data = std::env::temp_dir().join(format!("rex-addons-settings-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), "http://127.0.0.1:9".into(), "127.0.0.1:9".parse().unwrap(), None, None);
+        let manifest = json!({"id": "home", "name": "Home", "version": "1.0.0", "hosts": ["10.0.0.2", "10.0.0.3", "10.0.0.4"],
+            "config": [{"key": "server", "label": "Server", "type": "text"}]});
+        let source = "export default { items() { return []; }, async open(id, ctx) { await sleep(300); return { url: `http://${ctx.config.server}/${id}.mp4` }; } };";
+        app.install(&manifest, source, None).unwrap();
+        // Disabled: new settings start no sync.
+        app.addons.lock().unwrap().get_mut("home").unwrap().enabled = false;
+        let opened = |app: &Arc<App>, item: &str| app.open("home", item).map(|o| o.url);
+        app.set_config("home", &json!({"server": "10.0.0.2:8096"})).unwrap();
+        assert_eq!(opened(&app, "a").unwrap(), "http://10.0.0.2:8096/a.mp4");
+        assert!(app.addons.lock().unwrap()["home"].opened.contains_key("a"));
+        app.set_config("home", &json!({"server": "10.0.0.3:8096"})).unwrap();
+        assert_eq!(opened(&app, "a").unwrap(), "http://10.0.0.3:8096/a.mp4");
+        // Changed while an open() runs: that call answers its own caller, and is not kept.
+        let running = { let app = app.clone(); std::thread::spawn(move || opened(&app, "b")) };
+        std::thread::sleep(Duration::from_millis(100));
+        app.set_config("home", &json!({"server": "10.0.0.4:8096"})).unwrap();
+        assert_eq!(running.join().unwrap().unwrap(), "http://10.0.0.3:8096/b.mp4");
+        assert_eq!(opened(&app, "b").unwrap(), "http://10.0.0.4:8096/b.mp4");
         let _ = std::fs::remove_dir_all(&data);
     }
 

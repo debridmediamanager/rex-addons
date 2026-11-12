@@ -15,6 +15,7 @@ out=${OUT:-target/android}
 target_dir=${CARGO_TARGET_DIR:-target}
 # rquickjs ships no bindings for Android; the `android` feature generates them with bindgen,
 # which needs a libclang the build machine can load (the NDK's, unless LIBCLANG_PATH says).
+# On Linux that libclang does not find its own headers (stdbool.h), so name its resource dir.
 export LIBCLANG_PATH=${LIBCLANG_PATH:-$prebuilt/lib}
 for abi in ${ABIS:-arm64-v8a armeabi-v7a x86_64}; do
     case "$abi" in
@@ -30,7 +31,7 @@ for abi in ${ABIS:-arm64-v8a armeabi-v7a x86_64}; do
     env "CC_${triple//-/_}=$linker" "AR_${triple//-/_}=$toolchain/llvm-ar" \
         "CARGO_TARGET_${upper}_LINKER=$linker" \
         "CARGO_TARGET_${upper}_RUSTFLAGS=-C link-arg=-Wl,-z,max-page-size=16384" \
-        "BINDGEN_EXTRA_CLANG_ARGS_${triple//-/_}=--target=${clang}26 --sysroot=$prebuilt/sysroot" \
+        "BINDGEN_EXTRA_CLANG_ARGS_${triple//-/_}=--target=${clang}26 --sysroot=$prebuilt/sysroot -resource-dir=$("$toolchain/clang" -print-resource-dir)" \
         cargo build --quiet --release --locked --features android --target "$triple"
     so="$out/$abi/librexaddons.so"
     mkdir -p "$(dirname "$so")"

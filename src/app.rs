@@ -23,6 +23,8 @@ const RETRY: Duration = Duration::from_secs(5 * 60);
 const RETRY_AFTER: (u64, u64) = (60, 24 * 3600);
 /// Items rex is sent per request, as feed-api.md asks.
 const CHUNK: usize = 200;
+/// How many of the last sync's left-out entries the status quotes; it counts them all.
+const WARNINGS_SHOWN: usize = 5;
 /// Probed items go to rex in batches this big, so they show before the whole sync is done.
 const READY_BATCH: usize = 20;
 const PROBE_WORKERS: usize = 4;
@@ -127,6 +129,10 @@ pub struct Addon {
     pub error: Option<String>,
     /// `would_remove` when rex refused the last sync's snapshot as removing more than half.
     pub error_kind: Option<String>,
+    /// Entries the last sync left out (items() returned them unfit, or rex rejected them), and
+    /// the first WARNINGS_SHOWN of their messages.
+    pub warned: usize,
+    pub warnings: Vec<String>,
     /// Ids a person deleted in a Plex app: never pushed again.
     pub deleted: BTreeSet<String>,
     /// Each pushed path (and each id) to its item id: what `/bytes` reads by.
@@ -161,6 +167,7 @@ impl Addon {
             "state": if self.syncing { "syncing" } else if self.error.is_some() { "error" } else { "idle" },
             "items": self.items, "held": self.held, "last_sync": self.last_sync, "error": self.error,
             "error_kind": self.error_kind,
+            "warnings": {"count": self.warned, "first": self.warnings},
             "sign_in": m.sign_in.as_ref().map(|sign_in| json!({
                 "label": sign_in.label, "kind": sign_in.kind, "account": self.account, "error": self.sign_in_error,
                 "pending": self.pending.as_ref().map(|p| match &p.device {
@@ -597,7 +604,11 @@ impl App {
                 None => error,
             }
         })?;
-        let mut items = checked_items(id, returned, &deleted)?;
+        let (mut items, left_out) = checked_items(id, returned, &deleted)?;
+        if let Some(addon) = self.addons.lock().unwrap().get_mut(id) {
+            (addon.warned, addon.warnings) = (0, Vec::new());
+            warned(addon, left_out);
+        }
         let name = source_name(id);
         let mut registration = json!({"url": self.byte_base(id)});
         if let Some(directories) = manifest.raw.get("directories").filter(|d| d.is_array()) {
@@ -726,7 +737,7 @@ impl App {
         if status != 200 {
             return Err(format!("rex refused items ({status}): {}", answer["error"]));
         }
-        log_rejected(id, &answer);
+        self.rejected(id, &answer);
         Ok(())
     }
 
@@ -744,7 +755,7 @@ impl App {
                 body["force"] = json!(true);
             }
             let (status, answer) = self.feed_call(id, "PUT", &path, &body)?;
-            log_rejected(id, &answer);
+            self.rejected(id, &answer);
             match status {
                 200 => {}
                 409 if answer.get("would_remove").is_some() => {
@@ -761,6 +772,17 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    /// Items rex refused: logged, and counted with the sync's warnings.
+    fn rejected(&self, id: &str, answer: &Json) {
+        let messages: Vec<String> = answer["rejected"].as_array().into_iter().flatten().map(|r| format!("rex rejected {}: {}", r["id"], r["reason"])).collect();
+        for message in &messages {
+            warn(id, message);
+        }
+        if let Some(addon) = self.addons.lock().unwrap().get_mut(id).filter(|_| !messages.is_empty()) {
+            warned(addon, messages);
+        }
     }
 
     pub fn set_config(self: &Arc<Self>, id: &str, patch: &Json) -> Result<Json, String> {
@@ -1461,41 +1483,46 @@ fn index_of(items: &[Map<String, Json>], deleted: &BTreeSet<String>) -> HashMap<
     items.iter().filter(|i| !deleted.contains(&id_of(i))).flat_map(|i| [(path_of(i), id_of(i)), (id_of(i), id_of(i))]).collect()
 }
 
-fn log_rejected(id: &str, answer: &Json) {
-    for rejected in answer["rejected"].as_array().into_iter().flatten() {
-        warn(id, &format!("rex rejected {}: {}", rejected["id"], rejected["reason"]));
-    }
+/// Adds to the addon's warnings: each counted, the first few kept, masked and cut short.
+fn warned(addon: &mut Addon, messages: Vec<String>) {
+    addon.warned += messages.len();
+    let room = WARNINGS_SHOWN.saturating_sub(addon.warnings.len());
+    let id = addon.manifest.id.clone();
+    addon.warnings.extend(messages.into_iter().take(room).map(|message| format!("{:.300}", masked(&id, &message))));
 }
 
 /// What `items()` returned, kept to what rex can take: objects with an `id` and a relative
-/// `path`, each id and path once, none a person deleted.
-fn checked_items(id: &str, returned: Json, deleted: &BTreeSet<String>) -> Result<Vec<Map<String, Json>>, String> {
+/// `path`, each id and path once, none a person deleted. Each entry left out is logged, and
+/// returned with why.
+fn checked_items(id: &str, returned: Json, deleted: &BTreeSet<String>) -> Result<(Vec<Map<String, Json>>, Vec<String>), String> {
     let Json::Array(list) = returned else {
         return Err("items() must return a list".into());
     };
-    let (mut ids, mut paths, mut kept) = (BTreeSet::new(), BTreeSet::new(), Vec::new());
+    let (mut ids, mut paths, mut kept, mut left_out) = (BTreeSet::new(), BTreeSet::new(), Vec::new(), Vec::new());
     for entry in list {
-        let Json::Object(item) = entry else {
-            warn(id, "items(): an entry is not an object; left out");
-            continue;
+        let why = match &entry {
+            Json::Object(item) => match (item.get("id").and_then(Json::as_str), item.get("path").and_then(Json::as_str)) {
+                (Some(item_id), Some(path)) if item_id.is_empty() || path.starts_with('/') || path.split('/').any(|s| s.is_empty() || s == "." || s == "..") => {
+                    Some(format!("items(): {item_id:?} has the path {path:?}, which is not relative; left out"))
+                }
+                (Some(item_id), Some(path)) if !ids.insert(item_id.to_string()) || !paths.insert(path.to_string()) => {
+                    Some(format!("items(): {item_id} repeats an id or a path; left out"))
+                }
+                (Some(_), Some(_)) => None,
+                _ => Some("items(): an entry has no id or path; left out".to_string()),
+            },
+            _ => Some("items(): an entry is not an object; left out".to_string()),
         };
-        let (Some(item_id), Some(path)) = (item.get("id").and_then(Json::as_str), item.get("path").and_then(Json::as_str)) else {
-            warn(id, "items(): an entry has no id or path; left out");
-            continue;
-        };
-        if item_id.is_empty() || path.starts_with('/') || path.split('/').any(|s| s.is_empty() || s == "." || s == "..") {
-            warn(id, &format!("items(): {item_id:?} has the path {path:?}, which is not relative; left out"));
-            continue;
-        }
-        if !ids.insert(item_id.to_string()) || !paths.insert(path.to_string()) {
-            warn(id, &format!("items(): {item_id} repeats an id or a path; left out"));
-            continue;
-        }
-        if !deleted.contains(item_id) {
-            kept.push(item);
+        match (why, entry) {
+            (Some(why), _) => {
+                warn(id, &why);
+                left_out.push(why);
+            }
+            (None, Json::Object(item)) if !deleted.contains(item["id"].as_str().unwrap_or_default()) => kept.push(item),
+            _ => {}
         }
     }
-    Ok(kept)
+    Ok((kept, left_out))
 }
 
 /// ffprobe's container to the extension rex takes the file by.
@@ -1559,6 +1586,8 @@ fn load(path: &Path) -> Result<Addon, String> {
         held: state["held"].as_u64().unwrap_or(0) as usize,
         error: state["error"].as_str().map(str::to_string),
         error_kind: state["error_kind"].as_str().map(str::to_string),
+        warned: state["warnings"]["count"].as_u64().unwrap_or(0) as usize,
+        warnings: serde_json::from_value(state["warnings"]["first"].clone()).unwrap_or_default(),
         deleted: serde_json::from_value(state["deleted"].clone()).unwrap_or_default(),
         paths,
         probes: object("probes.json"),
@@ -1585,6 +1614,7 @@ fn save_state(app: &App, addon: &Addon) {
         "enabled": addon.enabled, "last_sync": addon.last_sync, "items": addon.items, "held": addon.held,
         "error": addon.error, "error_kind": addon.error_kind, "deleted": addon.deleted, "repo": addon.repo,
         "account": addon.account, "sign_in_error": addon.sign_in_error,
+        "warnings": {"count": addon.warned, "first": addon.warnings},
     });
     let _ = write_atomic(&dir(app, &addon.manifest.id).join("state.json"), state.to_string().as_bytes());
 }
@@ -1617,7 +1647,7 @@ mod tests {
     #[test]
     fn items_are_checked() {
         let deleted = BTreeSet::from(["gone".to_string()]);
-        let kept = checked_items(
+        let (kept, left_out) = checked_items(
             "t",
             json!([
                 {"id": "a", "path": "movies/a.mp4"},
@@ -1634,6 +1664,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(kept.iter().map(id_of).collect::<Vec<_>>(), ["a", "g"]);
+        assert_eq!(left_out, [
+            "items(): a repeats an id or a path; left out",
+            "items(): b repeats an id or a path; left out",
+            "items(): \"c\" has the path \"/etc/passwd\", which is not relative; left out",
+            "items(): \"d\" has the path \"movies/../x.mp4\", which is not relative; left out",
+            "items(): an entry has no id or path; left out",
+            "items(): an entry is not an object; left out",
+        ]);
         assert!(checked_items("t", json!({"id": "a"}), &deleted).is_err());
     }
 
@@ -1887,6 +1925,32 @@ mod sync_tests {
         assert_eq!(wait_idle(&app, "busy")["error"], "down");
         attempted(RETRY);
         assert_eq!(app.due(), [("busy".to_string(), "retry")]);
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// The status counts the entries the last sync left out and quotes the first few, kept over
+    /// a restart; the next sync's replace them.
+    #[test]
+    fn the_status_shows_what_the_last_sync_left_out() {
+        let (rex, _) = stub_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-warnings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+        let source = "export default { items(ctx) {
+            return [{id: 'a', path: 'films/a.mp4'}, ...Array.from({length: ctx.config.bad}, (_, n) => ({id: 'bad' + n, path: '/abs/' + n + '.mp4'})), 'nope']; }, open() {} };";
+        let manifest = json!({"id": "warn", "name": "Warn", "version": "1.0.0", "config": [{"key": "bad", "label": "Bad", "type": "number", "default": 7}]});
+        app.install(&manifest, source, None).unwrap();
+        assert_eq!(app.status("warn").unwrap()["warnings"], json!({"count": 0, "first": []}));
+        assert!(app.start_sync("warn", true, "manual"));
+        let warnings = wait_idle(&app, "warn")["warnings"].clone();
+        assert_eq!(warnings["count"], 8);
+        assert_eq!(warnings["first"].as_array().unwrap().len(), WARNINGS_SHOWN);
+        assert_eq!(warnings["first"][0], "items(): \"bad0\" has the path \"/abs/0.mp4\", which is not relative; left out");
+        let again = App::new(data.clone(), "http://127.0.0.1:9".into(), "127.0.0.1:9".parse().unwrap(), None, None);
+        assert_eq!(again.status("warn").unwrap()["warnings"], warnings);
+        app.addons.lock().unwrap().get_mut("warn").unwrap().config.insert("bad".into(), json!(0));
+        assert!(app.start_sync("warn", true, "manual"));
+        assert_eq!(wait_idle(&app, "warn")["warnings"], json!({"count": 1, "first": ["items(): an entry is not an object; left out"]}));
         let _ = std::fs::remove_dir_all(&data);
     }
 

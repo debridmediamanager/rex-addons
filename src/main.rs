@@ -24,13 +24,14 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const USAGE: &str = "rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [--ffprobe <path>] [--bundled <dir>] [--default-repo <url>]... [--device-name <name>]
+const USAGE: &str = "rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [--ffprobe <path>] [--bundled <dir>] [--dev <dir>] [--default-repo <url>]... [--device-name <name>]
 
   --listen   where the management API and the byte paths rex reads answer (default 127.0.0.1:32410)
   --rex      rex's address (default http://127.0.0.1:32400)
   --data     where installed addons, their settings and storage are kept (default ./rex-addons-data)
   --ffprobe  the ffprobe that checks each item once; without it rex holds every item unshown
   --bundled  addons installed on the first start and updated when a newer version is bundled
+  --dev      addons installed on start, and again, then synced, whenever their manifest.json or main.js changes
   --default-repo  an addon repository added once, the first time it is given; repeatable
   --device-name   the name this device shows in the Spotify app while a Spotify addon pairs (default rex)
 
@@ -40,7 +41,7 @@ fn main() {
     let mut listen: SocketAddr = "127.0.0.1:32410".parse().unwrap();
     let mut rex = "http://127.0.0.1:32400".to_string();
     let mut data = PathBuf::from("rex-addons-data");
-    let (mut ffprobe, mut bundled, mut defaults) = (None, None, Vec::new());
+    let (mut ffprobe, mut bundled, mut dev, mut defaults) = (None, None, None, Vec::new());
     let mut device_name = "rex".to_string();
     let mut args = std::env::args().skip(1);
     while let Some(flag) = args.next() {
@@ -67,6 +68,7 @@ fn main() {
             "--data" => data = value.into(),
             "--ffprobe" => ffprobe = Some(value),
             "--bundled" => bundled = Some(PathBuf::from(value)),
+            "--dev" => dev = Some(PathBuf::from(value)),
             "--default-repo" => defaults.push(value),
             "--device-name" if !value.trim().is_empty() => device_name = value,
             _ => {
@@ -94,6 +96,9 @@ fn main() {
     let app = app::App::with_spotify(data, rex, listen, ffprobe, bundled.as_deref(), device_name, spotify);
     app::log("host", &format!("rex-addons {} on {listen}, rex at {}, {} addons", env!("CARGO_PKG_VERSION"), app.rex, app.addons.lock().unwrap().len()));
     app.start_repos(&defaults);
+    if let Some(dev) = dev {
+        app.watch_dev(dev);
+    }
     if app.prober.bin.is_none() {
         app::warn("host", "no --ffprobe: rex holds every item it is sent until it is probed, so nothing shows in Plex");
     }

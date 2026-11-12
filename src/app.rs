@@ -330,6 +330,40 @@ impl App {
         }
     }
 
+    /// `--dev`: each addon folder in `dir` is installed now, whatever its version, and installed
+    /// again whenever its manifest.json or main.js changes on disk, then synced. Checked every second.
+    pub fn watch_dev(self: &Arc<Self>, dir: PathBuf) {
+        let app = self.clone();
+        std::thread::spawn(move || {
+            let mut seen: HashMap<PathBuf, (SystemTime, SystemTime)> = HashMap::new();
+            let mut first = true;
+            loop {
+                for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                    let path = entry.path();
+                    let modified = |name: &str| std::fs::metadata(path.join(name)).and_then(|m| m.modified()).ok();
+                    let (Some(manifest), Some(main)) = (modified("manifest.json"), modified("main.js")) else { continue };
+                    if seen.insert(path.clone(), (manifest, main)) == Some((manifest, main)) {
+                        continue;
+                    }
+                    let source = std::fs::read_to_string(path.join("main.js")).map_err(|e| format!("main.js: {e}"));
+                    let raw = read_json(&path.join("manifest.json")).ok_or_else(|| "manifest.json is not JSON".to_string());
+                    match raw.and_then(|raw| app.install(&raw, &source?, None)) {
+                        Ok(id) => {
+                            log("host", &format!("dev: installed {id} from {}", path.display()));
+                            // At the start rex may not answer yet: the schedule syncs it once it does.
+                            if !first {
+                                app.start_sync(&id, false, "install");
+                            }
+                        }
+                        Err(error) => warn("host", &format!("dev {}: {error}", path.display())),
+                    }
+                }
+                first = false;
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        });
+    }
+
     /// Writes an addon's files and loads it; an installed one keeps its settings and storage.
     /// `repo` is where it came from; None (bundled) keeps what an installed one came from.
     pub fn install(&self, raw: &Json, source: &str, repo: Option<&str>) -> Result<String, String> {
@@ -1980,6 +2014,45 @@ mod sync_tests {
         app.addons.lock().unwrap().get_mut("warn").unwrap().config.insert("bad".into(), json!(0));
         assert!(app.start_sync("warn", true, "manual"));
         assert_eq!(wait_idle(&app, "warn")["warnings"], json!({"count": 1, "first": ["items(): an entry is not an object; left out"]}));
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// `--dev`: an addon is installed at once, and again, then synced, when its main.js or
+    /// manifest.json changes, without a new version; one that fails to install keeps the last.
+    #[test]
+    fn dev_reinstalls_an_addon_whose_files_change() {
+        let (rex, seen) = stub_rex();
+        let data = std::env::temp_dir().join(format!("rex-addons-dev-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let folder = data.join("dev/films");
+        std::fs::create_dir_all(&folder).unwrap();
+        let write = |name: &str, text: &str| std::fs::write(folder.join(name), text).unwrap();
+        let addon = |n: u32| format!("export default {{ items() {{ return [{{id: 'a', path: 'films/v{n}.mp4'}}]; }}, open() {{}} }};");
+        write("manifest.json", r#"{"id": "films", "name": "Films", "version": "1.0.0"}"#);
+        write("main.js", &addon(1));
+        let app = App::new(data.join("data"), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+        app.watch_dev(data.join("dev"));
+        let wait = |until: &dyn Fn() -> bool| {
+            for _ in 0..200 {
+                if until() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            panic!("never happened");
+        };
+        wait(&|| app.addons.lock().unwrap().get("films").is_some_and(|a| a.source.contains("v1")));
+        // Installed on start without a sync: the schedule syncs it once rex answers.
+        assert!(seen.lock().unwrap().is_empty());
+        write("main.js", &addon(2));
+        wait(&|| seen.lock().unwrap().iter().any(|body| body["items"][0]["path"] == "films/v2.mp4"));
+        write("main.js", "export default {");
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(app.addons.lock().unwrap()["films"].source.contains("v2"));
+        assert!(LOGGED.lock().unwrap().iter().any(|line| line.starts_with("WARN [host] dev ") && line.contains("films: main.js:")), "{:?}", LOGGED.lock().unwrap());
+        write("manifest.json", r#"{"id": "films", "name": "Films renamed", "version": "1.0.0"}"#);
+        write("main.js", &addon(3));
+        wait(&|| app.addons.lock().unwrap()["films"].manifest.name == "Films renamed" && app.addons.lock().unwrap()["films"].source.contains("v3"));
         let _ = std::fs::remove_dir_all(&data);
     }
 

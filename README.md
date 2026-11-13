@@ -2,7 +2,10 @@
 
 Small JavaScript addons that bring things into [rex](https://rex.debridmediamanager.com), and so
 into every Plex app: public domain films from the Internet Archive, your Stremio addons'
-catalogs, your YouTube playlists, your Spotify library, or anything you write yourself. Nothing is downloaded. When you press play, the addon
+catalogs, your YouTube playlists, your Spotify library, or anything you write yourself. They run in
+[rex for Android](https://notes.debridmediamanager.com/rex/android/), free, and in
+[zurg+rex](https://notes.debridmediamanager.com/zurg/guides/android/), a Plex server on your phone for sponsors that also
+connects your debrid and Usenet library to rex, or beside rex on a computer. Nothing is downloaded. When you press play, the addon
 hands rex a link and rex streams from it.
 
 rex-addons is the program that runs them. Each addon runs in its own sandbox: it can only reach

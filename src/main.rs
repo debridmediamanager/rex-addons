@@ -4,6 +4,8 @@
 mod addon_tests;
 mod addons;
 mod app;
+#[cfg(test)]
+mod calls_tests;
 mod check;
 mod git;
 mod net;

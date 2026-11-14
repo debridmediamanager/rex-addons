@@ -102,8 +102,9 @@ as that repository's last fetch holds it, or updates it when it's installed, kee
 settings and storage. `main.js` must load and export `items` and `open`. Answers `201` (installed)
 or `200` (updated) with the addon as `GET /api/addons/{id}` does, and starts a sync. `404` for a
 repository or addon it doesn't know, `409` when an addon of that id is installed from another
-repository (remove it first), `400` when its files are refused. A bundled addon installed from a
-repository becomes that repository's.
+repository that still offers it (remove it first), `400` when its files are refused. A bundled
+addon, or one its repository no longer offers (it moved), installed from a repository becomes that
+repository's.
 
 ### `DELETE /api/addons/{id}`
 
@@ -212,9 +213,9 @@ Every repository added, as a list:
 | `error` | Why the last fetch failed, or `no addons in it`; `null` when it worked. A failed fetch keeps what the one before got |
 | `addons[].installed_version` | The version installed of that addon id, from wherever, or `null` |
 | `addons[].installed_hosts` | The hosts the installed one reaches, or `null` when none is installed. Compare with `hosts` before installing: an update may widen them |
-| `addons[].installed_repo` | The repository the installed one came from, or `null` when none is installed or it is bundled. Installing from another repository than this is `409`; installing over a bundled one moves it to this repository, which the app should confirm |
+| `addons[].installed_repo` | The repository the installed one came from, or `null` when none is installed or it is bundled. Installing from another repository than this is `409` while that one still offers it; installing over a bundled one, or one its repository no longer offers, moves it to this repository, which the app should confirm |
 | `addons[].compatible` | `false` when the addon's manifest names a `host` newer than this rex-addons: installing it answers `400` with the reason |
-| `addons[].update_available` | Installing it now would update it: it's installed from this repository (or bundled) and this version is higher |
+| `addons[].update_available` | Installing it now would update it: it's installed from this repository (or bundled, or from a repository that no longer offers it) and this version is higher |
 
 ### `POST /api/repos`
 

@@ -259,8 +259,9 @@ pub struct Repos {
     pub attempted: HashMap<String, u64>,
 }
 
-/// An installed addon as a repository's listing compares it: version, repository, hosts.
-type Installed = (String, Option<String>, Vec<String>);
+/// An installed addon as a repository's listing compares it: version, repository, hosts, and
+/// whether that repository still offers it.
+type Installed = (String, Option<String>, Vec<String>, bool);
 
 fn dir(app: &App, id: &str) -> PathBuf {
     app.data.join("addons").join(id)
@@ -1516,9 +1517,14 @@ impl App {
         Ok(Repo { id, url: url.trim().to_string(), name, description, commit: Some(commit), last_fetch: Some(now()), error, addons })
     }
 
-    /// The installed addons: id to (version, repository, hosts).
+    /// The installed addons: id to (version, repository, hosts, still offered there).
     fn installed(&self) -> HashMap<String, Installed> {
-        self.addons.lock().unwrap().values().map(|a| (a.manifest.id.clone(), (a.manifest.version.clone(), a.repo.clone(), a.manifest.hosts.listed.clone()))).collect()
+        let offered: BTreeSet<(String, String)> =
+            self.repos.lock().unwrap().list.iter().flat_map(|r| r.addons.iter().map(move |a| (r.id.clone(), a.id.clone()))).collect();
+        self.addons.lock().unwrap().values().map(|a| {
+            let kept = a.repo.as_ref().is_some_and(|r| offered.contains(&(r.clone(), a.manifest.id.clone())));
+            (a.manifest.id.clone(), (a.manifest.version.clone(), a.repo.clone(), a.manifest.hosts.listed.clone(), kept))
+        }).collect()
     }
 
     /// A repository's addons as the API lists them: each with what is installed of it.
@@ -1527,18 +1533,19 @@ impl App {
             .iter()
             .map(|addon| {
                 let here = installed.get(&addon.id);
-                // An update is this repository's, or adopts a bundled one; one installed from
-                // another repository is that one's to update.
-                let ours = here.is_some_and(|(_, from, _)| from.as_deref().is_none_or(|from| from == repo.id));
+                // An update is this repository's, or adopts a bundled one or one its repository
+                // no longer offers (moved, or the repository removed); one another repository
+                // still offers is that one's to update.
+                let ours = here.is_some_and(|(_, from, _, kept)| from.as_deref().is_none_or(|from| from == repo.id) || !kept);
                 // What installing it would change, for the app to ask about first.
                 json!({
                     "id": addon.id, "name": addon.name, "version": addon.version, "description": addon.description,
                     "hosts": addon.hosts,
-                    "installed_version": here.map(|(version, _, _)| version),
-                    "installed_hosts": here.map(|(_, _, hosts)| hosts),
-                    "installed_repo": here.and_then(|(_, from, _)| from.as_ref()),
+                    "installed_version": here.map(|(version, _, _, _)| version),
+                    "installed_hosts": here.map(|(_, _, hosts, _)| hosts),
+                    "installed_repo": here.and_then(|(_, from, _, _)| from.as_ref()),
                     "compatible": addon.compatible(),
-                    "update_available": ours && here.is_some_and(|(version, _, _)| newer(&addon.version, version)),
+                    "update_available": ours && here.is_some_and(|(version, _, _, _)| newer(&addon.version, version)),
                 })
             })
             .collect()
@@ -1670,7 +1677,7 @@ impl App {
     }
 
     /// `POST /api/addons`: installs a repository's addon, or updates it, keeping its settings
-    /// and storage. One installed from another repository is refused.
+    /// and storage. One installed from another repository that still offers it is refused.
     pub fn install_from_repo(&self, repo_id: &str, addon_id: &str) -> Result<(u16, String), (u16, String)> {
         let dir = {
             let repos = self.repos.lock().unwrap();
@@ -1684,8 +1691,10 @@ impl App {
             return Err((409, "the addon changed: refresh the repository".into()));
         }
         let existing = self.addons.lock().unwrap().get(addon_id).map(|a| a.repo.clone());
+        // One its repository no longer offers may be adopted, as the listing says.
+        let kept = self.installed().get(addon_id).is_some_and(|(_, _, _, kept)| *kept);
         if let Some(Some(other)) = &existing {
-            if other != repo_id {
+            if other != repo_id && kept {
                 return Err((409, format!("{addon_id} is already installed from {other}: remove it first")));
             }
         }
@@ -2973,6 +2982,17 @@ mod sync_tests {
         assert_eq!(app.repo_addons_json("two").unwrap()[0]["installed_repo"], "one");
         let nothing = app.repo_addons_json("two").unwrap();
         assert_eq!(nothing[0]["installed_hosts"], json!(["*"]));
+        assert_eq!(nothing[0]["update_available"], false);
+        // Once "one" no longer offers it (it moved), "two" may update it and so adopt it.
+        std::fs::remove_dir_all(app.repo_dir("one").join("addons/films")).unwrap();
+        std::fs::create_dir_all(app.repo_dir("one").join("addons/other")).unwrap();
+        std::fs::write(app.repo_dir("one").join("addons/other/manifest.json"), json!({"id": "other", "name": "other", "version": "1.0.0"}).to_string()).unwrap();
+        std::fs::write(app.repo_dir("one").join("addons/other/main.js"), main).unwrap();
+        add_local_repo(&app, "one");
+        let moved = &app.repo_addons_json("two").unwrap()[0];
+        assert_eq!((&moved["installed_repo"], &moved["update_available"]), (&json!("one"), &json!(true)));
+        app.install_from_repo("two", "films").unwrap();
+        assert_eq!(app.status("films").unwrap()["repo"], "two");
         let _ = std::fs::remove_dir_all(&data);
     }
 

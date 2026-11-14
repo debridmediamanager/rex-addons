@@ -340,6 +340,31 @@ fn a_session_spotify_ends_signs_the_addon_out() {
     assert!(rig.app.due().is_empty());
 }
 
+/// An install paired by Spotify addon 1.x, updated to 2.0, which signs in with a code and keeps its
+/// tokens in `storage`: the account stays until the first sync, which 2.0 fails with
+/// SIGN_IN_REQUIRED (its storage has no tokens), signing it out with why while its titles,
+/// settings and storage stay. The pairing's credentials file and session are left behind, as the
+/// manifest is no longer `"kind": "spotify"` (phase 2, which removes pairing, deals with both).
+#[test]
+fn an_update_to_the_code_sign_in_signs_in_again_and_keeps_the_titles() {
+    let rig = Rig::spotify("update-2");
+    rig.signed_in();
+    let rex_calls = rig.rex.lock().unwrap().len();
+    rig.app.install(&json!({"id": "youtube", "name": "YouTube", "version": "1.0.0", "host": "0.5", "exports": ["findSong", "songAudio"]}),
+        "export default { items() { return []; }, open() {}, findSong() { return null; }, songAudio() { return null; } };", None).unwrap();
+    let manifest: Json = serde_json::from_str(include_str!("../community/addons/spotify/manifest.json")).unwrap();
+    rig.app.install(&manifest, include_str!("../community/addons/spotify/main.js"), None).unwrap();
+    let status = rig.status("spotify");
+    assert_eq!((&status["version"], &status["sign_in"]["kind"], &status["sign_in"]["account"]), (&json!("2.0.0"), &json!("code"), &json!("Someone Listening")));
+
+    assert!(rig.app.start_sync("spotify", false, "manual"));
+    let status = rig.until("spotify", "the sync", |s| s["state"] != "syncing");
+    assert_eq!((&status["error"], &status["error_kind"]), (&json!("sign in again: this update signs in to Spotify with a code"), &json!("sign_in")));
+    assert_eq!(status["sign_in"]["account"], Json::Null);
+    assert_eq!(rig.rex.lock().unwrap().len(), rex_calls, "rex keeps the titles");
+    assert!(rig.credentials_file().exists() && rig.stub.sessions.lock().unwrap().contains_key("spotify"), "left for phase 2");
+}
+
 #[test]
 fn signing_out_forgets_the_session_and_the_credentials() {
     let rig = Rig::spotify("out");

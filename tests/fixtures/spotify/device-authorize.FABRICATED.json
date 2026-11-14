@@ -1,0 +1,1 @@
+{"device_code": "SECRET-device-1", "user_code": "ABC123", "verification_uri": "https://spotify.com/pair", "verification_uri_complete": "https://spotify.com/pair?code=ABC123", "expires_in": 3599, "interval": 5}

@@ -1,18 +1,36 @@
 #!/usr/bin/env python3
-"""Spotify's own API (spclient) for tests/e2e-spotify.sh with FAKE_SPOTIFY=1, reached through the host's
-REX_ADDONS_SPOTIFY_STUB: a FABRICATED library in the structure the owner's account was answered in on
-2026-11-11 (rootlist, playlist, collection paging, track, album and artist metadata). Its band's songs
-are the ones tests/e2e-youtube-fake.py's search finds; one track YouTube has none of.
+"""Spotify for tests/e2e-spotify.sh with FAKE_SPOTIFY=1, on this machine's network address (the sandbox
+never fetches loopback), the addon's links pointed here: its sign-in (the OAuth device flow at
+/oauth2/device/authorize and /api/token, approved by `POST /approve`), apresolve (`/?type=spclient`,
+naming this server) and its own API (spclient), which wants the bearer token handed out. FABRICATED:
+the sign-in answers in the shape measured on 2026-11-14, and a library in the structure the owner's
+account was answered in on 2026-11-11 (rootlist, playlist, collection paging, track, album and artist
+metadata). Its band's songs are the ones tests/e2e-youtube-fake.py's search finds; one track YouTube
+has none of.
 
     python3 tests/e2e-spotify-fake.py <port>     # prints its base URL, then serves
 """
 import json
+import socket
 import sys
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1])
 B62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 USER = "e2e-user"
+CLIENT_ID = "65b708073fc0480ea92a077233ca87bd"
+
+
+def lan_ip():
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.connect(("192.0.2.1", 9))
+        return probe.getsockname()[0]
+
+
+HOST = "%s:%d" % (lan_ip(), PORT)
+# The sign-in: approved once the test posts /approve; the access tokens handed out, the newest valid.
+STATE = {"approved": False, "issued": 0}
 
 
 def made(n):
@@ -61,9 +79,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def signed(self):
+        return STATE["issued"] and self.headers.get("Authorization") == "Bearer fake-access-%d" % STATE["issued"]
+
     def do_GET(self):
-        path = self.path.split("?")[0]
+        path, _, query = self.path.partition("?")
         parts = path.split("/")
+        if path == "/" and query == "type=spclient":
+            return self.send(200, {"spclient": [HOST]})
+        if not self.signed():
+            return self.send(401, {"error": {"status": 401, "message": "Invalid token"}})
+        if path == "/user-profile-view/v3/profile/%s" % USER:
+            return self.send(200, {"uri": "spotify:user:" + USER, "name": "E2E Listener"})
         if path == "/playlist/v2/user/%s/rootlist" % USER:
             items = [{"uri": "spotify:playlist:" + made(n)[0], "attributes": {"timestamp": "1762800000000", "public": False}} for n in PLAYLISTS]
             metas = [{"revision": "r%d" % n, "attributes": {"name": name}, "length": len(tracks), "ownerUsername": USER} for n, (name, tracks) in PLAYLISTS.items()]
@@ -88,7 +115,32 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, {})
 
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        path = self.path.split("?")[0]
+        if path == "/approve":
+            STATE["approved"] = True
+            return self.send(200, {})
+        if path in ("/oauth2/device/authorize", "/api/token"):
+            form = dict(urllib.parse.parse_qsl(raw.decode()))
+            if form.get("client_id") != CLIENT_ID:
+                return self.send(400, {"error": "invalid_client"})
+            if path == "/oauth2/device/authorize":
+                return self.send(200, {"device_code": "fake-device", "user_code": "E2E123", "verification_uri": "https://spotify.com/pair",
+                                       "verification_uri_complete": "https://spotify.com/pair?code=E2E123", "expires_in": 3599, "interval": 5})
+            grant = form.get("grant_type")
+            if grant == "urn:ietf:params:oauth:grant-type:device_code" and form.get("device_code") == "fake-device":
+                if not STATE["approved"]:
+                    return self.send(400, {"error": "authorization_pending"})
+                STATE["issued"] += 1
+                return self.send(200, {"access_token": "fake-access-%d" % STATE["issued"], "token_type": "Bearer", "expires_in": 3600,
+                                       "refresh_token": "fake-refresh", "scope": "user-library-read", "username": USER})
+            if grant == "refresh_token" and form.get("refresh_token") == "fake-refresh":
+                STATE["issued"] += 1
+                return self.send(200, {"access_token": "fake-access-%d" % STATE["issued"], "token_type": "Bearer", "expires_in": 3600})
+            return self.send(400, {"error": "invalid_grant"})
+        if not self.signed():
+            return self.send(401, {"error": {"status": 401, "message": "Invalid token"}})
+        body = json.loads(raw or b"{}")
         if self.path.split("?")[0] == "/collection/v2/paging" and body.get("username") == USER and body.get("set") == "collection":
             items = [{"uri": "spotify:track:" + made(n)[0], "added_at": at} for n, at in LIKED]
             items += [{"uri": "spotify:album:" + made(n)[0], "added_at": at} for n, at in SAVED]
@@ -99,6 +151,6 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("fake spotify: %s\n" % (args[0] % args[1:]))
 
 
-server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
-print("http://127.0.0.1:%d" % PORT, flush=True)
+server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+print("http://" + HOST, flush=True)
 server.serve_forever()

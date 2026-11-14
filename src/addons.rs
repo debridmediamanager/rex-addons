@@ -629,12 +629,12 @@ mod tests {
 
     #[test]
     fn host_version() {
-        assert_eq!(env!("CARGO_PKG_VERSION"), "0.8.0");
+        assert_eq!(env!("CARGO_PKG_VERSION"), "0.9.0");
         let needing = |host: &str| Manifest::parse(&json!({"id": "a", "name": "x", "version": "1", "host": host})).unwrap();
-        for fits in ["0.8", "0.8.0", "0.7", "0.6", "0.5", "0.4", "0.3", "0.2", "0.1.9", "0"] {
+        for fits in ["0.9", "0.9.0", "0.8", "0.7", "0.6", "0.5", "0.4", "0.3", "0.2", "0.1.9", "0"] {
             assert_eq!(needing(fits).check_host(), Ok(()), "{fits}");
         }
-        for too_new in ["0.8.1", "0.9", "1"] {
+        for too_new in ["0.9.1", "0.10", "1"] {
             assert_eq!(needing(too_new).check_host().unwrap_err(), format!("this addon needs rex-addons {too_new} or newer"));
         }
         assert_eq!(manifest().host, None);

@@ -1,4 +1,4 @@
-// What an addon's main.js can use inside rex-addons 0.8, for your editor: autocomplete and, with
+// What an addon's main.js can use inside rex-addons 0.9, for your editor: autocomplete and, with
 // `// @ts-check` at the top of main.js, a warning where code uses something that isn't there.
 // Plain JavaScript (ES2022) plus the globals below, and nothing else: no DOM, no Node, no timers.
 // The guide: https://github.com/debridmediamanager/rex-addons/blob/main/docs/writing-addons.md
@@ -42,7 +42,7 @@ interface Addon<Config = AddonConfig> {
 interface AddonContext<Config = AddonConfig> {
   /** The settings, each one its saved value or its default (`null` with neither). */
   config: Config;
-  /** This rex-addons' version, such as `"0.8.0"`. rex-addons 0.6. */
+  /** This rex-addons' version, such as `"0.9.0"`. rex-addons 0.6. */
   host: string;
   /** Which addon this is, from its manifest. rex-addons 0.6. */
   addon: { id: string; version: string };
@@ -436,20 +436,6 @@ declare class URLSearchParams {
   values(): IterableIterator<string>;
   [Symbol.iterator](): IterableIterator<[string, string]>;
 }
-
-/**
- * Only with `"sign_in": {"kind": "spotify"}` (rex-addons 0.5): the person's Spotify, through
- * Spotify's own undocumented API. A failure throws; one starting with `SIGN_IN_REQUIRED` signs
- * the addon out if you let it through.
- */
-declare const spotify: {
-  /** The account's Spotify username. */
-  readonly user: () => string;
-  /** `GET` a path starting with `/`, answered as JSON. */
-  readonly get: (path: string) => Promise<any>;
-  /** `POST` `body` as JSON to a path starting with `/`, answered as JSON. */
-  readonly post: (path: string, body?: any) => Promise<any>;
-};
 
 /** Only with `requires` (rex-addons 0.5): other addons' exported functions. */
 declare const addons: {

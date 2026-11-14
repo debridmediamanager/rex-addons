@@ -26,7 +26,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::time::Duration;
 
-const USAGE: &str = "rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [--ffprobe <path>] [--bundled <dir>] [--dev <dir>] [--default-repo <url>]... [--device-name <name>]
+const USAGE: &str = "rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [--ffprobe <path>] [--bundled <dir>] [--dev <dir>] [--default-repo <url>]...
 
   --listen   where the management API and the byte paths rex reads answer (default 127.0.0.1:32410)
   --rex      rex's address (default http://127.0.0.1:32400)

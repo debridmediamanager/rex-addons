@@ -38,7 +38,7 @@ that talks to rex's feed API directly is a rex addon too: see
 | `refresh_minutes` | How often `items()` runs. Default 360, at least 5 |
 | `host` | Optional: the lowest rex-addons version your addon needs, such as `"0.2"` ([below](#which-rex-addons-it-needs)) |
 | `directories` | Optional: libraries of the addon's own, in rex's [`directories`](https://github.com/debridmediamanager/rex/blob/main/docs/feed-api.md#libraries-a-source-declares) shape, such as `[{"name": "youtube", "shows": "YouTube"}]`: titles whose `path` starts with `youtube/` go to a TV library called YouTube instead of your Movies or TV Shows. rex-addons sends it when the addon registers |
-| `sign_in` | Optional: `{"label": "Sign in to Example"}` for an addon that needs the person's account on a website ([below](#signing-in-with-a-code)). `label` is what the app's button says, `Sign in to <name>` without it. `kind` is `"code"` (the default: your `signIn()`) or `"spotify"` ([Spotify pairing](#signing-in-with-spotify)) |
+| `sign_in` | Optional: `{"label": "Sign in to Example"}` for an addon that needs the person's account on a website ([below](#signing-in-with-a-code)). `label` is what the app's button says, `Sign in to <name>` without it. `kind` is `"code"`, the default and the only one: your `signIn()` ([an older kind](#an-older-sign-in-kind)) |
 | `exports` | Optional: functions of your default export that other addons may call, such as `["findSong"]` ([below](#calling-another-addon)). Each a name of letters, digits and `_`, at most 64 characters |
 | `requires` | Optional: ids of addons whose `exports` yours calls, such as `["youtube"]`, never your own. The app shows whether each is installed, enabled and signed in |
 
@@ -55,11 +55,12 @@ repository's list. rex-addons 0.1 doesn't know the field.
 | `0.2` | `sleep`, `atob`, `btoa`, `URL`, `URLSearchParams`, `hash`, `hmac`, `bytes()`, a binary `body` | Not checked: it installs, and fails where it uses them on an older rex-addons |
 | `0.3` | `sign_in` | Installing refuses it |
 | `0.4` | Playlists from `open()`, and `ffprobe()` of them | Playing fails: `open() returned playlists, which need "host": "0.4" in the manifest`. `ffprobe()` of them isn't checked |
-| `0.5` | `"kind": "spotify"`, `exports`, `requires` | Installing refuses it |
+| `0.5` | `exports`, `requires` (and, until 0.9, `"kind": "spotify"`) | Installing refuses it |
 | `0.6` | `select` settings | Installing refuses it |
 | `0.6` | `storage.keys`, `TextEncoder`, `TextDecoder`, `crypto`, `md5` and bytes in `hash` and `hmac`, `ctx.host`, `ctx.addon`, `ctx.reason`, `RETRY_AFTER` | Not checked: it installs, and fails where it uses them on an older rex-addons (`RETRY_AFTER` is just an error there, tried again in 5 minutes) |
 | `0.7` | `host` settings | Installing refuses it |
 | `0.8` | `items()` in pages and with changes only: `{items, next}`, `{partial, items, removed}`, `ctx.cursor`, `ctx.full`, `ctx.last_sync` ([a large library](#a-large-library)) | Not checked at install, as a return value can't be: the sync fails, here with `items() returned {items: [...]}, which needs "host": "0.8" in the manifest`, on an older rex-addons with `items() must return a list` |
+| `0.9` | Nothing: it removes Spotify pairing (`"sign_in": {"kind": "spotify"}`), the `spotify` global and `--device-name`'s use. Spotify signs in [with a code](#signing-in-with-a-code) and is read with `fetch` ([Listing a Spotify library](spotify.md)) | An addon of `"kind": "spotify"` is [an older sign-in kind](#an-older-sign-in-kind) |
 
 A setting's `help` needs no `host`: an older rex-addons doesn't show it.
 
@@ -78,7 +79,7 @@ argument:
 | | |
 |---|---|
 | `ctx.config` | The settings, each one its saved value or its default |
-| `ctx.host` | This rex-addons' version, such as `"0.8.0"` |
+| `ctx.host` | This rex-addons' version, such as `"0.9.0"` |
 | `ctx.addon` | `{id, version}`, from your manifest |
 | `ctx.reason` | Only for `items()`: why this sync runs ([below](#why-a-sync-runs)) |
 | `ctx.full`, `ctx.last_sync`, `ctx.cursor` | Only for `items()`: whether this sync needs every title, when the last sync that worked began, and which page to return ([a large library](#a-large-library)) |
@@ -225,7 +226,6 @@ Plain JavaScript, plus these:
 | `new TextEncoder().encode(text)`, `new TextDecoder().decode(bytes)` | Text to UTF-8 bytes and back, as in browsers. UTF-8 only: `new TextDecoder("latin1")` throws |
 | `crypto.getRandomValues(array)`, `crypto.randomUUID()` | Random numbers for a nonce or a PKCE verifier, as in browsers: `getRandomValues` fills an integer typed array, at most 65,536 bytes a call, and returns it. There's no `crypto.subtle` |
 | `await sleep(ms)` | Waits, for backing off when a website answers 429. The wait doesn't count as JavaScript time, and a sleep past the end of the call fails at once |
-| `spotify.user()`, `await spotify.get(path)`, `await spotify.post(path, body)` | Only with `"sign_in": {"kind": "spotify"}`: the person's Spotify library ([below](#signing-in-with-spotify)). Being removed: use `fetch` with a code sign-in instead |
 | `await addons.call(id, name, ...args)` | Only with `requires`: another addon's exported function ([below](#calling-another-addon)) |
 
 There's nothing else: no timers (`setTimeout`, use `sleep`), no `require` or `import`, no file
@@ -622,51 +622,14 @@ export default {
 };
 ```
 
-## Signing in with Spotify
+### An older sign-in kind
 
-**Being removed.** A later rex-addons drops Spotify pairing, the `spotify` global and
-`"kind": "spotify"`. Spotify's own device flow works as any [code sign-in](#signing-in-with-a-code),
-and its token reads the library from Spotify's API with plain `fetch`: the
-[Spotify addon](https://github.com/debridmediamanager/rex-community-addons/blob/main/addons/spotify/main.js)
-does that since 2.0.0, and [Listing a Spotify library](spotify.md) has the requests. Don't start a
-new addon on what follows.
-
-A Spotify addon lists the person's Spotify library (playlists, liked songs, saved albums) in
-rex. Nobody types anything and no Spotify developer app is needed: rex-addons pairs with the
-Spotify app the way a speaker does. The person opens Spotify on a phone on the same network,
-taps the devices button and picks this device (`rex`, or whatever `--device-name` says). rex-addons
-keeps the sign-in to itself; your code never sees it.
-
-```json
-"host": "0.5",
-"hosts": ["*.googlevideo.com"],
-"sign_in": {"kind": "spotify", "label": "Connect Spotify"}
-```
-
-`hosts` here is where the songs play from, not Spotify: the `spotify` global below reaches
-Spotify without them. This one plays them from YouTube.
-
-There's no `signIn()` or `signInPoll()` to write. Signing out forgets the sign-in and calls your
-`signOut()` if you export one. **Spotify's audio is out of reach**: Spotify no longer hands it to
-clients like this one for many accounts, and rex-addons doesn't try. Play what you list from
-somewhere else, such as YouTube ([calling another addon](#calling-another-addon)).
-
-Your code gets a `spotify` global, talking to Spotify's own API (`spclient`) as Spotify's
-desktop app does, with the person's session. It is Spotify's own, undocumented API: paths can
-change without notice, so throw (and keep what rex has) when an answer isn't what you expect.
-The paths that list a library, and how to turn a uri into the id they take, are in
-[Listing a Spotify library](spotify.md).
-
-| Call | What it does |
-|---|---|
-| `spotify.user()` | The account's Spotify username, which those paths take |
-| `await spotify.get(path)` | `GET` the path, answered as JSON |
-| `await spotify.post(path, body)` | `POST` `body` as JSON, answered as JSON |
-
-`path` starts with `/` and is on Spotify's host only. A failure throws: `Spotify answered 404 to
-/metadata/4/track/...`, or, when Spotify no longer takes the sign-in, an error starting with
-`SIGN_IN_REQUIRED`, which signs the addon out if you let it through. librespot, which talks to
-Spotify for rex-addons, waits out a `429` by itself when Spotify asks for 10 seconds or less.
+rex-addons 0.5 to 0.8 also had `"kind": "spotify"`, which paired with the Spotify app. 0.9 refuses
+to install an addon of a kind it doesn't have, with `this addon needs an update: update <name> in
+its repository`. One already installed stays listed, its titles staying in rex, with that as its
+`error` (`error_kind` `update`), and neither syncs, plays nor signs in until it is updated to a
+version without that kind. The update forgets the sign-in the older host kept for it, and the
+person signs in again.
 
 ## Calling another addon
 
@@ -873,6 +836,7 @@ only the schema).
 | `main.js: main.js exports no open()` | The default export lacks that function. Installing needs `items` and `open`, plus `signIn` and `signInPoll` with `sign_in`, and each name in `exports` |
 | `manifest: ...` | The manifest breaks a rule: the message says which ([manifest.json](#manifestjson)) |
 | `this addon needs rex-addons 0.5 or newer` | Its `host` is newer than this rex-addons |
+| `this addon needs an update: update <name> in its repository` | Its `sign_in` has a `kind` this rex-addons doesn't have, such as 0.8's `"spotify"` ([an older sign-in kind](#an-older-sign-in-kind)) |
 | `manifest: a select setting needs "host": "0.6" or newer` | Set `"host": "0.6"` or higher |
 | `manifest: a host setting needs "host": "0.7" or newer` | Set `"host": "0.7"` or higher |
 | `hash: crc32 is not md5, sha1, sha256 or sha512` | Only those four |

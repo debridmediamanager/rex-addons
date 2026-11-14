@@ -2,8 +2,8 @@
 
 How an addon signs in to Spotify and lists the person's library with plain `fetch`, as the
 [Spotify addon](https://github.com/debridmediamanager/rex-community-addons/blob/main/addons/spotify/main.js)
-does since 2.0.0. (The `spotify` global, for an addon with `"sign_in": {"kind": "spotify"}`, takes
-the same paths; it is [being removed](writing-addons.md#signing-in-with-spotify).)
+does since 2.0.0. It needs nothing from rex-addons beyond what every addon gets: a code sign-in,
+`fetch`, `storage`.
 
 These are Spotify's own, undocumented paths (`spclient`), as Spotify's desktop app uses them.
 They can change without notice, so throw (and keep what rex has) when an answer isn't what you
@@ -39,7 +39,7 @@ and 20 track lookups in a row at 4 a second were all answered):
 | `GET /metadata/4/track/{gid}?market=from_token` | A track: `name`, `artist[].name`, `album` (`name`, `artist`, `date.year`, `cover_group.image[].file_id`), `number`, `disc_number`, `duration` (ms), `external_id` (`{"type": "isrc", "id": ...}`) |
 | `GET /metadata/4/album/{gid}?market=from_token` | An album: `name`, `artist`, `date`, `cover_group`, and `disc[].track[].gid` |
 
-`{user}` is the token answer's `username` (`spotify.user()` with the global). A cover is `https://i.scdn.co/image/<file_id>`.
+`{user}` is the token answer's `username`. A cover is `https://i.scdn.co/image/<file_id>`.
 
 ## Track ids
 

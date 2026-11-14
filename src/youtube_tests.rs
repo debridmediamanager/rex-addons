@@ -328,7 +328,7 @@ fn serve(name: &str) -> Option<Rig> {
 
 impl Rig {
     fn source(&self) -> String {
-        let source = include_str!("../addons/youtube/main.js");
+        let source = include_str!("../community/addons/youtube/main.js");
         for constant in ["const YT = \"https://www.youtube.com\";", "const CHECK_PAUSE_MS = 1500;"] {
             assert!(source.contains(constant), "main.js no longer has {constant}");
         }
@@ -719,7 +719,7 @@ fn signing_in_with_a_code_keeps_the_tokens_and_names_the_selected_account() {
 
 /// `js` run inside the youtube addon's module, with nothing to reach: for its pure functions.
 fn pure(js: &str) -> Json {
-    let source = include_str!("../addons/youtube/main.js").replace("export default {", "const addon = {")
+    let source = include_str!("../community/addons/youtube/main.js").replace("export default {", "const addon = {")
         + &format!("\nexport default {{ async items() {{ {js} }}, open() {{}} }};");
     let env = Env {
         addon: "youtube", source: &source, hosts: Hosts::default(), storage: Arc::new(Storage::open(PathBuf::from("/dev/null"))),

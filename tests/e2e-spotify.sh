@@ -70,10 +70,10 @@ fi
 
 # Both addons as they are, the Spotify one looking for MATCHES tracks a sync.
 mkdir -p "$work/bundled/youtube" "$work/bundled/spotify"
-cp addons/youtube/main.js "$work/bundled/youtube/main.js"
-perl -pe 's/\{"key": "matches_per_sync"(.*)"default": 30\}/{"key": "matches_per_sync"$1"default": '"$matches"'}/' addons/spotify/manifest.json >"$work/bundled/spotify/manifest.json"
-cp addons/spotify/main.js "$work/bundled/spotify/main.js"
-cp addons/youtube/manifest.json "$work/bundled/youtube/manifest.json"
+cp community/addons/youtube/main.js "$work/bundled/youtube/main.js"
+perl -pe 's/\{"key": "matches_per_sync"(.*)"default": 30\}/{"key": "matches_per_sync"$1"default": '"$matches"'}/' community/addons/spotify/manifest.json >"$work/bundled/spotify/manifest.json"
+cp community/addons/spotify/main.js "$work/bundled/spotify/main.js"
+cp community/addons/youtube/manifest.json "$work/bundled/youtube/manifest.json"
 credentials=${SPOTIFY_CREDENTIALS:-}
 token_file=${YT_TOKEN_FILE:-}
 stub=

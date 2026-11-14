@@ -3,7 +3,7 @@
 What the `spotify` global can ask Spotify for, for an addon with `"sign_in": {"kind": "spotify"}`.
 How that sign-in works and what the global does is in
 [Signing in with Spotify](writing-addons.md#signing-in-with-spotify). The
-[Spotify addon](../addons/spotify/main.js) uses all of this.
+[Spotify addon](https://github.com/debridmediamanager/rex-community-addons/blob/main/addons/spotify/main.js) uses all of this.
 
 These are Spotify's own, undocumented paths (`spclient`), as Spotify's desktop app uses them.
 They can change without notice, so throw (and keep what rex has) when an answer isn't what you

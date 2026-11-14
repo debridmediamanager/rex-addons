@@ -71,7 +71,7 @@ fi
 copies="youtube youtube-sd youtube-signin"
 for copy in $copies; do
     mkdir -p "$work/bundled/$copy"
-    perl -pe "s/const CHECKS_PER_SYNC = 30;/const CHECKS_PER_SYNC = $checks;/" addons/youtube/main.js >"$work/bundled/$copy/main.js"
+    perl -pe "s/const CHECKS_PER_SYNC = 30;/const CHECKS_PER_SYNC = $checks;/" community/addons/youtube/main.js >"$work/bundled/$copy/main.js"
 done
 hosts='["www.youtube.com", "*.googlevideo.com"]'
 config="{\"count\": $count}"
@@ -106,7 +106,7 @@ fi
 python3 - "$work/bundled" "$hosts" <<'EOF'
 import json, sys
 bundled, hosts = sys.argv[1], json.loads(sys.argv[2])
-manifest = json.load(open("addons/youtube/manifest.json"))
+manifest = json.load(open("community/addons/youtube/manifest.json"))
 json.dump(dict(manifest, hosts=hosts), open(bundled + "/youtube/manifest.json", "w"))
 json.dump(dict(manifest, hosts=hosts, id="youtube-sd"), open(bundled + "/youtube-sd/manifest.json", "w"))
 json.dump(dict(manifest, hosts=hosts, id="youtube-signin", directories=[]), open(bundled + "/youtube-signin/manifest.json", "w"))

@@ -69,7 +69,7 @@ impl Fixture {
     fn call(&self, method: &str, args: &[Json]) -> Result<Json, String> {
         let env = Env {
             addon: "stremio",
-            source: include_str!("../addons/stremio/main.js"),
+            source: include_str!("../community/addons/stremio/main.js"),
             hosts: self.hosts.clone(),
             storage: self.storage.clone(),
             prober: self.prober.clone(),

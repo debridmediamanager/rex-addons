@@ -1,8 +1,8 @@
 # The YouTube addon's exports
 
-The [YouTube addon](../addons/youtube/main.js) lets other addons call two of its functions
+The [YouTube addon](https://github.com/debridmediamanager/rex-community-addons/blob/main/addons/youtube/main.js) lets other addons call two of its functions
 (`"exports": ["findSong", "songAudio"]`), with the person's YouTube sign-in. The
-[Spotify addon](../addons/spotify/main.js) plays its songs with them. How calling another addon
+[Spotify addon](https://github.com/debridmediamanager/rex-community-addons/blob/main/addons/spotify/main.js) plays its songs with them. How calling another addon
 works: [Calling another addon](writing-addons.md#calling-another-addon).
 
 ```json

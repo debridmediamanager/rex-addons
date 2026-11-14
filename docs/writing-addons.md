@@ -206,7 +206,7 @@ also name your media playlists. Anything else (a relative link, another scheme, 
 not give) fails the play with a clear message, as do more than 8 MB of playlists in all. Give
 the title a path ending in `.m3u8` and probe it by passing the same object to `ffprobe()`. rex
 plays such a title through its conversion, copying what it can. The
-[YouTube addon](../addons/youtube/main.js) writes one for each video, its segments byte ranges
+[YouTube addon](https://github.com/debridmediamanager/rex-community-addons/blob/main/addons/youtube/main.js) writes one for each video, its segments byte ranges
 (`EXT-X-BYTERANGE`) of YouTube's files.
 
 ## What your code can use
@@ -385,9 +385,9 @@ later syncs. Forget what left the list, so `storage` stays under its 16 MB. Or l
 `media_info` out: rex-addons then probes each title itself and keeps the probe, outside your
 `storage`.
 
-The [YouTube addon](../addons/youtube/main.js) checks at most 30 new videos a sync, 1.5 s apart,
+The [YouTube addon](https://github.com/debridmediamanager/rex-community-addons/blob/main/addons/youtube/main.js) checks at most 30 new videos a sync, 1.5 s apart,
 returns only videos it has checked, and reads its playlists again only every six hours, keeping
-the listing in `storage` in between. The [Spotify addon](../addons/spotify/main.js) looks up 30
+the listing in `storage` in between. The [Spotify addon](https://github.com/debridmediamanager/rex-community-addons/blob/main/addons/spotify/main.js) looks up 30
 new songs a sync (a setting). The [internet-archive addon](../addons/internet-archive/main.js)
 lists every film and probes for 10 minutes at most, sending the rest without `media_info` for
 rex-addons to probe.
@@ -701,15 +701,14 @@ exports, and what each function returns: [The YouTube addon's exports](youtube.m
 
 A repository is any public git repository people can reach over HTTPS: GitHub, GitLab, Codeberg
 or a server of your own. Every folder in it holding a `manifest.json` and a `main.js` is an
-addon, up to three folders down; folders whose names start with `.` are skipped. This one is
-laid out like that:
+addon, up to three folders down; folders whose names start with `.` are skipped. For example:
 
 ```
 repository.json                      optional: {"name": "...", "description": "..."}
 addons/internet-archive/manifest.json
 addons/internet-archive/main.js
-addons/stremio/manifest.json
-addons/stremio/main.js
+addons/my-addon/manifest.json
+addons/my-addon/main.js
 ```
 
 Without `repository.json` the repository is named after its address. People add it by that
@@ -717,6 +716,8 @@ address (`https://codeberg.org/you/my-addons`, or `...#branch` for another branc
 addons from its list and install them. rex-addons fetches only the newest commit, and only what
 it needs: at most 2,000 files and 64 MB, never a symbolic link or submodule. To ship a change,
 raise the addon's `version` and push; people see the update when they refresh the repository.
+To move an addon to another repository, take it out of this one and give it a higher `version`
+there: once this one no longer offers it, the other one updates it, settings and titles kept.
 
 ## Trying it
 

@@ -215,7 +215,7 @@ struct Rig {
 fn rig(name: &str) -> Rig {
     let storage = std::env::temp_dir().join(format!("rex-addons-spotify-{name}-{}.json", std::process::id()));
     let _ = std::fs::remove_file(&storage);
-    let source = include_str!("../addons/spotify/main.js");
+    let source = include_str!("../community/addons/spotify/main.js");
     for constant in ["const SPOTIFY_PAUSE_MS = 250;", "const MATCH_PAUSE_MS = 1500;"] {
         assert!(source.contains(constant), "main.js no longer has {constant}");
     }

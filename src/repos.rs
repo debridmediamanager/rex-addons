@@ -222,6 +222,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// This repository offers only its own addons, as a fetch of it sees it: a test fixture shaped
+    /// like an addon would be listed in the app. The `community` submodule never comes with a fetch,
+    /// and with it here a fixture of the same id would hide behind its addon.
+    #[test]
+    fn this_repository_offers_only_its_addons() {
+        fn copy(from: &Path, to: &Path) {
+            std::fs::create_dir_all(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap().flatten() {
+                let name = entry.file_name();
+                if ["community", "target", ".git"].contains(&name.to_str().unwrap_or("")) {
+                    continue;
+                }
+                if entry.file_type().unwrap().is_dir() {
+                    copy(&entry.path(), &to.join(&name));
+                } else {
+                    std::fs::copy(entry.path(), to.join(&name)).unwrap();
+                }
+            }
+        }
+        let fetched = std::env::temp_dir().join(format!("rex-addons-offers-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fetched);
+        copy(Path::new(env!("CARGO_MANIFEST_DIR")), &fetched);
+        let (found, _) = discover(&fetched);
+        let _ = std::fs::remove_dir_all(&fetched);
+        assert_eq!(found.iter().map(|a| a.dir.as_str()).collect::<Vec<_>>(), ["addons/internet-archive"]);
+    }
+
     #[test]
     fn ids() {
         assert_eq!(repo_id("https://github.com/debridmediamanager/rex-addons").unwrap(), "github-com-debridmediamanager-rex-addons");

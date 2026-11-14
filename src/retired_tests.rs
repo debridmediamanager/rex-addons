@@ -1,5 +1,5 @@
 //! An installed addon whose manifest asks for a sign-in kind this host no longer has: the real
-//! Spotify 1.0.1 (`tests/fixtures/spotify-1.0.1`), which hosts 0.5 to 0.8 signed in by pairing
+//! Spotify 1.0.1 (`tests/fixtures/spotify-1.0.1`, its main.js named `.fixture` so the repository doesn't offer it), which hosts 0.5 to 0.8 signed in by pairing
 //! and kept `spotify-credentials.json` for. It stays listed with its titles until updated.
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -11,7 +11,7 @@ use serde_json::{json, Value as Json};
 use crate::app::App;
 
 const OLD_MANIFEST: &str = include_str!("../tests/fixtures/spotify-1.0.1/manifest.json");
-const OLD_MAIN: &str = include_str!("../tests/fixtures/spotify-1.0.1/main.js");
+const OLD_MAIN: &str = include_str!("../tests/fixtures/spotify-1.0.1/main.js.fixture");
 const NEW_MANIFEST: &str = include_str!("../community/addons/spotify/manifest.json");
 const NEW_MAIN: &str = include_str!("../community/addons/spotify/main.js");
 const UPDATE: &str = "this addon needs an update: update Spotify in its repository";

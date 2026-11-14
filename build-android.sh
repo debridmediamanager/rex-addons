@@ -37,5 +37,7 @@ for abi in ${ABIS:-arm64-v8a armeabi-v7a x86_64}; do
     mkdir -p "$(dirname "$so")"
     "$toolchain/llvm-strip" --strip-unneeded -o "$so" "$target_dir/$triple/release/rex-addons"
     "$toolchain/llvm-readelf" -lW "$so" | awk '/LOAD/ { if ($NF != "0x4000" && $NF != "0x10000") { print "Invalid ELF alignment: " $0; bad = 1 } } END { exit bad }'
+    # The store build carries no service-specific code, so no service's name either.
+    if "$toolchain/llvm-strings" "$so" | grep -qiE 'spotify|librespot'; then echo "$so names spotify or librespot" >&2; exit 1; fi
     echo "Built $so ($(wc -c <"$so" | tr -d ' ') bytes)"
 done

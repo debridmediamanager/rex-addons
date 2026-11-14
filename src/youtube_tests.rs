@@ -336,7 +336,7 @@ impl Rig {
     }
 
     fn run(&self, source: &str, method: &str, args: &[Json]) -> Result<Json, String> {
-        let env = Env { addon: "youtube", source, hosts: self.hosts.clone(), storage: self.storage.clone(), prober: self.app.prober.clone(), spotify: None, calls: None };
+        let env = Env { addon: "youtube", source, hosts: self.hosts.clone(), storage: self.storage.clone(), prober: self.app.prober.clone(), calls: None };
         sandbox::call(&env, method, args, sandbox::ITEMS)
     }
 
@@ -723,7 +723,7 @@ fn pure(js: &str) -> Json {
         + &format!("\nexport default {{ async items() {{ {js} }}, open() {{}} }};");
     let env = Env {
         addon: "youtube", source: &source, hosts: Hosts::default(), storage: Arc::new(Storage::open(PathBuf::from("/dev/null"))),
-        prober: Arc::new(crate::probe::Prober::new(None, "127.0.0.1:9".parse().unwrap())), spotify: None, calls: None,
+        prober: Arc::new(crate::probe::Prober::new(None, "127.0.0.1:9".parse().unwrap())), calls: None,
     };
     sandbox::call(&env, "items", &[], sandbox::ITEMS).unwrap()
 }

@@ -422,7 +422,7 @@ impl Rig {
         });
         let env = Env {
             addon: &self.tag, source, hosts: Hosts::from(vec![self.lan.to_string()]), storage: self.storage.clone(),
-            prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())), spotify: None, calls: Some(calls),
+            prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())), calls: Some(calls),
         };
         let limits = if method == "items" { sandbox::ITEMS } else { sandbox::OPEN };
         let result = sandbox::call(&env, method, args, limits);

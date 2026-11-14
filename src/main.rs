@@ -11,15 +11,14 @@ mod git;
 mod net;
 mod probe;
 mod repos;
+#[cfg(test)]
+mod retired_tests;
 mod sandbox;
 mod server;
 #[cfg(test)]
 mod sign_in_tests;
-mod spotify;
 #[cfg(test)]
 mod spotify_addon_tests;
-#[cfg(test)]
-mod spotify_tests;
 #[cfg(test)]
 mod youtube_tests;
 
@@ -36,7 +35,7 @@ const USAGE: &str = "rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:
   --bundled  addons installed on the first start and updated when a newer version is bundled
   --dev      addons installed on start, and again, then synced, whenever their manifest.json or main.js changes
   --default-repo  an addon repository added once, the first time it is given; repeatable
-  --device-name   the name this device shows in the Spotify app while a Spotify addon pairs (default rex)
+  --device-name   accepted and ignored: older hosts named this device by it for a sign-in kind 0.9 removed
 
   REX_ADDONS_TOKEN  when set, every /api/ request must carry Authorization: Bearer <it>
 
@@ -48,7 +47,6 @@ fn main() {
     let mut rex = "http://127.0.0.1:32400".to_string();
     let mut data = PathBuf::from("rex-addons-data");
     let (mut ffprobe, mut bundled, mut dev, mut defaults) = (None, None, None, Vec::new());
-    let mut device_name = "rex".to_string();
     let all: Vec<String> = std::env::args().skip(1).collect();
     if all.first().map(String::as_str) == Some("check") {
         if all.iter().any(|arg| arg == "--help" || arg == "-h") {
@@ -84,7 +82,8 @@ fn main() {
             "--bundled" => bundled = Some(PathBuf::from(value)),
             "--dev" => dev = Some(PathBuf::from(value)),
             "--default-repo" => defaults.push(value),
-            "--device-name" if !value.trim().is_empty() => device_name = value,
+            // Apps written for hosts before 0.9 still pass it.
+            "--device-name" => {}
             _ => {
                 eprintln!("unknown flag {flag}\n\n{USAGE}");
                 std::process::exit(2);
@@ -99,15 +98,7 @@ fn main() {
         eprintln!("cannot listen on {listen}: {e}");
         std::process::exit(1)
     });
-    // Test-only: Spotify's API answered by an end-to-end test's own server.
-    let spotify: std::sync::Arc<dyn spotify::Spotify> = match std::env::var("REX_ADDONS_SPOTIFY_STUB") {
-        Ok(url) if !url.is_empty() => {
-            eprintln!("WARN [host] REX_ADDONS_SPOTIFY_STUB: Spotify is answered by {url}, for tests");
-            std::sync::Arc::new(spotify::Stub { url })
-        }
-        _ => std::sync::Arc::new(spotify::Librespot::default()),
-    };
-    let app = app::App::with_spotify(data, rex, listen, ffprobe, bundled.as_deref(), device_name, spotify);
+    let app = app::App::new(data, rex, listen, ffprobe, bundled.as_deref());
     app::log("host", &format!("rex-addons {} on {listen}, rex at {}, {} addons", env!("CARGO_PKG_VERSION"), app.rex, app.addons.lock().unwrap().len()));
     app.start_repos(&defaults);
     if let Some(dev) = dev {

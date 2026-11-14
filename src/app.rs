@@ -13,7 +13,6 @@ use crate::net;
 use crate::probe::{self, Prober};
 use crate::repos::{self, Repo};
 use crate::sandbox::{self, Bridge, Env, Storage};
-use crate::spotify::{self, Pairing, Spotify};
 
 /// How long an `open()` answer is reused for the byte reads of one item.
 const OPEN_TTL: Duration = Duration::from_secs(10 * 60);
@@ -48,10 +47,9 @@ const REPO_RETRY: u64 = 3600;
 const SIGN_IN_INTERVAL: (u64, u64) = (2, 60);
 /// ...and how long its code may live.
 const SIGN_IN_LIFETIME: u64 = 3600;
-/// How long a Spotify pairing keeps this device discoverable on the local network.
-const PAIRING_LIFETIME: u64 = 600;
-/// Where a Spotify addon's credentials are kept, in its folder: the host's alone.
-const SPOTIFY_CREDENTIALS: &str = "spotify-credentials.json";
+/// What hosts 0.5 to 0.8 named a sign-in they kept for an addon, after its kind:
+/// `<kind>-credentials.json` in its folder.
+const CREDENTIALS: &str = "-credentials.json";
 /// Each sign-in started gets the next number: a poll whose sign-in was replaced or cancelled stops.
 static SIGN_INS: AtomicU64 = AtomicU64::new(0);
 
@@ -140,16 +138,10 @@ pub struct Opened {
     pub playlists: Option<Arc<probe::Playlists>>,
 }
 
-/// A sign-in waiting for the person to enter its code, or to pick this device in the Spotify
-/// app. Never saved.
+/// A sign-in waiting for the person to enter its code. Never saved.
 pub struct Pending {
-    /// Empty while pairing with Spotify.
     pub code: String,
     pub url: String,
-    /// The name this device shows in the Spotify app while pairing.
-    pub device: Option<String>,
-    /// Dropped with the pending sign-in, which ends the pairing.
-    _pairing: Option<Pairing>,
     pub expires_at: u64,
     expires: Instant,
     interval: Duration,
@@ -214,19 +206,21 @@ pub struct Addon {
 impl Addon {
     pub fn status(&self) -> Json {
         let m = &self.manifest;
+        let retired = m.retired();
+        let (error, error_kind) = match retired {
+            Some(update) => (Some(update), Some("update".to_string())),
+            None => (self.error.clone(), self.error_kind.clone()),
+        };
         json!({
             "id": m.id, "name": m.name, "version": m.version, "description": m.description,
             "enabled": self.enabled, "repo": self.repo, "hosts": m.hosts.listed, "granted_hosts": m.reach(&self.config).granted.iter().map(|(host, port)| net::shown(host, *port)).collect::<Vec<_>>(),
-            "state": if self.syncing { "syncing" } else if self.error.is_some() { "error" } else { "idle" },
-            "items": self.items, "held": self.held, "last_sync": self.last_sync, "error": self.error,
-            "error_kind": self.error_kind,
+            "state": if self.syncing { "syncing" } else if error.is_some() { "error" } else { "idle" },
+            "items": self.items, "held": self.held, "last_sync": self.last_sync, "error": error,
+            "error_kind": error_kind,
             "warnings": {"count": self.warned, "first": self.warnings},
             "sign_in": m.sign_in.as_ref().map(|sign_in| json!({
                 "label": sign_in.label, "kind": sign_in.kind, "account": self.account, "error": self.sign_in_error,
-                "pending": self.pending.as_ref().map(|p| match &p.device {
-                    Some(device) => json!({"device": device, "expires_at": p.expires_at}),
-                    None => json!({"code": p.code, "url": p.url, "expires_at": p.expires_at}),
-                }),
+                "pending": self.pending.as_ref().map(|p| json!({"code": p.code, "url": p.url, "expires_at": p.expires_at})),
             })),
         })
     }
@@ -242,9 +236,6 @@ pub struct App {
     pub rex: String,
     pub listen: SocketAddr,
     pub prober: Arc<Prober>,
-    /// The name this device pairs under in the Spotify app (`--device-name`).
-    pub device_name: String,
-    pub spotify: Arc<dyn Spotify>,
     pub addons: Mutex<BTreeMap<String, Addon>>,
     pub repos: Mutex<Repos>,
 }
@@ -272,14 +263,7 @@ pub fn source_name(id: &str) -> String {
 }
 
 impl App {
-    #[cfg(test)]
     pub fn new(data: PathBuf, rex: String, listen: SocketAddr, ffprobe: Option<String>, bundled: Option<&Path>) -> Arc<App> {
-        App::with_spotify(data, rex, listen, ffprobe, bundled, "rex".into(), Arc::new(spotify::Librespot::default()))
-    }
-
-    pub fn with_spotify(
-        data: PathBuf, rex: String, listen: SocketAddr, ffprobe: Option<String>, bundled: Option<&Path>, device_name: String, spotify: Arc<dyn Spotify>,
-    ) -> Arc<App> {
         std::fs::create_dir_all(data.join("addons")).expect("cannot create the data directory");
         let saved = read_json(&data.join("repos.json")).unwrap_or(Json::Null);
         let repos = Repos {
@@ -289,8 +273,6 @@ impl App {
         };
         let app = Arc::new(App {
             prober: Arc::new(Prober::new(ffprobe, listen)),
-            device_name,
-            spotify,
             data,
             rex: rex.trim_end_matches('/').to_string(),
             listen,
@@ -400,6 +382,7 @@ impl App {
         std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
         write_atomic(&path.join("main.js"), source.as_bytes()).map_err(|e| e.to_string())?;
         write_atomic(&path.join("manifest.json"), serde_json::to_string_pretty(raw).unwrap().as_bytes()).map_err(|e| e.to_string())?;
+        forget_credentials(&path, manifest.sign_in.as_ref().map(|s| s.kind.as_str()));
         let mut addons = self.addons.lock().unwrap();
         let id = manifest.id.clone();
         match addons.get_mut(&id) {
@@ -439,9 +422,9 @@ impl App {
     /// `signInPoll` with a code sign-in, and each of `exports`. The names checked, or why not.
     pub fn loads(&self, manifest: &Manifest, source: &str) -> Result<Vec<String>, String> {
         let storage = Arc::new(Storage::open(PathBuf::from("/dev/null")));
-        let env = Env { addon: &manifest.id, source, hosts: manifest.hosts.clone(), storage, prober: self.prober.clone(), spotify: None, calls: None };
+        let env = Env { addon: &manifest.id, source, hosts: manifest.hosts.clone(), storage, prober: self.prober.clone(), calls: None };
         let mut needed = vec!["items".to_string(), "open".into()];
-        if manifest.sign_in.as_ref().is_some_and(|s| !s.spotify()) {
+        if manifest.sign_in.is_some() {
             needed.extend(["signIn".to_string(), "signInPoll".into()]);
         }
         needed.extend(manifest.exports.iter().cloned());
@@ -456,7 +439,6 @@ impl App {
         if self.addons.lock().unwrap().remove(id).is_none() {
             return Err("no such addon".into());
         }
-        self.spotify.forget(id);
         RECENT.lock().unwrap().remove(id);
         let rex = self.delete_source(id);
         std::fs::remove_dir_all(dir(self, id)).map_err(|e| e.to_string())?;
@@ -526,6 +508,9 @@ impl App {
         let (slot, manifest, source, config, storage) = {
             let mut addons = self.addons.lock().unwrap();
             let addon = addons.get_mut(id).ok_or("no such addon")?;
+            if let Some(update) = addon.manifest.retired() {
+                return Err(update);
+            }
             if !addon.signed_in() {
                 return Err("sign in first".into());
             }
@@ -590,7 +575,7 @@ impl App {
     pub fn start_sync(self: &Arc<Self>, id: &str, force: bool, reason: &'static str) -> bool {
         {
             let mut addons = self.addons.lock().unwrap();
-            let Some(addon) = addons.get_mut(id) else { return false };
+            let Some(addon) = addons.get_mut(id).filter(|a| a.manifest.retired().is_none()) else { return false };
             addon.force |= force;
             if addon.syncing {
                 addon.again = Some(reason);
@@ -609,7 +594,7 @@ impl App {
         addons
             .values()
             // One waiting to be signed in is synced by the sign-in.
-            .filter(|a| a.enabled && !a.syncing && a.signed_in())
+            .filter(|a| a.enabled && !a.syncing && a.signed_in() && a.manifest.retired().is_none())
             .filter_map(|a| {
                 let reason = match (a.error.is_some(), a.attempted, a.last_sync) {
                     (true, Some(at), _) => (at.elapsed() >= a.retry).then_some("retry"),
@@ -1098,19 +1083,13 @@ impl App {
     /// `POST /api/addons/{id}/sign-in`: the addon's `signIn()` starts one, which replaces any
     /// pending, and a thread of its own polls it.
     pub fn sign_in(self: &Arc<Self>, id: &str) -> Result<(), (u16, String)> {
-        let spotify = match self.addons.lock().unwrap().get(id) {
+        match self.addons.lock().unwrap().get(id) {
             None => return Err((404, "no such addon".into())),
-            Some(a) if !a.enabled && a.manifest.sign_in.is_some() => return Err((409, "the addon is disabled".into())),
-            Some(a) => a.manifest.sign_in.as_ref().ok_or((400, "this addon has no sign-in".to_string()))?.spotify(),
-        };
-        if spotify {
-            self.pair(id)
-        } else {
-            self.sign_in_with_code(id)
+            Some(a) if a.manifest.sign_in.is_none() => return Err((400, "this addon has no sign-in".into())),
+            Some(a) if a.manifest.retired().is_some() => return Err((400, a.manifest.retired().unwrap())),
+            Some(a) if !a.enabled => return Err((409, "the addon is disabled".into())),
+            Some(_) => {}
         }
-    }
-
-    fn sign_in_with_code(self: &Arc<Self>, id: &str) -> Result<(), (u16, String)> {
         let started = self.call_addon(id, "signIn", &[]).map_err(|error| first_line(&error));
         let pending = started.and_then(|answer| pending_of(&answer)).map_err(|error| {
             warn(id, &format!("sign-in failed to start: {error}"));
@@ -1185,7 +1164,7 @@ impl App {
             if addon.manifest.sign_in.is_none() {
                 return Err((400, "this addon has no sign-in".into()));
             }
-            forget_spotify(self, addon);
+            forget_credentials(&dir(self, id), None);
             addon.account = None;
             addon.pending = None;
             addon.sign_in_error = None;
@@ -1201,90 +1180,8 @@ impl App {
     }
 }
 
-/// Signing in with Spotify, and the globals some addons get.
+/// The globals some addons get.
 impl App {
-    /// `POST /api/addons/{id}/sign-in` for a Spotify addon: this device is discoverable on the
-    /// local network until the person picks it in the Spotify app, for PAIRING_LIFETIME.
-    fn pair(self: &Arc<Self>, id: &str) -> Result<(), (u16, String)> {
-        let number = SIGN_INS.fetch_add(1, Ordering::Relaxed);
-        let (app, owner) = (self.clone(), id.to_string());
-        let done = Box::new(move |outcome: Result<Json, String>| app.paired(&owner, number, outcome));
-        // Held while pairing starts, so credentials that come at once find the sign-in pending.
-        let mut addons = self.addons.lock().unwrap();
-        let addon = addons.get_mut(id).ok_or((404, "no such addon".to_string()))?;
-        if !addon.enabled {
-            return Err((409, "the addon is disabled".into()));
-        }
-        let pairing = self.spotify.pair(&self.device_name, Duration::from_secs(PAIRING_LIFETIME), done).map_err(|error| {
-            warn(id, &format!("pairing failed to start: {error}"));
-            (502, error)
-        })?;
-        log(id, &format!("pairing: discoverable as {} in the Spotify app for {PAIRING_LIFETIME} s", self.device_name));
-        addon.pending = Some(Pending {
-            code: String::new(),
-            url: String::new(),
-            device: Some(self.device_name.clone()),
-            _pairing: Some(pairing),
-            expires_at: now() + PAIRING_LIFETIME,
-            expires: Instant::now() + Duration::from_secs(PAIRING_LIFETIME),
-            interval: Duration::ZERO,
-            state: Json::Null,
-            number,
-        });
-        addon.sign_in_error = None;
-        remember_secrets(addon);
-        save_state(self, addon);
-        Ok(())
-    }
-
-    /// The Spotify app sent credentials, or the pairing numbered `number` ended without them.
-    fn paired(self: &Arc<Self>, id: &str, number: u64, outcome: Result<Json, String>) {
-        let current = |app: &App| app.addons.lock().unwrap().get(id).is_some_and(|a| a.pending.as_ref().is_some_and(|p| p.number == number));
-        if !current(self) {
-            return;
-        }
-        let signed = outcome.and_then(|credentials| {
-            // Another account's session goes first.
-            self.spotify.forget(id);
-            let signed = self.spotify.connect(id, &credentials).map_err(|e| first_line(&e).trim_start_matches("SIGN_IN_REQUIRED").trim_start_matches([':', ' ']).to_string())?;
-            write_private(&dir(self, id).join(SPOTIFY_CREDENTIALS), signed.credentials.to_string().as_bytes())
-                .map_err(|e| format!("cannot keep the sign-in: {e}"))?;
-            Ok(signed.account)
-        });
-        let mut addons = self.addons.lock().unwrap();
-        let Some(addon) = addons.get_mut(id).filter(|a| a.pending.as_ref().is_some_and(|p| p.number == number)) else {
-            // Cancelled while it signed in.
-            drop(addons);
-            self.spotify.forget(id);
-            return;
-        };
-        let done = signed.is_ok();
-        end_sign_in(self, addon, signed);
-        drop(addons);
-        if done {
-            self.start_sync(id, false, "sign_in");
-            self.wake_dependents(id);
-        }
-    }
-
-    /// The `spotify` global's requests: the addon's session, connected from its credentials
-    /// when it has none, which are kept again when Spotify renews them.
-    fn spotify_call(&self, id: &str, method: &str, path: &str, body: Option<&Json>) -> Result<Json, String> {
-        if !spotify::valid_path(path) {
-            return Err(format!("spotify: {path:?} is not a path such as /playlist/v2/user/<user>/rootlist"));
-        }
-        let file = dir(self, id).join(SPOTIFY_CREDENTIALS);
-        let credentials = read_json(&file).ok_or("SIGN_IN_REQUIRED: sign in to Spotify again")?;
-        let signed = self.spotify.connect(id, &credentials)?;
-        if signed.credentials != credentials {
-            write_private(&file, signed.credentials.to_string().as_bytes()).map_err(|e| format!("cannot keep the sign-in: {e}"))?;
-        }
-        match method {
-            "USER" => Ok(json!(signed.username)),
-            _ => self.spotify.request(id, method, path, body),
-        }
-    }
-
     /// `addons.call(callee, function, ...args)` from the addon `caller`: the callee's exported
     /// function in a sandbox of its own, with its own hosts, settings, storage and sign-in and
     /// `open()`'s limits. One level: what it calls cannot call a third.
@@ -1327,10 +1224,6 @@ impl App {
     /// The sandbox an addon's call runs in, with the globals its manifest asks for. `calls`:
     /// whether `addons.call` reaches other addons (false inside a call from another one).
     pub fn env<'a>(self: &Arc<Self>, id: &'a str, manifest: &'a Manifest, config: &Map<String, Json>, source: &'a str, storage: Arc<Storage>, calls: bool) -> Env<'a> {
-        let spotify = manifest.sign_in.as_ref().filter(|s| s.spotify()).map(|_| {
-            let (app, id) = (self.clone(), id.to_string());
-            Arc::new(move |method: &str, path: &str, body: Vec<Json>| app.spotify_call(&id, method, path, body.first())) as Bridge
-        });
         let calls = (!manifest.requires.is_empty()).then(|| match calls {
             true => {
                 let (app, caller) = (self.clone(), id.to_string());
@@ -1338,7 +1231,7 @@ impl App {
             }
             false => Arc::new(|_: &str, _: &str, _: Vec<Json>| Err("addons.call: an addon called by another cannot call a third".to_string())) as Bridge,
         });
-        Env { addon: id, source, hosts: manifest.reach(config), storage, prober: self.prober.clone(), spotify, calls }
+        Env { addon: id, source, hosts: manifest.reach(config), storage, prober: self.prober.clone(), calls }
     }
 }
 
@@ -1376,25 +1269,16 @@ fn unmet(addons: &BTreeMap<String, Addon>, id: &str) -> Option<&'static str> {
     }
 }
 
-/// A Spotify addon's session and saved credentials go.
-fn forget_spotify(app: &App, addon: &Addon) {
-    if addon.manifest.sign_in.as_ref().is_some_and(|s| s.spotify()) {
-        app.spotify.forget(&addon.manifest.id);
-        let _ = std::fs::remove_file(dir(app, &addon.manifest.id).join(SPOTIFY_CREDENTIALS));
+/// The sign-ins hosts 0.5 to 0.8 kept in an addon's folder (`<kind>-credentials.json`), but
+/// `kept`'s: one an addon no longer declares, or signed out of, goes.
+fn forget_credentials(path: &Path, kept: Option<&str>) {
+    let kept = kept.map(|kind| format!("{kind}{CREDENTIALS}"));
+    for entry in std::fs::read_dir(path).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.ends_with(CREDENTIALS) && kept.as_ref() != Some(&name) {
+            let _ = std::fs::remove_file(entry.path());
+        }
     }
-}
-
-/// Written whole, readable by this user only.
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    let tmp = path.with_extension("tmp");
-    let _ = std::fs::remove_file(&tmp);
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    options.open(&tmp)?.write_all(bytes)?;
-    std::fs::rename(&tmp, path)
 }
 
 /// What `signIn()` returned, as a pending sign-in: its interval and lifetime kept within bounds.
@@ -1408,8 +1292,6 @@ fn pending_of(answer: &Json) -> Result<Pending, String> {
     Ok(Pending {
         code: code.into(),
         url: url.into(),
-        device: None,
-        _pairing: None,
         expires_at: now() + lifetime,
         expires: Instant::now() + Duration::from_secs(lifetime),
         interval: Duration::from_secs(interval),
@@ -1463,7 +1345,6 @@ fn retry_after(error: &str) -> Option<(Duration, String)> {
 /// titles stay in rex.
 fn signed_out(app: &App, addon: &mut Addon, reason: &str) {
     warn(&addon.manifest.id, &format!("signed out by the website: {reason}"));
-    forget_spotify(app, addon);
     addon.account = None;
     addon.sign_in_error = Some(reason.to_string());
     addon.opened.clear();
@@ -1929,6 +1810,11 @@ fn load(path: &Path) -> Result<Addon, String> {
     let raw = read_json(&path.join("manifest.json")).ok_or("no manifest.json")?;
     let manifest = Manifest::parse(&raw)?;
     let source = std::fs::read_to_string(path.join("main.js")).map_err(|e| format!("main.js: {e}"))?;
+    let kind = manifest.sign_in.as_ref().map(|s| s.kind.as_str());
+    forget_credentials(path, kind);
+    if let Some(update) = manifest.retired() {
+        warn(&manifest.id, &format!("its manifest asks for a \"{}\" sign-in, which this rex-addons does not have: {update}", kind.unwrap_or_default()));
+    }
     let state = read_json(&path.join("state.json")).unwrap_or(json!({"enabled": true}));
     let object = |name: &str| match read_json(&path.join(name)) {
         Some(Json::Object(map)) => map,
@@ -2088,7 +1974,7 @@ mod tests {
         assert_eq!(page(json!([{"id": "a", "path": "a.mp4"}]), "0.8", true, &mut full).err().unwrap(), "items() returned more than 64 MB of ids and paths: at most 64 MB a sync");
         let mut many = Seen { ids: (0..MAX_TITLES).map(|n| n.to_string()).collect(), ..Seen::default() };
         assert_eq!(page(json!([{"id": "a", "path": "a.mp4"}]), "0.8", true, &mut many).err().unwrap(), "items() returned more than 200000 titles: at most 200000 a sync");
-        let env = Env { addon: "a", source: "", hosts: Default::default(), storage: Arc::new(Storage::open("/dev/null".into())), prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())), spotify: None, calls: None };
+        let env = Env { addon: "a", source: "", hosts: Default::default(), storage: Arc::new(Storage::open("/dev/null".into())), prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())), calls: None };
         let mut paged = Seen { pages: MAX_PAGES, ..Seen::default() };
         assert_eq!(pages(&env, json!({}), &manifest("0.8"), true, &none, &mut paged, |_, _| Ok(())).err().unwrap(), "items() returned 10000 pages and still a next: at most 10000 a sync");
     }

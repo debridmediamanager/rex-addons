@@ -106,7 +106,7 @@ fn check(folder: &Path, config: Option<&str>, open: Option<&str>, ffprobe: Optio
     // A listener of its own for the relay an addon's ffprobe() reads; its API takes a token nobody has.
     let server = tiny_http::Server::http("127.0.0.1:0").expect("cannot listen on 127.0.0.1");
     let listen = server.server_addr().to_ip().unwrap();
-    let app = App::with_spotify(data.unwrap_or(temp).into(), "http://127.0.0.1:9".into(), listen, ffprobe, None, "rex".into(), Arc::new(crate::spotify::Librespot::default()));
+    let app = App::new(data.unwrap_or(temp).into(), "http://127.0.0.1:9".into(), listen, ffprobe, None);
     let served = app.clone();
     std::thread::spawn(move || crate::server::serve(served, server, Some(crate::probe::token())));
 
@@ -115,10 +115,8 @@ fn check(folder: &Path, config: Option<&str>, open: Option<&str>, ffprobe: Optio
         Err(error) => return fail(&error),
     }
     let id = manifest.id.clone();
-    match manifest.sign_in.as_ref().map(|s| s.spotify()) {
-        Some(false) => note("it signs in (sign_in), which check can't do: items() and open() run with what its storage holds, so give --data a rex-addons data directory where it is signed in"),
-        Some(true) => note("it signs in with Spotify, which check can't do: the spotify global answers SIGN_IN_REQUIRED unless --data names a rex-addons data directory where it is signed in"),
-        None => {}
+    if manifest.sign_in.is_some() {
+        note("it signs in (sign_in), which check can't do: items() and open() run with what its storage holds, so give --data a rex-addons data directory where it is signed in");
     }
     if !manifest.requires.is_empty() {
         note(&format!("addons.call reaches {} only as installed in --data's rex-addons data directory", manifest.requires.join(", ")));

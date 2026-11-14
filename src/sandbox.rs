@@ -108,14 +108,11 @@ pub struct Env<'a> {
     pub hosts: Hosts,
     pub storage: Arc<Storage>,
     pub prober: Arc<Prober>,
-    /// The `spotify` global, for an addon that signs in with Spotify: (`GET`, `POST` or `USER`,
-    /// path, [body]) to JSON.
-    pub spotify: Option<Bridge>,
     /// `addons.call`, for an addon with `requires`: (addon, function, arguments) to its result.
     pub calls: Option<Bridge>,
 }
 
-/// A host function behind a global only some addons get. Its time counts as waiting.
+/// The host function behind `addons.call`, which only some addons get. Its time counts as waiting.
 pub type Bridge = Arc<dyn Fn(&str, &str, Vec<Json>) -> Result<Json, String> + Send + Sync>;
 
 const PRELUDE: &str = r#"
@@ -277,14 +274,6 @@ const PRELUDE: &str = r#"
     keys: (prefix = "") => JSON.parse(host.storageKeys(String(prefix))),
   });
   const globals = { console, fetch, ffprobe, storage, sleep, URL, URLSearchParams, hash, hmac, TextEncoder, TextDecoder, crypto };
-  if (host.spotify) {
-    const ask = (method, path, body) => JSON.parse(host.spotify(method, String(path), body === undefined ? null : JSON.stringify(body)));
-    globals.spotify = Object.freeze({
-      user: () => ask("USER", "/"),
-      get: async (path) => ask("GET", path),
-      post: async (path, body = null) => ask("POST", path, body),
-    });
-  }
   if (host.call) {
     globals.addons = Object.freeze({
       call: async (id, name, ...args) => JSON.parse(host.call(String(id), String(name), JSON.stringify(args))),
@@ -640,24 +629,17 @@ fn install<'js>(ctx: &Ctx<'js>, env: &Env, waited: Rc<Cell<Duration>>, deadline:
             probed.map(|probe| probe.to_string()).map_err(|error| throw(&ctx, &format!("ffprobe: {error}")))
         })?,
     )?;
-    for (name, bridge) in [("spotify", env.spotify.clone()), ("call", env.calls.clone())] {
-        let Some(bridge) = bridge else { continue };
+    if let Some(bridge) = env.calls.clone() {
         let bridge_waited = waited.clone();
         host.set(
-            name,
-            Function::new(ctx.clone(), move |ctx: Ctx<'js>, what: String, path: String, rest: Option<String>| -> rquickjs::Result<String> {
-                // A body (spotify) or the arguments (call), as JSON.
-                let rest: Json = match rest {
-                    Some(text) => serde_json::from_str(&text).map_err(|e| throw(&ctx, &e.to_string()))?,
-                    None => Json::Null,
-                };
-                let args = match rest {
-                    Json::Array(args) if name == "call" => args,
-                    Json::Null => Vec::new(),
-                    body => vec![body],
+            "call",
+            Function::new(ctx.clone(), move |ctx: Ctx<'js>, addon: String, function: String, args: String| -> rquickjs::Result<String> {
+                let args = match serde_json::from_str(&args).map_err(|e| throw(&ctx, &e.to_string()))? {
+                    Json::Array(args) => args,
+                    _ => Vec::new(),
                 };
                 let started = Instant::now();
-                let answer = bridge(&what, &path, args);
+                let answer = bridge(&addon, &function, args);
                 bridge_waited.set(bridge_waited.get() + started.elapsed());
                 answer.map(|value| value.to_string()).map_err(|error| throw(&ctx, &error))
             })?,
@@ -680,7 +662,6 @@ mod tests {
             hosts: Hosts::from(hosts.iter().map(|h| h.to_string()).collect::<Vec<_>>()),
             storage: Arc::new(Storage::open(path)),
             prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())),
-            spotify: None,
             calls: None,
         };
         call(&env, "items", &[serde_json::json!({"config": {"n": 2}})], limits)
@@ -711,50 +692,35 @@ mod tests {
         assert_eq!(got.unwrap(), serde_json::json!(want));
     }
 
-    /// The bridges an addon gets only when its manifest asks: their answers come back as
-    /// JSON, their errors as thrown errors, and their time is waiting, not JavaScript time.
+    /// `addons.call`, which an addon gets only when its manifest asks: its answers come back as
+    /// JSON, its errors as thrown errors, and its time is waiting, not JavaScript time.
     #[test]
-    fn bridges_answer_json_throw_errors_and_count_as_waiting() {
+    fn the_calls_bridge_answers_json_throws_errors_and_counts_as_waiting() {
         let seen: Arc<Mutex<Vec<String>>> = Arc::default();
-        let (spotify_seen, calls_seen) = (seen.clone(), seen.clone());
+        let calls_seen = seen.clone();
         let env = Env {
             addon: "test",
             source: "export default { async items() {
                const thrown = async (f) => { try { await f(); return 'no error'; } catch (e) { return e.message; } };
-               return [spotify.user(), await spotify.get('/a?b=1'), await spotify.post('/p', {set: 'collection'}), await spotify.post('/empty'),
-                 await addons.call('other', 'find', 'a song', 2, {x: [1]}), await addons.call('other', 'nothing'),
-                 await thrown(() => spotify.get('/fail')), await thrown(() => addons.call('other', 'fail'))];
+               return [await addons.call('other', 'find', 'a song', 2, {x: [1]}), await addons.call('other', 'find', 'another'),
+                 await addons.call('other', 'nothing'), await thrown(() => addons.call('other', 'fail'))];
              }, open() {} };",
             hosts: Hosts::default(),
             storage: Arc::new(Storage::open(PathBuf::from("/dev/null"))),
             prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())),
-            spotify: Some(Arc::new(move |method: &str, path: &str, args: Vec<Json>| {
-                spotify_seen.lock().unwrap().push(format!("{method} {path} {}", Json::Array(args.clone())));
-                match path {
-                    "/fail" => Err("SIGN_IN_REQUIRED: gone".into()),
-                    _ if method == "USER" => Ok(Json::from("someone")),
-                    // Slow: the 1 s of JavaScript time allowed is not spent on it.
-                    _ => { std::thread::sleep(Duration::from_millis(700)); Ok(serde_json::json!({"path": path, "body": args})) }
-                }
-            })),
             calls: Some(Arc::new(move |id: &str, name: &str, args: Vec<Json>| {
                 calls_seen.lock().unwrap().push(format!("{id}.{name} {}", Json::Array(args.clone())));
                 match name {
                     "fail" => Err("other: no such song".into()),
                     "nothing" => Ok(Json::Null),
+                    // Slow: the 1 s of JavaScript time allowed is not spent on it.
                     _ => { std::thread::sleep(Duration::from_millis(700)); Ok(serde_json::json!({"url": "https://cdn.example/a.m4a"})) }
                 }
             })),
         };
         let got = call(&env, "items", &[], QUICK).unwrap();
-        assert_eq!(got, serde_json::json!([
-            "someone", {"path": "/a?b=1", "body": []}, {"path": "/p", "body": [{"set": "collection"}]}, {"path": "/empty", "body": []},
-            {"url": "https://cdn.example/a.m4a"}, null, "SIGN_IN_REQUIRED: gone", "other: no such song"
-        ]));
-        assert_eq!(*seen.lock().unwrap(), [
-            "USER / []", "GET /a?b=1 []", "POST /p [{\"set\":\"collection\"}]", "POST /empty []",
-            "other.find [\"a song\",2,{\"x\":[1]}]", "other.nothing []", "GET /fail []", "other.fail []",
-        ]);
+        assert_eq!(got, serde_json::json!([{"url": "https://cdn.example/a.m4a"}, {"url": "https://cdn.example/a.m4a"}, null, "other: no such song"]));
+        assert_eq!(*seen.lock().unwrap(), ["other.find [\"a song\",2,{\"x\":[1]}]", "other.find [\"another\"]", "other.nothing []", "other.fail []"]);
     }
 
     #[test]
@@ -951,8 +917,7 @@ mod tests {
                 hosts: Hosts::default(),
                 storage: Arc::new(Storage::open(path.clone())),
                 prober: Arc::new(Prober::new(None, "127.0.0.1:9".parse().unwrap())),
-                spotify: None,
-                calls: None,
+                    calls: None,
             };
             call(&env, "items", &[], QUICK).unwrap()
         };
@@ -978,7 +943,6 @@ mod tests {
             hosts: Hosts::from(vec!["*".into()]),
             storage: Arc::new(Storage::open(PathBuf::from("/dev/null"))),
             prober: Arc::new(Prober::new(Some("ffprobe".into()), "127.0.0.1:9".parse().unwrap())),
-            spotify: None,
             calls: None,
         };
         let error = call(&env, "items", &[], QUICK).unwrap_err();

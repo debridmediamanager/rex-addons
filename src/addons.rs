@@ -26,15 +26,9 @@ pub struct Field {
 pub struct SignIn {
     /// What the app's button says.
     pub label: String,
-    /// `code`: the addon's own `signIn()`, a code typed on another device. `spotify`: the host
-    /// pairs with the Spotify app over the local network and keeps the session itself.
+    /// `code`: the addon's own `signIn()`, a code typed on another device, the only kind there
+    /// is. Any other is one an older host had (0.5 to 0.8 had one more): see `Manifest::retired`.
     pub kind: String,
-}
-
-impl SignIn {
-    pub fn spotify(&self) -> bool {
-        self.kind == "spotify"
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -187,8 +181,8 @@ impl Manifest {
                 },
                 kind: match sign_in.get("kind") {
                     None | Some(Json::Null) => "code".into(),
-                    Some(Json::String(kind)) if kind == "code" || kind == "spotify" => kind.clone(),
-                    Some(_) => return Err("manifest: sign_in.kind must be \"code\" or \"spotify\"".into()),
+                    Some(Json::String(kind)) if !kind.trim().is_empty() => kind.clone(),
+                    Some(_) => return Err("manifest: sign_in.kind must be text, such as \"code\"".into()),
                 },
             }),
             Some(_) => return Err("manifest: sign_in must be an object, such as {\"label\": \"Sign in to Example\"}".into()),
@@ -219,9 +213,8 @@ impl Manifest {
             return Err("manifest: sign_in needs \"host\": \"0.3\" or newer".into());
         }
         // Fields an older rex-addons would install and ignore.
-        let spotify = sign_in.as_ref().is_some_and(SignIn::spotify);
-        if (spotify || !exports.is_empty() || !requires.is_empty()) && host.as_deref().is_none_or(|host| newer("0.5", host)) {
-            return Err("manifest: sign_in kind spotify, exports and requires need \"host\": \"0.5\" or newer".into());
+        if (!exports.is_empty() || !requires.is_empty()) && host.as_deref().is_none_or(|host| newer("0.5", host)) {
+            return Err("manifest: exports and requires need \"host\": \"0.5\" or newer".into());
         }
         // An older rex-addons refuses the type with a message that doesn't say why.
         if config.iter().any(|field| field.kind == "select") && host.as_deref().is_none_or(|host| newer("0.6", host)) {
@@ -233,12 +226,19 @@ impl Manifest {
         Ok(Manifest { id, name, version, description, hosts: Hosts::from(hosts), config, refresh_minutes, host, sign_in, exports, requires, raw: raw.clone() })
     }
 
-    /// Installing refuses an addon that needs a newer rex-addons.
+    /// Installing refuses an addon that needs a newer rex-addons, or a sign-in kind it no longer has.
     pub fn check_host(&self) -> Result<(), String> {
         match &self.host {
             Some(host) if !host_fits(Some(host)) => Err(format!("this addon needs rex-addons {host} or newer")),
-            _ => Ok(()),
+            _ => self.retired().map_or(Ok(()), Err),
         }
+    }
+
+    /// Why an addon whose sign-in kind this host no longer has can do nothing until it is
+    /// updated. Installed, it stays listed so its titles keep their owner in rex, but it never
+    /// syncs, plays or signs in. Installing one is refused.
+    pub fn retired(&self) -> Option<String> {
+        self.sign_in.as_ref().filter(|s| s.kind != "code").map(|_| format!("this addon needs an update: update {} in its repository", self.name))
     }
 
     /// The settings an addon is called with: each field's default, then what was saved. A saved
@@ -443,8 +443,8 @@ mod tests {
             (json!({"id": "a", "name": "x", "version": "1", "host": "0.3", "sign_in": {"label": 5}}), "sign_in.label"),
             (json!({"id": "a", "name": "x", "version": "1", "sign_in": {}}), "\"host\": \"0.3\""),
             (json!({"id": "a", "name": "x", "version": "1", "host": "0.2.9", "sign_in": {}}), "\"host\": \"0.3\""),
-            (json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "sign_in": {"kind": "password"}}), "sign_in.kind"),
-            (json!({"id": "a", "name": "x", "version": "1", "host": "0.4", "sign_in": {"kind": "spotify"}}), "\"host\": \"0.5\""),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "sign_in": {"kind": 5}}), "sign_in.kind"),
+            (json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "sign_in": {"kind": " "}}), "sign_in.kind"),
             (json!({"id": "a", "name": "x", "version": "1", "host": "0.4", "exports": ["find"]}), "\"host\": \"0.5\""),
             (json!({"id": "a", "name": "x", "version": "1", "requires": ["youtube"]}), "\"host\": \"0.5\""),
             (json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "exports": ["find me"]}), "function name"),
@@ -460,7 +460,15 @@ mod tests {
         let sign_in = |label: &str, kind: &str| Some(SignIn { label: label.into(), kind: kind.into() });
         assert_eq!(signing(json!({})), sign_in("Sign in to Example", "code"));
         assert_eq!(signing(json!({"label": "Use your Google account"})), sign_in("Use your Google account", "code"));
-        assert_eq!(signing(json!({"kind": "spotify", "label": "Connect Spotify"})), sign_in("Connect Spotify", "spotify"));
+        assert_eq!(signing(json!({"kind": "code"})), sign_in("Sign in to Example", "code"));
+        // A kind this host doesn't have parses, so an installed addon of it stays listed, but is refused.
+        let retired = Manifest::parse(&json!({"id": "a", "name": "Example", "version": "1", "host": "0.5", "sign_in": {"kind": "spotify", "label": "Connect"}})).unwrap();
+        assert_eq!(retired.sign_in, sign_in("Connect", "spotify"));
+        let update = "this addon needs an update: update Example in its repository";
+        assert_eq!((retired.retired().as_deref(), retired.check_host().unwrap_err().as_str()), (Some(update), update));
+        assert_eq!(Manifest::parse(&json!({"id": "a", "name": "x", "version": "1", "host": "0.3", "sign_in": {"kind": "password"}})).unwrap().check_host().unwrap_err(),
+            "this addon needs an update: update x in its repository");
+        assert_eq!(manifest().retired(), None);
         assert_eq!(signing(Json::Null), None);
         assert_eq!(manifest().sign_in, None);
         let both = Manifest::parse(&json!({"id": "a", "name": "x", "version": "1", "host": "0.5", "exports": ["find", "_open2"], "requires": ["youtube"]})).unwrap();

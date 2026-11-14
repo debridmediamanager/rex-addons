@@ -225,7 +225,7 @@ Plain JavaScript, plus these:
 | `new TextEncoder().encode(text)`, `new TextDecoder().decode(bytes)` | Text to UTF-8 bytes and back, as in browsers. UTF-8 only: `new TextDecoder("latin1")` throws |
 | `crypto.getRandomValues(array)`, `crypto.randomUUID()` | Random numbers for a nonce or a PKCE verifier, as in browsers: `getRandomValues` fills an integer typed array, at most 65,536 bytes a call, and returns it. There's no `crypto.subtle` |
 | `await sleep(ms)` | Waits, for backing off when a website answers 429. The wait doesn't count as JavaScript time, and a sleep past the end of the call fails at once |
-| `spotify.user()`, `await spotify.get(path)`, `await spotify.post(path, body)` | Only with `"sign_in": {"kind": "spotify"}`: the person's Spotify library ([below](#signing-in-with-spotify)) |
+| `spotify.user()`, `await spotify.get(path)`, `await spotify.post(path, body)` | Only with `"sign_in": {"kind": "spotify"}`: the person's Spotify library ([below](#signing-in-with-spotify)). Being removed: use `fetch` with a code sign-in instead |
 | `await addons.call(id, name, ...args)` | Only with `requires`: another addon's exported function ([below](#calling-another-addon)) |
 
 There's nothing else: no timers (`setTimeout`, use `sleep`), no `require` or `import`, no file
@@ -623,6 +623,13 @@ export default {
 ```
 
 ## Signing in with Spotify
+
+**Being removed.** A later rex-addons drops Spotify pairing, the `spotify` global and
+`"kind": "spotify"`. Spotify's own device flow works as any [code sign-in](#signing-in-with-a-code),
+and its token reads the library from Spotify's API with plain `fetch`: the
+[Spotify addon](https://github.com/debridmediamanager/rex-community-addons/blob/main/addons/spotify/main.js)
+does that since 2.0.0, and [Listing a Spotify library](spotify.md) has the requests. Don't start a
+new addon on what follows.
 
 A Spotify addon lists the person's Spotify library (playlists, liked songs, saved albums) in
 rex. Nobody types anything and no Spotify developer app is needed: rex-addons pairs with the

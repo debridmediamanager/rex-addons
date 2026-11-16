@@ -340,6 +340,17 @@ fn episode_of(name: &str) -> Option<(u64, u64)> {
 
 /// Windows code pages' 0x80 to 0xFF, the older encodings subtitle files still come in.
 #[rustfmt::skip]
+const WINDOWS_1254: [u16; 128] = [
+    0x20AC, 0xFFFD, 0x201A, 0x0192, 0x201E, 0x2026, 0x2020, 0x2021, 0x02C6, 0x2030, 0x0160, 0x2039, 0x0152, 0xFFFD, 0xFFFD, 0xFFFD,
+    0xFFFD, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0x02DC, 0x2122, 0x0161, 0x203A, 0x0153, 0xFFFD, 0xFFFD, 0x0178,
+    0x00A0, 0x00A1, 0x00A2, 0x00A3, 0x00A4, 0x00A5, 0x00A6, 0x00A7, 0x00A8, 0x00A9, 0x00AA, 0x00AB, 0x00AC, 0x00AD, 0x00AE, 0x00AF,
+    0x00B0, 0x00B1, 0x00B2, 0x00B3, 0x00B4, 0x00B5, 0x00B6, 0x00B7, 0x00B8, 0x00B9, 0x00BA, 0x00BB, 0x00BC, 0x00BD, 0x00BE, 0x00BF,
+    0x00C0, 0x00C1, 0x00C2, 0x00C3, 0x00C4, 0x00C5, 0x00C6, 0x00C7, 0x00C8, 0x00C9, 0x00CA, 0x00CB, 0x00CC, 0x00CD, 0x00CE, 0x00CF,
+    0x011E, 0x00D1, 0x00D2, 0x00D3, 0x00D4, 0x00D5, 0x00D6, 0x00D7, 0x00D8, 0x00D9, 0x00DA, 0x00DB, 0x00DC, 0x0130, 0x015E, 0x00DF,
+    0x00E0, 0x00E1, 0x00E2, 0x00E3, 0x00E4, 0x00E5, 0x00E6, 0x00E7, 0x00E8, 0x00E9, 0x00EA, 0x00EB, 0x00EC, 0x00ED, 0x00EE, 0x00EF,
+    0x011F, 0x00F1, 0x00F2, 0x00F3, 0x00F4, 0x00F5, 0x00F6, 0x00F7, 0x00F8, 0x00F9, 0x00FA, 0x00FB, 0x00FC, 0x0131, 0x015F, 0x00FF,
+];
+#[rustfmt::skip]
 const WINDOWS_1250: [u16; 128] = [
     0x20AC, 0xFFFD, 0x201A, 0xFFFD, 0x201E, 0x2026, 0x2020, 0x2021, 0xFFFD, 0x2030, 0x0160, 0x2039, 0x015A, 0x0164, 0x017D, 0x0179,
     0xFFFD, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, 0xFFFD, 0x2122, 0x0161, 0x203A, 0x015B, 0x0165, 0x017E, 0x017A,
@@ -373,6 +384,29 @@ const WINDOWS_1252: [u16; 128] = [
     0x00F0, 0x00F1, 0x00F2, 0x00F3, 0x00F4, 0x00F5, 0x00F6, 0x00F7, 0x00F8, 0x00F9, 0x00FA, 0x00FB, 0x00FC, 0x00FD, 0x00FE, 0x00FF,
 ];
 
+/// ISO 639-2's codes, bibliographic and terminology, of the languages whose code page or script
+/// is told apart below, and OpenSubtitles' `pob`, by their ISO 639-1 code.
+const THREE_LETTERS: [(&str, &str); 74] = [
+    ("alb", "sq"), ("sqi", "sq"), ("amh", "am"), ("ara", "ar"), ("arm", "hy"), ("hye", "hy"), ("asm", "as"), ("aze", "az"),
+    ("bel", "be"), ("ben", "bn"), ("bos", "bs"), ("bul", "bg"), ("bur", "my"), ("mya", "my"), ("ces", "cs"), ("cze", "cs"),
+    ("chi", "zh"), ("zho", "zh"), ("ell", "el"), ("gre", "el"), ("fas", "fa"), ("per", "fa"), ("geo", "ka"), ("kat", "ka"),
+    ("guj", "gu"), ("heb", "he"), ("hin", "hi"), ("hrv", "hr"), ("scr", "hr"), ("hun", "hu"), ("jpn", "ja"), ("kan", "kn"),
+    ("kaz", "kk"), ("khm", "km"), ("kir", "ky"), ("kor", "ko"), ("lao", "lo"), ("mac", "mk"), ("mkd", "mk"), ("mal", "ml"),
+    ("mar", "mr"), ("mon", "mn"), ("nep", "ne"), ("pan", "pa"), ("pol", "pl"), ("pus", "ps"), ("rum", "ro"), ("ron", "ro"),
+    ("rus", "ru"), ("san", "sa"), ("sin", "si"), ("slk", "sk"), ("slo", "sk"), ("slv", "sl"), ("snd", "sd"), ("srp", "sr"),
+    ("scc", "sr"), ("tam", "ta"), ("tel", "te"), ("tgk", "tg"), ("tha", "th"), ("tir", "ti"), ("tur", "tr"), ("uig", "ug"),
+    ("ukr", "uk"), ("urd", "ur"), ("yid", "yi"), ("pob", "pt"), ("por", "pt"), ("eng", "en"), ("ger", "de"), ("deu", "de"),
+    ("fre", "fr"), ("fra", "fr"),
+];
+
+/// The language a code names, as what its code page and script are chosen by: its ISO 639-1
+/// code, region and script left out (`rus`, `ru-RU` and `ru` are `ru`; `pob` and `pt-BR` are `pt`).
+/// A three-letter code with no two-letter one stays as it is (`yue`, `ckb`).
+pub fn base(lang: &str) -> String {
+    let primary = lang.split(['-', '_']).next().unwrap_or_default().to_ascii_lowercase();
+    THREE_LETTERS.iter().find(|(three, _)| *three == primary).map_or(primary, |(_, two)| two.to_string())
+}
+
 /// Bytes as text: by their BOM (UTF-8, UTF-16 LE or BE); UTF-16 without one when a quarter of
 /// their first bytes are zeros, every other one; UTF-8 when they are valid UTF-8; else one older
 /// Windows code page by language: 1251 for Cyrillic ones, 1250 for Central European ones (SubDL's
@@ -405,9 +439,10 @@ pub fn decode(bytes: &[u8], lang: Option<&str>) -> Result<String, String> {
     if let Ok(text) = std::str::from_utf8(bytes) {
         return Ok(text.to_string());
     }
-    let (page, table) = match lang.and_then(|lang| lang.split('-').next()).unwrap_or_default() {
+    let (page, table) = match base(lang.unwrap_or_default()).as_str() {
         "ru" | "uk" | "be" | "bg" | "mk" | "kk" | "ky" | "tg" | "mn" => ("windows-1251", &WINDOWS_1251),
         "cs" | "sk" | "pl" | "hu" | "sl" | "hr" | "bs" | "sr" | "ro" | "sq" => ("windows-1250", &WINDOWS_1250),
+        "tr" | "az" => ("windows-1254", &WINDOWS_1254),
         _ => ("windows-1252", &WINDOWS_1252),
     };
     let text: String = bytes.iter().map(|&b| if b < 0x80 { b as char } else { char::from_u32(table[b as usize - 0x80] as u32).unwrap() }).collect();
@@ -456,7 +491,8 @@ const HAN: Script = ("Han", &['\u{3400}'..='\u{4DBF}', '\u{4E00}'..='\u{9FFF}', 
 #[allow(clippy::single_range_in_vec_init)]
 pub fn script(lang: &str) -> Option<Script> {
     let mut parts = lang.split('-');
-    let primary = parts.next()?;
+    parts.next()?;
+    let primary = base(lang);
     match parts.find(|part| part.len() == 4) {
         Some("Cyrl") => return Some(CYRILLIC),
         Some("Arab") => return Some(ARABIC),
@@ -464,7 +500,7 @@ pub fn script(lang: &str) -> Option<Script> {
         Some("Latn") => return None,
         _ => {}
     }
-    Some(match primary {
+    Some(match primary.as_str() {
         "my" => ("Myanmar", &['\u{1000}'..='\u{109F}', '\u{A9E0}'..='\u{A9FF}', '\u{AA60}'..='\u{AA7F}']),
         "th" => ("Thai", &['\u{0E00}'..='\u{0E7F}']),
         "km" => ("Khmer", &['\u{1780}'..='\u{17FF}', '\u{19E0}'..='\u{19FF}']),
@@ -938,5 +974,25 @@ mod tests {
         assert_eq!(cached(&folder, "new", day), Some(json!("x".repeat(100))));
         assert_eq!(digest(&json!(["a"])).len(), 32);
         let _ = std::fs::remove_dir_all(&folder);
+    }
+
+    /// A language named by its three letters (ISO 639-2, as OpenSubtitles and others answer) or
+    /// with a region is the same language: its code page and its script are found all the same.
+    /// Turkish has a code page of its own.
+    #[test]
+    fn three_letter_and_regional_codes_pick_the_same_code_page_and_script() {
+        for lang in ["ru", "rus", "ru-RU"] {
+            assert_eq!(decode(b"\xcf\xf0\xe8\xe2\xe5\xf2", Some(lang)).unwrap(), "Привет", "{lang}");
+        }
+        assert_eq!(decode(b"Gr\xe3be\xbate", Some("rum")).unwrap(), "Grăbeşte");
+        for (lang, name) in [("mya", "Myanmar"), ("bur", "Myanmar"), ("tha", "Thai"), ("gre", "Greek"), ("zho", "Han"), ("jpn", "Japanese")] {
+            assert_eq!(script(lang).map(|(name, _)| name), Some(name), "{lang}");
+        }
+        for lang in ["pob", "pt-BR", "eng"] {
+            assert!(script(lang).is_none(), "{lang}");
+        }
+        assert_eq!(decode(b"\xdei\xfeli \xddstanbul \xf0", Some("tr")).unwrap(), "Şişli İstanbul ğ");
+        assert_eq!(decode(b"\xdei\xfeli", Some("tur")).unwrap(), "Şişli");
+        assert_eq!((base("pob"), base("pt-BR"), base("yue")), ("pt".to_string(), "pt".to_string(), "yue".to_string()));
     }
 }

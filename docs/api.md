@@ -15,7 +15,7 @@ rex-addons --listen 127.0.0.1:32410 --rex http://127.0.0.1:32400 --data <dir> [-
 |---|---|---|
 | `--listen` | `127.0.0.1:32410` | Where the API and the byte paths answer. This address is also what each addon registers with rex as its byte URL (`0.0.0.0` registers as `127.0.0.1`) |
 | `--rex` | `http://127.0.0.1:32400` | rex. rex-addons waits for it: nothing syncs, and nothing counts as failed, until it answers |
-| `--data` | `./rex-addons-data` | `<dir>/addons/<id>/` holds each installed addon: `manifest.json`, `main.js`, `config.json`, `storage.json`, and the host's own `state.json`, `probes.json`, `probe_failures.json`, `index.json`, `held.json`. A `<kind>-credentials.json` an older rex-addons kept there for a sign-in kind 0.9 doesn't have is deleted once the addon is updated, on start, or on sign-out. `<dir>/repos/<repo id>/` holds each repository's fetched files, `<dir>/repos.json` the list. `<dir>/removed.json` lists bundled addons the person removed |
+| `--data` | `./rex-addons-data` | `<dir>/addons/<id>/` holds each installed addon: `manifest.json`, `main.js`, `config.json`, `storage.json`, and the host's own `state.json`, `probes.json`, `probe_failures.json`, `index.json`, `held.json`, and `cache/`, the subtitles it found, fetched and translated (`search/` 12 hours and 16 MB, `files/` 7 days and 64 MB, `translations/` 30 days and 64 MB; emptied when its settings change or it is updated). A `<kind>-credentials.json` an older rex-addons kept there for a sign-in kind 0.9 doesn't have is deleted once the addon is updated, on start, or on sign-out. `<dir>/repos/<repo id>/` holds each repository's fetched files, `<dir>/repos.json` the list. `<dir>/removed.json` lists bundled addons the person removed |
 | `--ffprobe` | none | The ffprobe behind addons' `ffprobe()` and the host's own check of a title that arrives without `media_info`. Without it `ffprobe()` fails, those titles reach rex unprobed, and rex holds unprobed titles without showing them |
 | `--bundled` | none | Addon folders installed on the first start, and updated whenever the bundled `version` is higher. A person can remove one; it then stays removed. Installing the same addon from a repository later makes it that repository's |
 | `--dev` | none | Addon folders installed on every start, whatever their `version`, and installed again, then synced (`ctx.reason` `install`), within a second of their `manifest.json` or `main.js` changing. For writing an addon; one it can't install is a `WARN [host] dev <folder>: ...` line and the last one installed stays |
@@ -50,7 +50,7 @@ JSON in and out. It answers only this device: the socket's own peer address must
 - **Host.** A request whose `Host` header names anything but `127.0.0.1:<port>`,
   `localhost:<port>`, `[::1]:<port>` or the `--listen` address is `403`, token or not: that is a
   web page reaching this device through DNS rebinding.
-- `/bytes/` and `/relay/` take neither: rex and ffprobe read them.
+- `/bytes/`, `/subtitles/` and `/relay/` take neither: rex and ffprobe read them.
 
 ### `GET /api/status`
 
@@ -62,7 +62,7 @@ JSON in and out. It answers only this device: the socket's own peer address must
              "state": "idle", "items": 100, "held": 0, "last_sync": 1794326938, "error": null,
              "error_kind": null, "warnings": {"count": 0, "first": []},
              "update_available": false, "update_hosts": null, "update_host_settings": null,
-             "sign_in": null, "requires": []}]}
+             "sign_in": null, "requires": [], "provides": ["content"]}]}
 ```
 
 | Field | Meaning |
@@ -79,6 +79,7 @@ JSON in and out. It answers only this device: the socket's own peer address must
 | `update_available` | Its repository offers a higher `version` |
 | `update_hosts` | When `update_available`, the hosts that version would reach, so the app can ask before an update widens them; `null` otherwise |
 | `update_host_settings` | When `update_available`, the labels of the `host` settings that version adds (a setting it turns into one counts, and its saved value is cleared), such as `["Server"]`; `[]` when none, `null` otherwise. Each is an address the person may be asked for, which the addon would then reach |
+| `provides` | What it does, by the functions its `main.js` exports: `content` (`items` and `open`: titles), `subtitles` (`subtitles` and `subtitle`: it finds subtitles) and `translate` (it translates them), in that order, one or more. An addon without `content` never syncs titles (`items` stays `0`); its sync only registers it with rex ([what rex reads](#what-rex-reads)) |
 | `requires` | One entry per addon its manifest `requires`: `{"id": "youtube", "ok": true, "reason": null}`, or `ok: false` with `reason` `"not installed"`, `"disabled"` or `"sign in needed"`, for the app to say what to do first. `[]` for an addon that requires none |
 | `sign_in` | `null` for an addon that needs no account. Else `{"label": "Sign in to Example", "kind": "code", "account": "name" or null, "pending": {"code": "ABCD-EFGH", "url": "https://example.com/device", "expires_at": 1794330057} or null, "error": "..." or null}`: `label` for the button; `kind` how it signs in, always `code` but for an addon whose `error_kind` is `update` (treat any other kind as that); `account` the name it is signed in as; `pending`, while a sign-in waits, the code to show and the address to type it at, until `expires_at` (Unix seconds); `error` why the last sign-in failed or the website signed it out. An addon with `sign_in` and no `account` doesn't sync (its error is `sign in first`, kind `sign_in`) and isn't retried, and its titles answer `502` to rex. Read the addon every couple of seconds while `pending` is set: it turns `null` with `account` set once the person entered the code, or with `error` set when the sign-in failed or expired |
 
@@ -99,7 +100,8 @@ entry by entry: an http(s) link as `<scheme>://<host>/********`, anything else a
 
 `{"repo": "<repo id>", "addon": "<addon id>"}` installs an addon from a repository added before,
 as that repository's last fetch holds it, or updates it when it's installed, keeping its
-settings and storage. `main.js` must load and export `items` and `open`. Answers `201` (installed)
+settings and storage. `main.js` must load and export one whole group or more: `items` and `open`,
+`subtitles` and `subtitle`, `translate`. Answers `201` (installed)
 or `200` (updated) with the addon as `GET /api/addons/{id}` does, and starts a sync. `404` for a
 repository or addon it doesn't know, `409` when an addon of that id is installed from another
 repository that still offers it (remove it first), `400` when its files are refused. A bundled
@@ -244,8 +246,18 @@ Removes it and its files: `{"removed": true}`. Addons installed from it stay, wi
 ## What rex reads
 
 Each addon registers with rex as the source `addon-<id>` with the byte URL
-`http://<listen>/bytes/<id>`, and pushes its titles over rex's feed API. rex reads a title at
-`GET /bytes/<id>/<path>`: rex-addons asks the addon's `open()` and answers `302` to the link, or,
+`http://<listen>/bytes/<id>`, and pushes its titles over rex's feed API. One that finds or
+translates subtitles also says where rex asks it for them, and what it does:
+
+```json
+{"url": "http://127.0.0.1:32410/bytes/example-subs",
+ "subtitles": {"url": "http://127.0.0.1:32410/subtitles/example-subs", "search": true, "translate": false}}
+```
+
+`search` is the `subtitles` group, `translate` the `translate` one. One with no titles registers
+and sends rex none, at each sync (`refresh_minutes`), so rex finds it once rex answers.
+
+rex reads a title at `GET /bytes/<id>/<path>`: rex-addons asks the addon's `open()` and answers `302` to the link, or,
 when the link needs headers, relays it with the client's `Range`. When `open()` wrote HLS
 playlists, the path answers the master playlist, which names each media playlist as
 `<file name>/<name>.m3u8`, served at `GET /bytes/<id>/<path>/<name>.m3u8`; their links point
@@ -257,3 +269,74 @@ The byte paths answer this device and private networks only, as rex's feed does.
 through that addon's sandboxed client, or the playlists the addon wrote (`master.m3u8` and each
 by its name), their links pointed through the relay. It answers this device only, and only during
 that probe.
+
+### Subtitles
+
+What rex asks an addon that `provides` `subtitles` or `translate`
+([subtitle addons](writing-addons.md#subtitle-addons)), at `http://<listen>/subtitles/<id>/...`. These
+answer this device and private networks only, as the byte paths do. Errors are `{"error": "..."}`:
+`404` for an addon it doesn't know or one without that group (`Example subtitles translates nothing:
+its main.js exports no translate()`), `409` for one disabled, not signed in, with a required setting
+empty (`set API key first`) or waiting for an update, `400` for a question asked wrongly, `502` when
+the addon failed or returned what can't be used (its message), `504` when it ran out of time.
+
+#### `GET /subtitles/{id}/search`
+
+`?type=movie|episode&imdb=tt0032599&tmdb=&season=&episode=&lang=en,pt-BR&hash=&size=&filename=`.
+`type` and one of `imdb`, `tmdb`, `hash` or `filename` are needed; an episode needs `season` and
+`episode` (its `imdb` and `tmdb` are the show's), a movie has neither. `lang` is language codes,
+comma-separated or repeated, best first; `hash` the OpenSubtitles hash, in hex. The addon's
+`subtitles()` gets them as `{type, imdb, tmdb, season, episode, hash, size, filename, languages}`,
+those given. It has 8 s in all.
+
+```json
+{"candidates": [{"id": "3197651", "lang": "pt-BR", "release": "His.Girl.Friday.1940.1080p.BluRay.x264",
+                 "provider": "SubDL", "format": "srt", "hi": false, "forced": false, "fps": null, "downloads": 1200}],
+ "truncated": false, "left_out": 0}
+```
+
+`lang` is a code with its case fixed (`pt-BR`), `format` one of `srt`, `ass`, `ssa`, `vtt`, `sub` or
+`null` (not known before it is fetched), `release`, `provider`, `fps` and `downloads` `null` when
+the addon didn't say. `truncated` is `true` when the addon returned more than the 200 kept;
+`left_out` counts entries that couldn't be used. The same question is answered from the cache for
+12 hours.
+
+#### `GET /subtitles/{id}/file/{candidate}`
+
+The candidate's id percent-encoded (a `/` in it as `%2F`); `?season=&episode=` for the episode
+wanted from a season's archive and `?lang=` for the language it is in, which picks the older
+encoding a file in neither UTF-8 nor UTF-16 is read in (give the candidate's `lang`). Answers `200`
+with the subtitle as `text/plain; charset=utf-8`, its format in `X-Subtitle-Format` (`srt`, `ass`,
+`ssa`, `vtt` or `sub`), as the file has it, line endings included. The same file is answered from
+the cache for 7 days.
+
+#### `POST /subtitles/{id}/translate`
+
+`Content-Type: application/json` (anything else is `415`, so a web page can't send it), at most
+2 MB (`413`):
+
+```json
+{"from": "en", "to": "my", "title": "His Girl Friday",
+ "lines": [{"id": "1", "text": "Walter, I'm getting married.\nTomorrow."}]}
+```
+
+`to` is a language code, `from` one or `null`, `title` optional. `lines` are each subtitle's text,
+`\n` between its rows, by an id of your own (text, each once, at most 64 bytes): at most 10,000 of
+them and 1 MB of text. Answers `202 {"job": "<32 hex>"}`; the same lines already translated answer
+`200` at once, as `GET` would answer the job done. The same lines asked for while their job waits or
+runs answer that job. Each addon runs one job at a time, the others waiting, at most 16 (`429`).
+
+#### `GET /subtitles/{id}/translate/{job}`
+
+```json
+{"job": "9f2c...", "state": "running", "done": 200, "total": 1543}
+{"job": "9f2c...", "state": "done", "done": 1543, "total": 1543,
+ "lines": [{"id": "1", "text": "..."}], "kept": [{"id": "57", "why": "its translation is not in Myanmar script"}]}
+{"job": "9f2c...", "state": "error", "done": 200, "total": 1543, "error": "translate() failed 6 times, last with: the API key was refused"}
+```
+
+`state` is `queued`, `running`, `done` or `error`; `done` counts the lines finished, a batch at a
+time. `lines` come in the order sent, by the same ids. `kept` lists lines that kept their own text
+(left out 3 times) or the addon's in the wrong script (3 times), with why. A job answers for an
+hour after it ended; a done one, from disk, for 30 days. Nothing needs the client to stay
+connected: ask again whenever. `404` for a job it doesn't know.

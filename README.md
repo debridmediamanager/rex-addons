@@ -7,6 +7,8 @@ into every Plex app: public domain films from the Internet Archive, or anything 
 connects your debrid and Usenet library to rex, or beside rex on a computer. Nothing is downloaded. When you press play, the addon
 hands rex a link and rex streams from it.
 
+Addons can also find subtitles for rex, and translate them.
+
 rex-addons is the program that runs them. Each addon runs in its own sandbox: it can only reach
 the websites its manifest lists, it gets a memory and time limit, and it can't touch your files.
 

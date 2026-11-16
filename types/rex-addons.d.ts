@@ -34,8 +34,76 @@ interface Addon<Config = AddonConfig> {
   signInPoll?(state: any, ctx: AddonContext<Config>): Awaitable<SignInPoll>;
   /** Optional: forget your tokens, and revoke them if the website lets you. */
   signOut?(ctx: AddonContext<Config>): Awaitable<void>;
+  /** With `subtitle`: the subtitles you have for one title. 5 s of JavaScript, 8 s in all, fetches included. */
+  subtitles?(query: SubtitleQuery, ctx: AddonContext<Config>): Awaitable<SubtitleCandidate[]>;
+  /** With `subtitles`: one of them, by its `id`, as a link rex-addons downloads, unpacks and decodes, or as its text. */
+  subtitle?(id: string, ctx: AddonContext<Config>): Awaitable<SubtitleFile>;
+  /** One batch of a subtitle's lines, translated: each id of `batch.lines` once. `open()`'s limits, for each batch. */
+  translate?(batch: TranslateBatch, ctx: AddonContext<Config>): Awaitable<{ lines: TranslatedLine[] }>;
   /** The functions the manifest's `exports` names, for `addons.call`: called with the caller's arguments, then `ctx`. */
   [exported: string]: unknown;
+}
+
+/**
+ * An addon that finds or translates subtitles and lists no titles: `items` and `open` left out.
+ * Put `/** @type {SubtitleAddon} *\/` on the line above `export default {`.
+ */
+type SubtitleAddon<Config = AddonConfig> = Partial<Addon<Config>>;
+
+/** What `subtitles()` is asked: the fields rex knows. */
+interface SubtitleQuery {
+  type: "movie" | "episode";
+  /** The film's, or for an episode the show's. */
+  imdb?: string;
+  tmdb?: number;
+  season?: number;
+  episode?: number;
+  /** Language codes wanted, best first, such as `["en", "pt-BR"]`; empty for any. */
+  languages: string[];
+  /** The video file's OpenSubtitles hash, in lowercase hex. */
+  hash?: string;
+  /** The video file's size, in bytes. */
+  size?: number;
+  /** The video file's name. */
+  filename?: string;
+}
+
+/** One subtitle `subtitles()` found. One without an `id`, or whose `lang` is no language code, is left out. */
+interface SubtitleCandidate {
+  id: string;
+  /** A language code: `en`, `pob`, `pt-BR`, `zh-Hant`. */
+  lang: string;
+  release?: string;
+  provider?: string;
+  /** Left out for any other, such as `sup`: pictures, which rex-addons doesn't serve. */
+  format?: "srt" | "ass" | "ssa" | "vtt" | "sub";
+  hi?: boolean;
+  forced?: boolean;
+  fps?: number;
+  downloads?: number;
+}
+
+/**
+ * What `subtitle()` returns: a link on your `hosts` (a ZIP, gzip or plain file), or the text.
+ * `name` picks a file in an archive; `season` and `episode` pick an episode's in a season's.
+ */
+type SubtitleFile = ({ url: string; headers?: Record<string, string> } | { text: string }) & { name?: string; season?: number; episode?: number };
+
+/** What `translate()` gets: lines to translate, and the lines around them to read for sense. */
+interface TranslateBatch {
+  /** A language code, or `null`: find it out. */
+  from: string | null;
+  to: string;
+  title: string | null;
+  /** Each one subtitle's text, `\n` between its rows: keep them. */
+  lines: TranslatedLine[];
+  before: TranslatedLine[];
+  after: TranslatedLine[];
+}
+
+interface TranslatedLine {
+  id: string;
+  text: string;
 }
 
 /** What every call gets as its last argument. */

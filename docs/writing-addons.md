@@ -73,8 +73,9 @@ export default {
 };
 ```
 
-Each may be `async` or a plain function that returns its answer. Each gets `ctx` as its last
-argument:
+An addon that finds or translates subtitles exports other functions instead, or as well
+([subtitle addons](#subtitle-addons)). Each may be `async` or a plain function that returns its
+answer. Each gets `ctx` as its last argument:
 
 | | |
 |---|---|
@@ -252,6 +253,8 @@ the useful part first: `archive.org answered 503`, not `Error in step 3`.
 | Memory | 64 MB |
 | JavaScript time | 30 s for `items()`, 10 s for `open()`. Time spent waiting on `fetch`, `ffprobe` or `sleep` doesn't count |
 | Whole call | 20 minutes for `items()`, 90 s for `open()`. A `fetch` or body read still waiting then fails |
+| `subtitles()` | 5 s of JavaScript, 8 s in all |
+| `subtitle()`, `translate()` | `open()`'s: 10 s of JavaScript, 90 s in all, each `translate()` call one batch |
 | One sync's pages | 10,000 pages, 200,000 titles, 64 MB of ids and paths, and an hour of `items()` calls, waiting included |
 | A fetched body | 16 MB |
 | `storage` | 16 MB in all, written to disk when the call ends |
@@ -667,6 +670,172 @@ const found = await addons.call("youtube", "findSong", { title: "...", artists: 
 Installing checks that `main.js` exports each function `exports` names. What the YouTube addon
 exports, and what each function returns: [The YouTube addon's exports](youtube.md).
 
+## Subtitle addons
+
+An addon can find subtitles for rex and translate them, instead of listing titles or as well.
+It exports one group of functions or more, each group whole:
+
+| Group | Functions |
+|---|---|
+| Titles | `items` and `open`, as above |
+| Finding subtitles | `subtitles` and `subtitle` |
+| Translating them | `translate` |
+
+Installing refuses half a group (`main.js exports no subtitle()`) and an addon with none. One with
+no titles never runs a sync of them: it registers with rex as `addon-<id>`, saying where rex asks
+it for subtitles, and shows `items: 0`. The API's `provides` says which groups it has. rex-addons
+0.9 and older install only addons with `items` and `open`.
+
+rex-addons does the hard parts, so your addon only talks to its website: it bounds every call,
+checks what you return, downloads and unpacks the file you point at, decodes it to UTF-8, keeps
+answers, and runs a translation as a job of many calls it checks one by one. Your settings,
+`secret`s and `hosts` work as in any addon: fetch with the key from `ctx.config`, and list every
+website you or your links reach, its download host too.
+
+### subtitles(query, ctx)
+
+The subtitles you have for one title. `query`:
+
+| Field | |
+|---|---|
+| `type` | `"movie"` or `"episode"` |
+| `imdb`, `tmdb` | The film's ids, or for an episode the show's. Either may be missing |
+| `season`, `episode` | For an episode |
+| `languages` | The language codes wanted, best first, such as `["en", "pt-BR"]`; `[]` for any |
+| `hash`, `size`, `filename` | The video file's [OpenSubtitles hash](https://trac.opensubtitles.org/projects/opensubtitles/wiki/HashSourceCodes) (hex), its size in bytes and its name, when rex knows them |
+
+Return a list, one entry for each subtitle:
+
+| Field | |
+|---|---|
+| `id` | Text: what `subtitle()` gets to fetch it. Required |
+| `lang` | Its language, as a code: `en`, `pob`, `pt-BR`, `zh-Hant`. Required |
+| `release` | The release it was made for, such as `His.Girl.Friday.1940.1080p.BluRay.x264` |
+| `provider` | The website's name, for an addon that asks several |
+| `format` | `srt`, `ass`, `ssa`, `vtt` or `sub` (MicroDVD), when you know |
+| `hi`, `forced` | `true` for one for the hearing impaired, or one of the foreign parts only |
+| `fps`, `downloads` | When the website says |
+
+An entry without an `id`, with a `lang` that isn't a code (`English`), with a format of pictures
+(`sup`, `idx`) or an `id` given before is left out, with a `WARN` line in the log. At most 200 are
+kept. The whole call has 8 s, fetches included, as someone is waiting: past that the search fails,
+rather than answer part of a list as all of it. So throw when the website fails; return `[]` only
+when it has nothing. The same question is answered from rex-addons' own copy for 12 hours.
+
+### subtitle(id, ctx)
+
+One of them, by the `id` you gave it. Return one of:
+
+- `{ url, headers? }`: rex-addons downloads it, through your `hosts` as `fetch` would, each
+  redirect checked, one download at a time per website. A `429` or `503` is waited out as its
+  `Retry-After` asks, up to 10 s, and the download tried three times at most.
+- `{ text }`: the subtitle itself, when your website answers it in its API.
+
+Add `name`, a file name in an archive, when you know which one is right, and `season` and
+`episode` when it is one episode of a season's archive and rex didn't ask for one.
+
+You return what the website gives; rex-addons does the rest, up to 16 MB of it:
+
+- **Archives.** A ZIP (stored or deflated) gives the file you named, else the one whose name says
+  the episode asked for (`S01E02`, `1x02`), else its one subtitle or its largest. A season's archive
+  without the episode asked for is refused rather than serve another episode's. So are RAR and 7z,
+  encrypted files, paths out of the archive, an archive holding only other archives, and over
+  16 MB unpacked. A gzip
+  file is unpacked.
+- **Text.** UTF-8 (with a BOM or without), UTF-16, else an older Windows code page by the language
+  rex asked for: windows-1251 for Cyrillic languages, 1250 for Central European ones, 1252 for the
+  rest. One that comes out in the wrong script that way (a Greek or Arabic file in its own old
+  encoding) is refused.
+- **Format.** SubRip, WebVTT, ASS, SSA or MicroDVD, from the text itself; anything else is refused.
+
+A file is kept for 7 days, so asking again doesn't reach the website.
+
+### translate(batch, ctx)
+
+One batch of a subtitle's lines, to translate with an LLM or any translation service you call:
+
+```json
+{"from": "en", "to": "my", "title": "His Girl Friday",
+ "lines": [{"id": "12", "text": "Walter, I'm getting married.\nTomorrow."}],
+ "before": [{"id": "11", "text": "..."}], "after": [{"id": "13", "text": "..."}]}
+```
+
+Return `{lines: [{id, text}]}`, each id of `lines` once, with its text translated. `from` may be
+`null` (find it out yourself). A line's `text` is one subtitle on the screen, and may hold `\n`
+where it breaks into rows: keep them. `before` and `after` are the lines around the batch, up to
+10 each, to read for sense, not to translate. You never see timing or numbering: rex-addons keeps
+those, and puts your text back in place.
+
+rex-addons sends 100 lines a batch and checks every answer:
+
+- Ids not asked about are dropped. An answer that leaves one out, gives one twice or leaves one
+  empty is not used at all: the batch is split in halves and each asked again, down to single
+  lines, so a merged line never moves text to the wrong time.
+- For a language with a script of its own (Myanmar, Thai, Arabic, Cyrillic, Hangul, Japanese,
+  Chinese and more), a line whose letters are mostly not in that script is asked again on its own.
+  One that is its line unchanged (a name, `OK`) passes.
+- A line still left out, or in the wrong script, after 3 tries is kept, untranslated or as you
+  answered it, and listed in the job's `kept`.
+- A call that throws counts as failed and its batch is split too. After 6 failed calls the whole
+  translation fails with your last message, so throw a clear one (`the API key was refused`). For a
+  `429`, `await sleep(...)` and ask again within the call's 90 s.
+
+One translation runs at a time for each addon, the next ones waiting. A finished one is kept for
+30 days, so the same lines are translated once.
+
+### A subtitle addon
+
+Both groups, for a made-up website at `subs.example` whose files come from `dl.subs.example`:
+
+```json
+{
+  "id": "example-subs", "name": "Example subtitles", "version": "1.0.0",
+  "hosts": ["subs.example", "dl.subs.example", "api.translate.example"],
+  "config": [{"key": "key", "label": "API key", "type": "secret", "required": true}]
+}
+```
+
+```js
+export default {
+  async subtitles(query, ctx) {
+    const search = new URLSearchParams({ imdb: query.imdb ?? "", languages: query.languages.join(",") });
+    if (query.type === "episode") search.set("episode", `${query.season}x${query.episode}`);
+    const answer = await fetch(`https://subs.example/api/search?${search}`, { headers: { "X-Api-Key": ctx.config.key } });
+    if (!answer.ok) throw new Error(`subs.example answered ${answer.status}`);
+    return (await answer.json()).results.map((found) => ({
+      id: String(found.id), lang: found.language, release: found.release, hi: found.hearing_impaired,
+    }));
+  },
+
+  async subtitle(id, ctx) {
+    return { url: `https://dl.subs.example/${encodeURIComponent(id)}.zip` };
+  },
+
+  async translate(batch, ctx) {
+    const answer = await fetch("https://api.translate.example/v1/lines", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${ctx.config.key}` },
+      body: JSON.stringify({ source: batch.from, target: batch.to, context: [...batch.before, ...batch.after], lines: batch.lines }),
+    });
+    if (!answer.ok) throw new Error(`api.translate.example answered ${answer.status}`);
+    return { lines: (await answer.json()).lines };
+  },
+};
+```
+
+Try it through a running rex-addons (`rex-addons check` tries titles only), with `--dev` as in
+[trying it](#trying-it):
+
+```bash
+curl 'http://127.0.0.1:32410/subtitles/example-subs/search?type=movie&imdb=tt0032599&lang=en'
+curl 'http://127.0.0.1:32410/subtitles/example-subs/file/12345?lang=en'
+curl -X POST -H 'Content-Type: application/json' http://127.0.0.1:32410/subtitles/example-subs/translate \
+  -d '{"from": "en", "to": "my", "lines": [{"id": "1", "text": "Hello."}]}'
+curl http://127.0.0.1:32410/subtitles/example-subs/translate/<job>
+```
+
+The answers, and every path, are in [api.md](api.md#subtitles).
+
 ## A repository of addons
 
 A repository is any public git repository people can reach over HTTPS: GitHub, GitLab, Codeberg
@@ -768,7 +937,8 @@ build step:
   ```
 
 - **main.js**: put [`rex-addons.d.ts`](../types/rex-addons.d.ts) beside it, start `main.js` with
-  the two lines below, and put `/** @type {Addon} */` on the line above `export default {`.
+  the two lines below, and put `/** @type {Addon} */` on the line above `export default {`
+  (`/** @type {SubtitleAddon} */` for one with no titles).
 
   ```bash
   curl -O https://raw.githubusercontent.com/debridmediamanager/rex-addons/main/types/rex-addons.d.ts
@@ -833,7 +1003,12 @@ only the schema).
 | `open() returned no url` | `open()` returned something without `url` (or `playlist`) |
 | `open() returned playlists, which need "host": "0.4" in the manifest` | Set `"host": "0.4"` or higher |
 | `main.js: main.js has no default export object` | `main.js` needs `export default { ... }` |
-| `main.js: main.js exports no open()` | The default export lacks that function. Installing needs `items` and `open`, plus `signIn` and `signInPoll` with `sign_in`, and each name in `exports` |
+| `main.js: main.js exports no open()` | The default export lacks that function. Installing needs `items` and `open`, `subtitles` and `subtitle`, or `translate`, each group whole, plus `signIn` and `signInPoll` with `sign_in`, and each name in `exports` |
+| `main.js: main.js exports none of items() and open(), subtitles() and subtitle(), or translate()` | The addon exports no whole group ([subtitle addons](#subtitle-addons)) |
+| `subtitles() took longer than 8 s`, `fetch: no time left, a call may take 8 s in all` | A search has 8 s in all. Ask the website for less, or one page |
+| `the ZIP holds no subtitle for S01E05` | A season's archive without that episode's file, by its name. Return `name` when you know which file it is |
+| `not UTF-8 or UTF-16, and not Greek text in windows-1252, ...` | The file is in an old encoding rex-addons doesn't read for that language. Look for a UTF-8 one |
+| `translate() failed 6 times, last with: ...` | Your `translate()` threw, or didn't return `{lines: [...]}`, six times in one translation |
 | `manifest: ...` | The manifest breaks a rule: the message says which ([manifest.json](#manifestjson)) |
 | `this addon needs rex-addons 0.5 or newer` | Its `host` is newer than this rex-addons |
 | `this addon needs an update: update <name> in its repository` | Its `sign_in` has a `kind` this rex-addons doesn't have, such as 0.8's `"spotify"` ([an older sign-in kind](#an-older-sign-in-kind)) |

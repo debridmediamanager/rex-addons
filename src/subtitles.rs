@@ -178,6 +178,9 @@ fn unpack(bytes: &[u8], name: Option<&str>, episode: Option<(u64, u64)>) -> Resu
         return bounded(out, "the gzip file, unpacked,");
     }
     if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
+        if bytes.len() < 22 {
+            return Err("a damaged ZIP: no central directory".into());
+        }
         return unzip(bytes, name, episode);
     }
     for (magic, kind) in [(&b"Rar!\x1a\x07"[..], "RAR"), (b"7z\xbc\xaf\x27\x1c", "7z")] {
@@ -815,6 +818,9 @@ mod tests {
         }
         assert_eq!(subtitle_of(b"Rar!\x1a\x07\x01\x00rest", None, None, None).unwrap_err(), "a RAR archive, which rex-addons doesn't open: only ZIP and gzip");
         assert_eq!(subtitle_of(b"7z\xbc\xaf\x27\x1c\x00\x04", None, None, None).unwrap_err(), "a 7z archive, which rex-addons doesn't open: only ZIP and gzip");
+        for short in [&b"PK\x05\x06"[..], b"PK\x03\x04\x14\x00", b"PK\x05\x06\x00\x00\x00\x00\x01\x00\x01\x00\x00\x00"] {
+            assert_eq!(subtitle_of(short, None, None, None).unwrap_err(), "a damaged ZIP: no central directory");
+        }
         assert_eq!(subtitle_of(b"<html>Too many requests</html>", None, None, None).unwrap_err(), "not a subtitle rex-addons serves: no SubRip, WebVTT, ASS, SSA or MicroDVD in it");
     }
 

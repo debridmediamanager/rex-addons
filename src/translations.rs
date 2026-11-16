@@ -167,9 +167,13 @@ pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> 
             }
             match answer {
                 Err(error) => {
-                    failures += 1;
-                    if failures == plan.failures {
-                        return Err(format!("translate() failed {failures} times in a row, last with: {}", app::first_line(&error)));
+                    // Once lines went through, a single line is bounded by its own tries: two refused
+                    // lines side by side would otherwise use up the job's failures and end it.
+                    if !(worked && group.len() == 1) {
+                        failures += 1;
+                        if failures == plan.failures {
+                            return Err(format!("translate() failed {failures} times in a row, last with: {}", app::first_line(&error)));
+                        }
                     }
                     match group.len() {
                         // A line it fails on, where others went through (a model refusing one line).
@@ -507,6 +511,36 @@ mod tests {
             (json!({"to": "my", "lines": [{"id": "1", "text": "x".repeat(MAX_TEXT + 1)}]}), "at most 1 MB of text a translation"),
         ] {
             assert_eq!(request(&body.to_string()).err().unwrap(), error);
+        }
+    }
+
+    /// A film of `n` lines at PLAN's sizes through a stand-in translator that throws on any batch
+    /// holding a `refused` line and translates the rest: what it came to, and how many calls.
+    fn picky(n: usize, refused: &[&str]) -> (Result<Translated, String>, usize) {
+        let texts: Vec<String> = (1..=n).map(|n| format!("line {n}")).collect();
+        let request = ask("de", &texts.iter().map(String::as_str).collect::<Vec<_>>());
+        let mut calls = 0;
+        let result = translate(&request, &PLAN, &mut |batch| {
+            calls += 1;
+            let lines = batch["lines"].as_array().unwrap();
+            if lines.iter().any(|line| refused.contains(&line["id"].as_str().unwrap())) {
+                return Err("the model refused this one".into());
+            }
+            Ok(json!({"lines": lines.iter().map(|l| json!({"id": l["id"], "text": format!("de {}", l["text"].as_str().unwrap())})).collect::<Vec<_>>()}))
+        }, &mut |_| {});
+        (result, calls)
+    }
+
+    /// Two refused lines side by side in a long film (the review's 101 and 102, then 150 and 151):
+    /// once lines went through, a single line's tries bound it, so each is kept and the job goes on.
+    #[test]
+    fn refused_lines_side_by_side_are_kept_and_the_job_goes_on() {
+        for refused in [["101", "102"], ["150", "151"]] {
+            let (result, calls) = picky(2000, &refused);
+            let done = result.unwrap_or_else(|error| panic!("{refused:?}: {error}"));
+            let kept: Vec<&str> = done.kept.iter().map(|k| k["id"].as_str().unwrap()).collect();
+            assert_eq!(kept, refused, "{calls} calls");
+            assert_eq!(done.texts[0], "de line 1");
         }
     }
 }

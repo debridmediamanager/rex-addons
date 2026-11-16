@@ -50,7 +50,8 @@ JSON in and out. It answers only this device: the socket's own peer address must
 - **Host.** A request whose `Host` header names anything but `127.0.0.1:<port>`,
   `localhost:<port>`, `[::1]:<port>` or the `--listen` address is `403`, token or not: that is a
   web page reaching this device through DNS rebinding.
-- `/bytes/`, `/subtitles/` and `/relay/` take neither: rex and ffprobe read them.
+- `/bytes/`, `/subtitles/` and `/relay/` take neither: rex and ffprobe read them. `/subtitles/`
+  has a Host rule of its own ([subtitles](#subtitles)).
 
 ### `GET /api/status`
 

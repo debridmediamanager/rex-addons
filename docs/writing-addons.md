@@ -784,9 +784,11 @@ rex-addons sends 100 lines a batch and checks every answer:
 - A line still left out, in the wrong script, or thrown on, after 3 tries is kept, untranslated or
   as you answered it, and listed in the job's `kept`.
 - A call that gives no line worth keeping (it threw, or answered wrong ids, the wrong script or
-  the lines as given) counts as failed; once lines went through, one asked on its own doesn't.
-  10 failed in a row end the whole translation with your last message, so throw a clear one
-  (`the API key was refused`). For a `429`, `await sleep(...)` and ask again within the call's 90 s.
+  the lines as given) counts as failed. 10 failed in a row end the whole translation with your
+  last message, so throw a clear one (`the API key was refused`). Once lines went through, one
+  asked on its own doesn't count, and a line kept starts the count again, so lines you refuse
+  together don't end it; 25 lines kept in a row, nothing translated between them, do. For a
+  `429`, `await sleep(...)` and ask again within the call's 90 s.
 - A translation that keeps more than half of its lines as they were fails too, and is not kept.
 
 One translation runs at a time for each addon, the next ones waiting. A finished one is kept for
@@ -1018,6 +1020,7 @@ only the schema).
 | `the ZIP holds no subtitle for S01E05` | A season's archive without that episode's file, by its name. Return `name` when you know which file it is |
 | `not UTF-8 or UTF-16, and not Greek text in windows-1252, ...` | The file is in an old encoding rex-addons doesn't read for that language. Look for a UTF-8 one |
 | `translate() failed 10 times in a row, last with: ...` | Ten calls running gave no line worth keeping: your `translate()` threw, didn't return `{lines: [...]}`, or answered wrong ids, the wrong script or the lines as given |
+| `translate() gave no usable answer for 25 lines in a row, last with: ...` | It worked, then failed on every line it was asked: your key ran out, or the service went down |
 | `translate() answered too few lines usably: ...` | More than half of the lines were kept as they were ([translate()](#translatebatch-ctx)) |
 | `manifest: ...` | The manifest breaks a rule: the message says which ([manifest.json](#manifestjson)) |
 | `this addon needs rex-addons 0.5 or newer` | Its `host` is newer than this rex-addons |

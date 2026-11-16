@@ -295,10 +295,14 @@ impl App {
                     entry.done = done;
                 }
             };
-            let result = translate(&request, &PLAN, &mut |batch| {
-                calls += 1;
-                self.call_translate(id, batch)
-            }, &mut { progress });
+            // A panic would leave the queue with no worker, every later job waiting for good.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                translate(&request, &PLAN, &mut |batch| {
+                    calls += 1;
+                    self.call_translate(id, batch)
+                }, &mut { progress })
+            }))
+            .unwrap_or_else(|_| Err("rex-addons itself failed while translating: its log says where".into()));
             let (lines, from, to) = (request.lines.len(), request.from.as_deref().unwrap_or("its language"), &request.to);
             let result = result.map(|translated| {
                 let lines: Vec<Json> = request.lines.iter().zip(translated.texts).map(|((id, _), text)| json!({"id": id, "text": text})).collect();

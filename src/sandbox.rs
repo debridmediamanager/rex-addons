@@ -286,7 +286,7 @@ const PRELUDE: &str = r#"
 "#;
 
 /// `default[method](...args)` in a fresh runtime, its promise driven to the end, as JSON. An
-/// empty `method` only loads the module and checks it exports each function `args` names.
+/// empty `method` only loads the module and answers which of the functions `args` names it exports.
 pub fn call(env: &Env, method: &str, args: &[Json], limits: Limits) -> Result<Json, String> {
     let runtime = Runtime::new().map_err(|e| e.to_string())?;
     runtime.set_memory_limit(limits.memory);
@@ -322,13 +322,14 @@ pub fn call(env: &Env, method: &str, args: &[Json], limits: Limits) -> Result<Js
             return Err("main.js has no default export object".into());
         };
         if method.is_empty() {
-            // Installing: the module loads and exports what the addon needs.
+            // Installing: the module loads; which of the functions asked about it exports.
+            let mut found = Vec::new();
             for name in args.iter().filter_map(Json::as_str) {
-                if !exported.get::<_, Value>(name).map_err(caught)?.is_function() {
-                    return Err(format!("main.js exports no {name}()"));
+                if exported.get::<_, Value>(name).map_err(caught)?.is_function() {
+                    found.push(Json::from(name));
                 }
             }
-            return Ok(Json::Null);
+            return Ok(Json::Array(found));
         }
         let function: Value = exported.get(method).map_err(caught)?;
         let Some(function) = function.into_function() else {

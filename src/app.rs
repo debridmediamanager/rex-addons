@@ -52,6 +52,14 @@ const SIGN_IN_LIFETIME: u64 = 3600;
 const CREDENTIALS: &str = "-credentials.json";
 /// Each sign-in started gets the next number: a poll whose sign-in was replaced or cancelled stops.
 static SIGN_INS: AtomicU64 = AtomicU64::new(0);
+/// What an addon does, by what its main.js exports, each group all of its functions or none:
+/// titles to list and play, subtitles to find and fetch, and subtitles to translate.
+const GROUPS: [(&str, &[&str]); 3] = [("content", &["items", "open"]), ("subtitles", &["subtitles", "subtitle"]), ("translate", &["translate"])];
+
+/// The groups whole among the functions exported.
+fn provides(found: &[String]) -> Vec<String> {
+    GROUPS.iter().filter(|(_, names)| names.iter().all(|name| found.iter().any(|f| f == name))).map(|(group, _)| group.to_string()).collect()
+}
 
 /// Each addon's secret setting values: every line logged for it, its own console output
 /// included, has them masked, as does the error its status keeps.
@@ -201,9 +209,16 @@ pub struct Addon {
     /// Why the last sign-in failed, or why the website signed it out.
     pub sign_in_error: Option<String>,
     pub pending: Option<Pending>,
+    /// What it does (`GROUPS`), as installing found: kept in `state.json`, as nothing runs its
+    /// main.js on a start. An older host's `state.json` has none: it installed addons of titles only.
+    pub provides: Vec<String>,
 }
 
 impl Addon {
+    pub fn provides(&self, group: &str) -> bool {
+        self.provides.iter().any(|g| g == group)
+    }
+
     pub fn status(&self) -> Json {
         let m = &self.manifest;
         let retired = m.retired();
@@ -217,7 +232,7 @@ impl Addon {
             "state": if self.syncing { "syncing" } else if error.is_some() { "error" } else { "idle" },
             "items": self.items, "held": self.held, "last_sync": self.last_sync, "error": error,
             "error_kind": error_kind,
-            "warnings": {"count": self.warned, "first": self.warnings},
+            "warnings": {"count": self.warned, "first": self.warnings}, "provides": self.provides,
             "sign_in": m.sign_in.as_ref().map(|sign_in| json!({
                 "label": sign_in.label, "kind": sign_in.kind, "account": self.account, "error": self.sign_in_error,
                 "pending": self.pending.as_ref().map(|p| json!({"code": p.code, "url": p.url, "expires_at": p.expires_at})),
@@ -226,7 +241,7 @@ impl Addon {
     }
 
     /// Whether it may sync and play: it needs no account, or is signed in.
-    fn signed_in(&self) -> bool {
+    pub(crate) fn signed_in(&self) -> bool {
         self.manifest.sign_in.is_none() || self.account.is_some()
     }
 }
@@ -377,7 +392,7 @@ impl App {
     pub fn install(&self, raw: &Json, source: &str, repo: Option<&str>) -> Result<String, String> {
         let manifest = Manifest::parse(raw)?;
         manifest.check_host()?;
-        self.loads(&manifest, source)?;
+        let provides = provides(&self.loads(&manifest, source)?);
         let path = dir(self, &manifest.id);
         std::fs::create_dir_all(&path).map_err(|e| e.to_string())?;
         write_atomic(&path.join("main.js"), source.as_bytes()).map_err(|e| e.to_string())?;
@@ -396,6 +411,7 @@ impl App {
                 }
                 addon.manifest = Arc::new(manifest);
                 addon.source = Arc::new(source.to_string());
+                addon.provides = provides;
                 addon.opened.clear();
                 addon.opening.clear();
                 addon.last_sync = None;
@@ -409,6 +425,7 @@ impl App {
             None => {
                 let mut addon = load(&path)?;
                 addon.repo = repo.map(str::to_string);
+                addon.provides = provides;
                 save_state(self, &addon);
                 addons.insert(id.clone(), addon);
             }
@@ -418,19 +435,34 @@ impl App {
         Ok(id)
     }
 
-    /// What installing checks of `main.js`: it loads, and exports `items` and `open`, `signIn` and
-    /// `signInPoll` with a code sign-in, and each of `exports`. The names checked, or why not.
+    /// What installing checks of `main.js`: it loads, and exports one group or more of `items` and
+    /// `open` (titles), `subtitles` and `subtitle`, and `translate`, each group whole; `signIn` and
+    /// `signInPoll` with a code sign-in, and each of `exports`. The names it exports, or why not.
     pub fn loads(&self, manifest: &Manifest, source: &str) -> Result<Vec<String>, String> {
         let storage = Arc::new(Storage::open(PathBuf::from("/dev/null")));
         let env = Env { addon: &manifest.id, source, hosts: manifest.hosts.clone(), storage, prober: self.prober.clone(), calls: None };
-        let mut needed = vec!["items".to_string(), "open".into()];
+        let mut needed: Vec<String> = Vec::new();
         if manifest.sign_in.is_some() {
             needed.extend(["signIn".to_string(), "signInPoll".into()]);
         }
         needed.extend(manifest.exports.iter().cloned());
-        let names: Vec<Json> = needed.iter().map(|name| json!(name)).collect();
-        sandbox::call(&env, "", &names, sandbox::OPEN).map_err(|error| format!("main.js: {error}"))?;
-        Ok(needed)
+        let asked: Vec<Json> = GROUPS.iter().flat_map(|(_, names)| names.iter()).map(|name| json!(name)).chain(needed.iter().map(|name| json!(name))).collect();
+        let found = sandbox::call(&env, "", &asked, sandbox::OPEN).map_err(|error| format!("main.js: {error}"))?;
+        let found: Vec<String> = found.as_array().into_iter().flatten().filter_map(|name| Some(name.as_str()?.to_string())).collect();
+        let has = |name: &str| found.iter().any(|f| f == name);
+        let missing = |name: &str| format!("main.js: main.js exports no {name}()");
+        for (_, names) in GROUPS {
+            if let Some(absent) = names.iter().find(|name| !has(name)).filter(|_| names.iter().any(|name| has(name))) {
+                return Err(missing(absent));
+            }
+        }
+        if !GROUPS.iter().any(|(_, names)| has(names[0])) {
+            return Err("main.js: main.js exports none of items() and open(), subtitles() and subtitle(), or translate()".into());
+        }
+        if let Some(absent) = needed.iter().find(|name| !has(name)) {
+            return Err(missing(absent));
+        }
+        Ok(found)
     }
 
     /// Removes an addon and, through rex's two-step delete, its source and everything it pushed.
@@ -638,7 +670,10 @@ impl App {
                 addon.error = None;
                 let what = if every { "every title" } else { "changes only" };
                 let pages = if run.pages > 1 { format!(", {} pages", run.pages) } else { String::new() };
-                log(id, &format!("synced in {:.1} s ({what}{pages}): {items} items in rex, {held} held", started.elapsed().as_secs_f64()));
+                match addon.provides("content") {
+                    true => log(id, &format!("synced in {:.1} s ({what}{pages}): {items} items in rex, {held} held", started.elapsed().as_secs_f64())),
+                    false => log(id, "registered with rex, for subtitles only"),
+                }
             }
             Err(error) => {
                 // What reached rex is unknown once items() answered, and a full sync that failed is still owed.
@@ -668,7 +703,7 @@ impl App {
     /// snapshot or, for a partial answer, upserts and then removals. The items and held titles
     /// rex has afterwards, and whether every title was sent.
     fn run_sync(self: &Arc<Self>, id: &str, force: bool, reason: &str, run: &mut Run) -> Result<(usize, usize, bool), String> {
-        let (manifest, source, config, storage, deleted, last_sync) = {
+        let (manifest, source, config, storage, deleted, last_sync, provides) = {
             let mut addons = self.addons.lock().unwrap();
             let a = addons.get_mut(id).ok_or("removed")?;
             if !a.signed_in() {
@@ -680,10 +715,16 @@ impl App {
             let probes_due = self.prober.bin.is_some() && a.held_ids.iter().any(|h| !probe_waits(a.probe_failures.get(h), interval, now()));
             let due = std::mem::take(&mut a.full_due);
             run.full = force || due || a.last_sync.is_none() || now() >= a.last_full.saturating_add(FULL_EVERY) || probes_due;
-            (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone(), a.deleted.clone(), a.last_sync.and(a.since))
+            (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone(), a.deleted.clone(), a.last_sync.and(a.since), a.provides.clone())
         };
         if let Some(label) = manifest.missing(&config).first() {
             return Err(format!("set {label} first"));
+        }
+        // No titles to list: its sync only tells rex where to ask it for subtitles, on the
+        // schedule and retries a sync has, so rex finds it once rex answers.
+        if !provides.iter().any(|g| g == "content") {
+            self.register(id, &manifest, &provides)?;
+            return Ok((0, 0, true));
         }
         let env = self.env(id, &manifest, &config, &source, storage, true);
         let mut ctx = call_ctx(&manifest, &config);
@@ -701,7 +742,7 @@ impl App {
                     addon.unfinished = true;
                     save_state(self, addon);
                 }
-                self.register(id, &manifest)?;
+                self.register(id, &manifest, &provides)?;
             }
             run.pages += 1;
             removed.extend(gone);
@@ -750,11 +791,16 @@ impl App {
         Ok((ids - held, held, every))
     }
 
-    /// Registers the addon as rex's source `addon-<id>`, with the libraries its manifest declares.
-    fn register(&self, id: &str, manifest: &Manifest) -> Result<(), String> {
+    /// Registers the addon as rex's source `addon-<id>`, with the libraries its manifest declares
+    /// and, for one that finds or translates subtitles, where rex asks it for them.
+    fn register(&self, id: &str, manifest: &Manifest, provides: &[String]) -> Result<(), String> {
         let mut registration = json!({"url": self.byte_base(id)});
         if let Some(directories) = manifest.raw.get("directories").filter(|d| d.is_array()) {
             registration["directories"] = directories.clone();
+        }
+        let (search, translate) = (provides.iter().any(|g| g == "subtitles"), provides.iter().any(|g| g == "translate"));
+        if search || translate {
+            registration["subtitles"] = json!({"url": format!("http://{}/subtitles/{id}", net::reachable(self.listen)), "search": search, "translate": translate});
         }
         let (status, answer) = self.feed_call(id, "PUT", &format!("/rex/sources/{}", source_name(id)), &registration)?;
         if status != 200 {
@@ -1855,6 +1901,7 @@ fn load(path: &Path) -> Result<Addon, String> {
         account: state["account"].as_str().map(str::to_string),
         sign_in_error: state["sign_in_error"].as_str().map(str::to_string),
         pending: None,
+        provides: serde_json::from_value(state["provides"].clone()).unwrap_or_else(|_| vec!["content".to_string()]),
     };
     remember_secrets(&addon);
     // An error saved by an older host may still hold a secret.
@@ -1869,6 +1916,7 @@ fn save_state(app: &App, addon: &Addon) {
         "account": addon.account, "sign_in_error": addon.sign_in_error,
         "warnings": {"count": addon.warned, "first": addon.warnings},
         "full_due": addon.full_due, "unfinished": addon.unfinished, "since": addon.since, "last_full": addon.last_full,
+        "provides": addon.provides,
     });
     let _ = write_atomic(&dir(app, &addon.manifest.id).join("state.json"), state.to_string().as_bytes());
 }

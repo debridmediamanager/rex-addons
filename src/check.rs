@@ -110,10 +110,11 @@ fn check(folder: &Path, config: Option<&str>, open: Option<&str>, ffprobe: Optio
     let served = app.clone();
     std::thread::spawn(move || crate::server::serve(served, server, Some(crate::probe::token())));
 
-    match app.loads(&manifest, &source) {
-        Ok(names) => ok(&format!("main.js loads and exports {}", names.iter().map(|n| format!("{n}()")).collect::<Vec<_>>().join(", "))),
+    let names = match app.loads(&manifest, &source) {
+        Ok(names) => names,
         Err(error) => return fail(&error),
-    }
+    };
+    ok(&format!("main.js loads and exports {}", names.iter().map(|n| format!("{n}()")).collect::<Vec<_>>().join(", ")));
     let id = manifest.id.clone();
     if manifest.sign_in.is_some() {
         note("it signs in (sign_in), which check can't do: items() and open() run with what its storage holds, so give --data a rex-addons data directory where it is signed in");
@@ -127,6 +128,10 @@ fn check(folder: &Path, config: Option<&str>, open: Option<&str>, ffprobe: Optio
             fail(&format!("set {label} first: a required setting, given with --config"));
         }
         return true;
+    }
+    if !names.iter().any(|name| name == "items") {
+        note("it has no titles (no items() and open()), and check tries titles only: try its subtitles through a running rex-addons (docs/writing-addons.md#subtitle-addons)");
+        return false;
     }
     app::mask_secrets(&id, manifest.secrets(&config));
     // The installed addon's storage when --data has one, else a throwaway one.

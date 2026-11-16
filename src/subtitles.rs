@@ -201,17 +201,24 @@ struct Entry {
     flags: u16,
     method: u16,
     crc: u32,
-    packed: usize,
-    size: usize,
-    offset: usize,
+    packed: u64,
+    size: u64,
+    offset: u64,
 }
 
-fn le16(bytes: &[u8], at: usize) -> usize {
-    u16::from_le_bytes([bytes[at], bytes[at + 1]]) as usize
+fn le16(bytes: &[u8], at: usize) -> u64 {
+    u16::from_le_bytes([bytes[at], bytes[at + 1]]).into()
 }
 
-fn le32(bytes: &[u8], at: usize) -> usize {
-    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) as usize
+fn le32(bytes: &[u8], at: usize) -> u64 {
+    u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]).into()
+}
+
+/// `length` bytes at `at`, offsets an archive gives: in u64, so a hostile one's sums can't
+/// overflow a 32-bit device's usize (armeabi-v7a), and None past the end.
+fn span(bytes: &[u8], at: u64, length: u64) -> Option<&[u8]> {
+    let end = at.checked_add(length)?;
+    bytes.get(usize::try_from(at).ok()?..usize::try_from(end).ok()?)
 }
 
 /// A ZIP's entries, from its central directory: the local headers of one written as a stream
@@ -225,19 +232,19 @@ fn entries(bytes: &[u8]) -> Result<Vec<Entry>, String> {
     if count == 0xffff || at == 0xffff_ffff {
         return Err("a ZIP64 archive, which rex-addons doesn't open".into());
     }
-    if count > MAX_ENTRIES {
+    if count > MAX_ENTRIES as u64 {
         return Err(format!("a ZIP of over {MAX_ENTRIES} files"));
     }
-    let mut found = Vec::with_capacity(count);
+    let mut found = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let header = bytes.get(at..at + 46).filter(|h| h.starts_with(b"PK\x01\x02")).ok_or_else(damaged)?;
+        let header = span(bytes, at, 46).filter(|h| h.starts_with(b"PK\x01\x02")).ok_or_else(damaged)?;
         let (name_length, rest) = (le16(header, 28), le16(header, 30) + le16(header, 32));
         let (packed, size, offset) = (le32(header, 20), le32(header, 24), le32(header, 42));
         if [packed, size, offset].contains(&0xffff_ffff) {
             return Err("a ZIP64 archive, which rex-addons doesn't open".into());
         }
         // UTF-8 when flag 11 says so, else CP437, whose other letters only a person reads.
-        let name = String::from_utf8_lossy(bytes.get(at + 46..at + 46 + name_length).ok_or_else(damaged)?).into_owned();
+        let name = String::from_utf8_lossy(span(bytes, at + 46, name_length).ok_or_else(damaged)?).into_owned();
         found.push(Entry { name, flags: le16(header, 8) as u16, method: le16(header, 10) as u16, crc: le32(header, 16) as u32, packed, size, offset });
         at += 46 + name_length + rest;
     }
@@ -252,9 +259,9 @@ fn read(bytes: &[u8], entry: &Entry) -> Result<Vec<u8>, String> {
         return Err(format!("{name} in the ZIP is encrypted"));
     }
     let damaged = || format!("{name} in the ZIP is damaged");
-    let local = bytes.get(entry.offset..entry.offset + 30).filter(|h| h.starts_with(b"PK\x03\x04")).ok_or_else(damaged)?;
+    let local = span(bytes, entry.offset, 30).filter(|h| h.starts_with(b"PK\x03\x04")).ok_or_else(damaged)?;
     let start = entry.offset + 30 + le16(local, 26) + le16(local, 28);
-    let data = bytes.get(start..start + entry.packed).ok_or_else(damaged)?;
+    let data = span(bytes, start, entry.packed).ok_or_else(damaged)?;
     let out = match entry.method {
         0 => data.to_vec(),
         8 => {
@@ -267,7 +274,7 @@ fn read(bytes: &[u8], entry: &Entry) -> Result<Vec<u8>, String> {
     let out = bounded(out, &format!("{name}, unpacked,"))?;
     let mut crc = flate2::Crc::new();
     crc.update(&out);
-    if out.len() != entry.size || crc.sum() != entry.crc {
+    if out.len() as u64 != entry.size || crc.sum() != entry.crc {
         return Err(damaged());
     }
     Ok(out)
@@ -1064,5 +1071,22 @@ mod tests {
             let subtitle = subtitle_of(&zip, None, episode, None).unwrap();
             assert_eq!((subtitle.format, subtitle.text.lines().nth(2)), ("srt", Some("(chattering)")), "{episode:?}");
         }
+    }
+
+    /// Offsets near the top of 32 bits, as a hostile archive gives them: refused as damaged,
+    /// never summed past what a 32-bit device's usize holds (in u64, checked).
+    #[test]
+    fn offsets_past_the_archive_are_damage_not_overflow() {
+        let zip = fixture("season-pack.FABRICATED.zip");
+        let end = zip.windows(4).rposition(|w| w == b"PK\x05\x06").unwrap();
+        let mut far = zip.clone();
+        far[end + 16..end + 20].copy_from_slice(&0xffff_fff0u32.to_le_bytes());
+        assert_eq!(subtitle_of(&far, None, None, None).unwrap_err(), "a damaged ZIP: its central directory runs past its end");
+        let central = zip.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        let mut far = zip.clone();
+        far[central + 42..central + 46].copy_from_slice(&0xffff_fffeu32.to_le_bytes());
+        far[central + 20..central + 24].copy_from_slice(&0xffff_fff0u32.to_le_bytes());
+        let error = subtitle_of(&far, None, Some((1, 1)), None).unwrap_err();
+        assert_eq!(error, "Show.S01/Show.S01E01.720p.WEB.srt in the ZIP is damaged");
     }
 }

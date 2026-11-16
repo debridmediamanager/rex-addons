@@ -780,8 +780,9 @@ impl App {
 mod tests {
     use super::*;
 
-    /// Real files from SubDL (dl.subdl.com, 2026-11-16) for His Girl Friday (1940, public domain),
-    /// and archives written by Python's zipfile, Info-ZIP and gzip where no real one shows the shape.
+    /// Real files from SubDL for His Girl Friday (1940, public domain), cut short, and archives
+    /// written by Python's zipfile, Info-ZIP, gzip and macOS's ditto where no real one shows the
+    /// shape: tests/fixtures/subtitles/README.md says where each came from.
     fn fixture(name: &str) -> Vec<u8> {
         std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/subtitles").join(name)).unwrap()
     }
@@ -849,14 +850,15 @@ mod tests {
         assert_eq!(candidates(json!({"candidates": []})).unwrap_err(), "subtitles() must return a list");
     }
 
-    /// SubDL's ZIP as served: one SubRip file in UTF-8 with a BOM, the archive's comment after it.
+    /// SubDL's ZIP, its text cut short and packed as it was: one SubRip file in UTF-8 with a BOM,
+    /// the archive's comment after it.
     #[test]
     fn a_real_zip_gives_its_subtitle() {
-        let zip = fixture("subdl-578492-1497278.zip");
+        let zip = fixture("subdl-578492-1497278.excerpt.zip");
         let subtitle = subtitle_of(&zip, None, None, Some("en")).unwrap();
         assert_eq!(subtitle.format, "srt");
         assert!(subtitle.text.starts_with("1\r\n00:01:12,990 --> 00:01:16,200\r\n(chattering)"), "{:?}", &subtitle.text[..60]);
-        assert_eq!(subtitle.text.matches("-->").count(), 1878);
+        assert_eq!(subtitle.text.matches("-->").count(), 20);
         // Named, by its file name or its whole path; a name it doesn't hold is no other file.
         let named = "His.Girl.Friday.1940.1080p-720p.BluRay.x264-SiNNERS.srt";
         assert_eq!(subtitle_of(&zip, Some(named), None, None).unwrap(), subtitle);

@@ -201,7 +201,7 @@ fn site(lan: IpAddr) -> Site {
                     tiny_http::Response::empty(429).with_header(tiny_http::Header::from_bytes("Retry-After", "1").unwrap()).boxed()
                 }
                 "/dl/good" | "/dl/busy" => redirect("/cdn/578492-1497278.zip"),
-                "/cdn/578492-1497278.zip" => data(fixture("subdl-578492-1497278.zip")),
+                "/cdn/578492-1497278.zip" => data(fixture("subdl-578492-1497278.excerpt.zip")),
                 "/dl/pack" => data(fixture("season-pack.FABRICATED.zip")),
                 "/dl/a%2Fb" => data(fixture("his-girl-friday.excerpt.FABRICATED.srt.gz")),
                 "/dl/evil" => redirect("http://evil.example/578492-1497278.zip"),

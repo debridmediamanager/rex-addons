@@ -332,11 +332,11 @@ runs answer that job. Each addon runs one job at a time, the others waiting, at 
 {"job": "9f2c...", "state": "running", "done": 200, "total": 1543}
 {"job": "9f2c...", "state": "done", "done": 1543, "total": 1543,
  "lines": [{"id": "1", "text": "..."}], "kept": [{"id": "57", "why": "its translation is not in Myanmar script"}]}
-{"job": "9f2c...", "state": "error", "done": 200, "total": 1543, "error": "translate() failed 6 times, last with: the API key was refused"}
+{"job": "9f2c...", "state": "error", "done": 200, "total": 1543, "error": "translate() failed 10 times in a row, last with: the API key was refused"}
 ```
 
 `state` is `queued`, `running`, `done` or `error`; `done` counts the lines finished, a batch at a
 time. `lines` come in the order sent, by the same ids. `kept` lists lines that kept their own text
-(left out 3 times) or the addon's in the wrong script (3 times), with why. A job answers for an
+(left out, or thrown on, 3 times) or the addon's in the wrong script (3 times), with why. A job answers for an
 hour after it ended; a done one, from disk, for 30 days. Nothing needs the client to stay
 connected: ask again whenever. `404` for a job it doesn't know.

@@ -15,8 +15,10 @@ use crate::sandbox;
 use crate::subtitles::{cached, digest, keep, language, mostly_in, script, Script};
 
 /// How a translation is cut and retried: lines a batch, lines of context on each side, how often
-/// one line is asked before it's kept as it is, and how many failed calls end the job (a bad
-/// key fails every call, and splitting would otherwise ask hundreds of times).
+/// one line is asked before it's kept as it is, and how many failed calls in a row end the job: a
+/// bad key fails every call, and splitting would otherwise ask hundreds of times. More than a
+/// batch's halving down to one line (7 calls for 100) and that line's tries, so a model that
+/// fails only on long batches gets through.
 pub struct Plan {
     pub batch: usize,
     pub context: usize,
@@ -24,7 +26,7 @@ pub struct Plan {
     pub failures: usize,
 }
 
-pub const PLAN: Plan = Plan { batch: 100, context: 10, line_tries: 3, failures: 6 };
+pub const PLAN: Plan = Plan { batch: 100, context: 10, line_tries: 3, failures: 10 };
 /// What one translation may be: a long film has about 2,000 lines, 100 KB of text.
 const MAX_LINES: usize = 10_000;
 const MAX_TEXT: usize = 1 << 20;
@@ -136,15 +138,17 @@ fn halves(group: Vec<usize>, todo: &mut Vec<Vec<usize>>) {
 /// Translates `request` through `call`, which takes one batch as `translate()` does and answers
 /// what it returned; `done` is told how many lines are finished after each batch. A batch whose
 /// answer's ids are wrong, or whose call failed, is split in halves down to single lines; lines
-/// answered in a script not the target's are asked again on their own. A line still left out or
-/// in the wrong script after `line_tries` is kept, untranslated or as answered, and listed.
+/// answered in a script not the target's are asked again on their own. A line still left out, in
+/// the wrong script or failing after `line_tries` is kept, untranslated or as answered, and
+/// listed; but `failures` failed calls in a row, or a failing line before any call worked, end it.
 pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> Result<Json, String>, done: &mut dyn FnMut(usize)) -> Result<Translated, String> {
     let lines = &request.lines;
     let target: Option<Script> = script(&request.to);
     // An answer in the target's script, or one the same as its line (a name, "OK"), or with no letters.
     let fits = |text: &str, line: &str| text == line || target.is_none_or(|(_, ranges)| mostly_in(text, ranges));
     let mut answers = Answers { lines, texts: vec![None; lines.len()], tries: vec![0; lines.len()], kept: Vec::new() };
-    let mut failures = 0;
+    // Failed calls in a row, and whether any call came back at all.
+    let (mut failures, mut worked) = (0, false);
     for start in (0..lines.len()).step_by(plan.batch) {
         let end = (start + plan.batch).min(lines.len());
         // Batches to ask, the next one last.
@@ -157,13 +161,19 @@ pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> 
                 "lines": group.iter().map(|&at| json!({"id": lines[at].0, "text": lines[at].1})).collect::<Vec<_>>(),
                 "before": shown(first.saturating_sub(plan.context)..first), "after": shown(last + 1..(last + 1 + plan.context).min(lines.len())),
             });
-            match call(&batch).and_then(|answer| answered(&answer, &group, lines)) {
+            let answer = call(&batch).and_then(|answer| answered(&answer, &group, lines));
+            if answer.is_ok() {
+                (failures, worked) = (0, true);
+            }
+            match answer {
                 Err(error) => {
                     failures += 1;
                     if failures == plan.failures {
-                        return Err(format!("translate() failed {failures} times, last with: {}", app::first_line(&error)));
+                        return Err(format!("translate() failed {failures} times in a row, last with: {}", app::first_line(&error)));
                     }
                     match group.len() {
+                        // A line it fails on, where others went through (a model refusing one line).
+                        1 if worked => answers.again(first, lines[first].1.clone(), format!("translate() failed on it {} times", plan.line_tries), plan.line_tries, &mut todo),
                         1 => todo.push(group),
                         _ => halves(group, &mut todo),
                     }
@@ -327,8 +337,14 @@ impl App {
                     Err(error) => (entry.state, entry.error) = ("error", Some(error)),
                 }
             }
+            // Whether any is left is decided with the lock held: a job asked for after this
+            // finds no queue and starts a worker of its own, never a second one beside this.
             if let Some(queue) = queues.queues.get_mut(id) {
                 queue.pop_front();
+                if queue.is_empty() {
+                    queues.queues.remove(id);
+                    return;
+                }
             }
         }
     }
@@ -431,12 +447,48 @@ mod tests {
     fn a_translator_that_always_fails_ends_the_job_soon() {
         let source = "export default { translate() { throw new Error('the API key is not valid\\nmore detail'); } };";
         let (result, sent, progress) = run(source, &ask("de", &["one", "two", "three", "four", "five"]));
-        assert_eq!(result.err().unwrap(), "translate() failed 6 times, last with: the API key is not valid");
+        assert_eq!(result.err().unwrap(), "translate() failed 6 times in a row, last with: the API key is not valid");
         assert_eq!(sent.len(), SMALL.failures);
         assert!(progress.is_empty());
         // One that answers nothing in the shape asked counts the same.
         let (result, _, _) = run("export default { translate() { return 'Hallo'; } };", &ask("de", &["one"]));
-        assert_eq!(result.err().unwrap(), "translate() failed 6 times, last with: translate() must return {lines: [{id, text}]}");
+        assert_eq!(result.err().unwrap(), "translate() failed 6 times in a row, last with: translate() must return {lines: [{id, text}]}");
+    }
+
+    /// At PLAN's own sizes, with `call` standing in for the addon: one that fails on batches over
+    /// 30 lines gets through, a line it always fails on is kept as it is, and one that always
+    /// fails ends at `failures` calls.
+    #[test]
+    fn plan_sizes_get_a_long_film_through_a_picky_translator() {
+        let texts: Vec<String> = (1..=250).map(|n| format!("line {n}")).collect();
+        let request = ask("de", &texts.iter().map(String::as_str).collect::<Vec<_>>());
+        let echo = |batch: &Json| -> Result<Json, String> {
+            let lines = batch["lines"].as_array().unwrap();
+            if lines.len() > 30 {
+                return Err("the model's reply was cut short".into());
+            }
+            if lines.iter().any(|line| line["id"] == "57") {
+                return Err("the model refused this one".into());
+            }
+            Ok(json!({"lines": lines.iter().map(|l| json!({"id": l["id"], "text": format!("de {}", l["text"].as_str().unwrap())})).collect::<Vec<_>>()}))
+        };
+        let (mut calls, mut progress) = (0, Vec::new());
+        let done = translate(&request, &PLAN, &mut |batch| {
+            calls += 1;
+            echo(batch)
+        }, &mut |n| progress.push(n)).unwrap();
+        assert_eq!(done.texts[0], "de line 1");
+        assert_eq!(done.texts[56], "line 57");
+        assert!(done.texts.iter().enumerate().all(|(n, text)| n == 56 || *text == format!("de line {}", n + 1)));
+        assert_eq!(done.kept, [json!({"id": "57", "why": "translate() failed on it 3 times"})]);
+        assert_eq!(progress, [100, 200, 250]);
+        assert!(calls < 60, "{calls} calls");
+        let mut calls = 0;
+        let error = translate(&request, &PLAN, &mut |_| {
+            calls += 1;
+            Err("the API key is not valid".to_string())
+        }, &mut |_| {}).err().unwrap();
+        assert_eq!((error.as_str(), calls), ("translate() failed 10 times in a row, last with: the API key is not valid", PLAN.failures));
     }
 
     #[test]

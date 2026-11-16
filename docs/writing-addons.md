@@ -683,8 +683,9 @@ It exports one group of functions or more, each group whole:
 
 Installing refuses half a group (`main.js exports no subtitle()`) and an addon with none. One with
 no titles never runs a sync of them: it registers with rex as `addon-<id>`, saying where rex asks
-it for subtitles, and shows `items: 0`. The API's `provides` says which groups it has. rex-addons
-0.9 and older install only addons with `items` and `open`.
+it for subtitles, and shows `items: 0`. The API's `provides` says which groups it has. An older
+rex-addons installs only addons with `items` and `open`, refusing others with
+`main.js exports no items()`.
 
 rex-addons does the hard parts, so your addon only talks to its website: it bounds every call,
 checks what you return, downloads and unpacks the file you point at, decodes it to UTF-8, keeps
@@ -774,10 +775,11 @@ rex-addons sends 100 lines a batch and checks every answer:
 - For a language with a script of its own (Myanmar, Thai, Arabic, Cyrillic, Hangul, Japanese,
   Chinese and more), a line whose letters are mostly not in that script is asked again on its own.
   One that is its line unchanged (a name, `OK`) passes.
-- A line still left out, or in the wrong script, after 3 tries is kept, untranslated or as you
-  answered it, and listed in the job's `kept`.
-- A call that throws counts as failed and its batch is split too. After 6 failed calls the whole
-  translation fails with your last message, so throw a clear one (`the API key was refused`). For a
+- A call that throws is split the same way.
+- A line still left out, in the wrong script, or thrown on, after 3 tries is kept, untranslated or
+  as you answered it, and listed in the job's `kept`.
+- 10 calls in a row that throw, or a line thrown on before any call worked, fail the whole
+  translation with your last message, so throw a clear one (`the API key was refused`). For a
   `429`, `await sleep(...)` and ask again within the call's 90 s.
 
 One translation runs at a time for each addon, the next ones waiting. A finished one is kept for
@@ -1008,7 +1010,7 @@ only the schema).
 | `subtitles() took longer than 8 s`, `fetch: no time left, a call may take 8 s in all` | A search has 8 s in all. Ask the website for less, or one page |
 | `the ZIP holds no subtitle for S01E05` | A season's archive without that episode's file, by its name. Return `name` when you know which file it is |
 | `not UTF-8 or UTF-16, and not Greek text in windows-1252, ...` | The file is in an old encoding rex-addons doesn't read for that language. Look for a UTF-8 one |
-| `translate() failed 6 times, last with: ...` | Your `translate()` threw, or didn't return `{lines: [...]}`, six times in one translation |
+| `translate() failed 10 times in a row, last with: ...` | Your `translate()` threw, or didn't return `{lines: [...]}`, ten times running |
 | `manifest: ...` | The manifest breaks a rule: the message says which ([manifest.json](#manifestjson)) |
 | `this addon needs rex-addons 0.5 or newer` | Its `host` is newer than this rex-addons |
 | `this addon needs an update: update <name> in its repository` | Its `sign_in` has a `kind` this rex-addons doesn't have, such as 0.8's `"spotify"` ([an older sign-in kind](#an-older-sign-in-kind)) |

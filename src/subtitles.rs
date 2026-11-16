@@ -750,9 +750,11 @@ impl App {
             return Ok(subtitle);
         }
         let started = Instant::now();
+        // The client's, decoded: quoted, so a line break in it can't start a line of the log.
+        let shown: String = candidate.chars().take(80).collect();
         let failed = |error: String| {
             let error = masked(id, &error);
-            warn(id, &format!("subtitle({candidate:.80}) failed: {error}"));
+            warn(id, &format!("subtitle({shown:?}) failed: {error}"));
             (failure(&error), app::first_line(&error))
         };
         let env = self.env(id, &manifest, &config, &source, storage, true);
@@ -768,7 +770,7 @@ impl App {
             _ => return Err(failed("subtitle() returned neither text nor url".into())),
         };
         let subtitle = subtitle_of(&bytes, answer["name"].as_str(), wanted, lang.as_deref()).map_err(failed)?;
-        log(id, &format!("subtitle({candidate:.80}): {}, {} KB in {:.1} s", subtitle.format, subtitle.text.len().div_ceil(1024), started.elapsed().as_secs_f64()));
+        log(id, &format!("subtitle({shown:?}): {}, {} KB in {:.1} s", subtitle.format, subtitle.text.len().div_ceil(1024), started.elapsed().as_secs_f64()));
         let _ = self.keep_answer(id, answers, &FILES, &key, &json!({"format": subtitle.format, "text": subtitle.text}));
         Ok(subtitle)
     }

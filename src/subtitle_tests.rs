@@ -507,3 +507,14 @@ fn an_update_to_subtitles_only_takes_its_titles_out_of_rex() {
     assert_eq!(app.status("films").unwrap()["items"], 0);
     let _ = std::fs::remove_dir_all(&data);
 }
+
+/// A candidate's id comes from the client, percent-decoded: logged quoted, its line breaks
+/// escaped, it can't write lines of its own into the log.
+#[test]
+fn a_candidate_id_cannot_forge_log_lines() {
+    let (app, _) = serve_one("forged", "fails", "export default { subtitles() { return []; }, subtitle(id) { throw new Error('no such file'); } };");
+    assert!(app.subtitle_file("fails", "x\nWARN [host] forged", "").is_err());
+    let logged: Vec<String> = crate::app::LOGGED.lock().unwrap().iter().filter(|line| line.contains("forged")).cloned().collect();
+    assert!(!logged.is_empty() && logged.iter().all(|line| !line.contains("\nWARN [host] forged") && line.contains(r#""x\nWARN [host] forged""#)), "{logged:?}");
+    let _ = std::fs::remove_dir_all(&app.data);
+}

@@ -378,9 +378,11 @@ const WINDOWS_1252: [u16; 128] = [
 /// Windows code page by language: 1251 for Cyrillic ones, 1250 for Central European ones (SubDL's
 /// Romanian His Girl Friday is one), 1252 for the rest. Read that way, a file of a language with
 /// a script of its own that isn't mostly in it is refused rather than served as gibberish.
+// `as_chunks` would need Rust 1.88, which the Android build may not have.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 pub fn decode(bytes: &[u8], lang: Option<&str>) -> Result<String, String> {
     let utf16 = |bytes: &[u8], big: bool| -> String {
-        let units = bytes.as_chunks::<2>().0.iter().map(|&pair| if big { u16::from_be_bytes(pair) } else { u16::from_le_bytes(pair) });
+        let units = bytes.chunks_exact(2).map(|pair| if big { u16::from_be_bytes([pair[0], pair[1]]) } else { u16::from_le_bytes([pair[0], pair[1]]) });
         char::decode_utf16(units).map(|c| c.unwrap_or('\u{fffd}')).collect()
     };
     if let Some(rest) = bytes.strip_prefix(b"\xef\xbb\xbf") {

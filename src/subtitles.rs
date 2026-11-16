@@ -33,7 +33,7 @@ const FILE_CACHE: u64 = 64 << 20;
 const MAX_FILE: u64 = 16 << 20;
 /// Entries a ZIP may list.
 const MAX_ENTRIES: usize = 4096;
-/// The download after `subtitle()` answered, in all, waits included.
+/// The download after `subtitle()` answered, in all from its turn at the website, waits included.
 const DOWNLOAD_TIME: Duration = Duration::from_secs(30);
 /// A 429 or 503 is waited out this long at most, and a download tried this often.
 const MAX_WAIT: Duration = Duration::from_secs(10);
@@ -561,13 +561,15 @@ pub fn mostly_in(text: &str, ranges: &[RangeInclusive<char>]) -> bool {
 static TURNS: Mutex<BTreeMap<String, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
 
 /// `url` fetched through the addon's sandboxed client (its hosts, each redirect checked), one
-/// request at a time per website, all of it by `deadline`. A 429 or 503 is waited out as its
+/// request at a time per website, all of it within `time` of its turn. A 429 or 503 is waited out as its
 /// `Retry-After` asks, up to MAX_WAIT, TRIES times. Errors name the website only: a link can
 /// carry a key.
-pub fn download(hosts: &Hosts, url: &str, headers: &[(String, String)], deadline: Instant) -> Result<Vec<u8>, String> {
+pub fn download(hosts: &Hosts, url: &str, headers: &[(String, String)], time: Duration) -> Result<Vec<u8>, String> {
     let host = url::Url::parse(url).ok().and_then(|link| link.host_str().map(str::to_ascii_lowercase)).ok_or("subtitle() returned a url that is no link")?;
     let turn = TURNS.lock().unwrap().entry(host.clone()).or_default().clone();
     let _turn = turn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // From its turn on: a download waiting behind another of the same website's would run out of time.
+    let deadline = Instant::now() + time;
     let agent = net::sandboxed_agent(hosts);
     let mut tried = 0;
     loop {
@@ -628,7 +630,7 @@ pub fn keep(folder: &Path, key: &str, value: &Json, ttl: Duration, most: u64) ->
 
 /// What a call failed with, as answered: 504 when it ran out of time.
 fn failure(error: &str) -> u16 {
-    if error.contains("took longer than") || error.contains("no time left") || error.contains("timed out") { 504 } else { 502 }
+    if ["took longer than", "no time left", "out of time", "timed out"].iter().any(|said| error.contains(said)) { 504 } else { 502 }
 }
 
 /// What a search asked, for its log line: no file name or hash, which say what is on the disk.
@@ -739,7 +741,7 @@ impl App {
             (Json::String(text), _) => text.clone().into_bytes(),
             (_, Json::String(url)) => {
                 let headers: Vec<(String, String)> = answer["headers"].as_object().into_iter().flatten().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect();
-                download(&env.hosts, url, &headers, Instant::now() + DOWNLOAD_TIME).map_err(failed)?
+                download(&env.hosts, url, &headers, DOWNLOAD_TIME).map_err(failed)?
             }
             _ => return Err(failed("subtitle() returned neither text nor url".into())),
         };
@@ -994,5 +996,35 @@ mod tests {
         assert_eq!(decode(b"\xdei\xfeli \xddstanbul \xf0", Some("tr")).unwrap(), "Şişli İstanbul ğ");
         assert_eq!(decode(b"\xdei\xfeli", Some("tur")).unwrap(), "Şişli");
         assert_eq!((base("pob"), base("pt-BR"), base("yue")), ("pt".to_string(), "pt".to_string(), "yue".to_string()));
+    }
+
+    /// Downloads from one website wait their turn, one at a time; each then has its whole time,
+    /// so episodes fetched side by side don't run out of it waiting. Out of time is a 504.
+    #[test]
+    fn a_download_waiting_its_turn_gets_its_own_time() {
+        assert_eq!(failure("dl.subs.example: out of time"), 504);
+        let lan = std::net::UdpSocket::bind("0.0.0.0:0").ok().and_then(|s| s.connect("192.0.2.1:9").ok().and(s.local_addr().ok())).map(|a| a.ip()).filter(|ip| !ip.is_loopback());
+        let Some(lan) = lan else {
+            eprintln!("SKIP: no network address for the website (loopback is never fetched)");
+            return;
+        };
+        let server = tiny_http::Server::http("0.0.0.0:0").unwrap();
+        let url = format!("http://{lan}:{}/a.srt", server.server_addr().to_ip().unwrap().port());
+        std::thread::spawn(move || {
+            for request in server.incoming_requests() {
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(700));
+                    let _ = request.respond(tiny_http::Response::from_string("1\n00:00:01,000 --> 00:00:02,000\nHi\n"));
+                });
+            }
+        });
+        let hosts = Hosts::from(vec![lan.to_string()]);
+        let fetched: Vec<Result<Vec<u8>, String>> = std::thread::scope(|scope| {
+            let both: Vec<_> = (0..2).map(|_| scope.spawn(|| download(&hosts, &url, &[], Duration::from_millis(1500)))).collect();
+            both.into_iter().map(|one| one.join().unwrap()).collect()
+        });
+        for one in fetched {
+            assert_eq!(one.unwrap(), b"1\n00:00:01,000 --> 00:00:02,000\nHi\n");
+        }
     }
 }

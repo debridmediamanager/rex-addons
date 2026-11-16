@@ -152,8 +152,15 @@ fn halves(group: Vec<usize>, todo: &mut Vec<Vec<usize>>) {
 pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> Result<Json, String>, done: &mut dyn FnMut(usize)) -> Result<Translated, String> {
     let lines = &request.lines;
     let target: Option<Script> = script(&request.to);
-    // An answer in the target's script, or one the same as its line (a name, "OK"), or with no letters.
-    let fits = |text: &str, line: &str| text == line || target.is_none_or(|(_, ranges)| mostly_in(text, ranges));
+    // Whether an answer is its line as given, tags aside. That passes only for a line whose letters
+    // are all the target's (names, into a Latin language) or fewer than 3 (OK): a model that
+    // echoes English when asked for Myanmar would otherwise pass every line.
+    let echo = |text: &str, line: &str| untagged(text).trim() == untagged(line).trim();
+    let outside = |line: &str| untagged(line).chars().filter(|c| c.is_alphabetic() && target.is_some_and(|(_, ranges)| !ranges.iter().any(|r| r.contains(c)))).count();
+    let fits = |text: &str, line: &str| match echo(text, line) {
+        true => outside(line) == 0 || untagged(line).chars().filter(|c| c.is_alphabetic()).count() < 3,
+        false => target.is_none_or(|(_, ranges)| mostly_in(text, ranges)),
+    };
     let mut answers = Answers { lines, texts: vec![None; lines.len()], tries: vec![0; lines.len()], kept: Vec::new() };
     // Failed calls in a row, and whether any call gave a line worth keeping.
     let (mut failures, mut worked) = (0, false);
@@ -190,11 +197,24 @@ pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> 
                         _ => halves(group, &mut todo),
                     }
                 }
+                // A batch answered mostly as it was given is no translation, whatever its target: none
+                // of it is kept, and it is split as a failed one.
+                Ok(Some(texts)) if group.len() > 1 && {
+                    let worded: Vec<usize> = group.iter().copied().filter(|&at| letters(&lines[at].1)).collect();
+                    worded.iter().filter(|&&at| echo(&texts[&at], &lines[at].1)).count() * 2 > worded.len()
+                } => {
+                    failed = Some("it answered most lines as they were given".into());
+                    halves(group, &mut todo);
+                }
                 Ok(Some(mut texts)) => {
                     let wrong: Vec<usize> = group.iter().copied().filter(|at| !fits(&texts[at], &lines[*at].1)).collect();
                     let kept: Vec<usize> = group.iter().copied().filter(|at| !wrong.contains(at)).collect();
-                    if !kept.iter().any(|&at| letters(&lines[at].1)) {
-                        failed = Some(format!("its translations were not in {name} script"));
+                    // Worth keeping: a line with letters translated, not one it gave back as it was.
+                    if !kept.iter().any(|&at| letters(&lines[at].1) && !echo(&texts[&at], &lines[at].1)) {
+                        failed = Some(match target {
+                            Some(_) => format!("its translations were not in {name} script"),
+                            None => "it gave its lines back as they were".into(),
+                        });
                     }
                     for at in kept {
                         answers.texts[at] = texts.remove(&at);
@@ -454,17 +474,17 @@ mod tests {
         assert_eq!(sent.iter().map(|b| ids(b, "lines")).collect::<Vec<_>>(), [vec!["1", "2", "3", "4"], vec!["1", "2"], vec!["3", "4"], vec!["5"]]);
     }
 
-    /// Asked for Myanmar, an answer mostly in Latin letters is asked again on its own; one that is
-    /// its line as given (a name) passes; one that stays Latin is kept as answered, and listed.
+    /// Asked for Myanmar, an answer mostly in Latin letters is asked again on its own; a short
+    /// line answered as given (OK) passes; one that stays Latin is kept as answered, and listed.
     #[test]
     fn an_answer_in_the_wrong_script_is_asked_again() {
         let source = "export default { translate(b) { return { lines: b.lines.map((l) => ({ id: l.id,
-            text: l.text === 'CIA' ? 'CIA' : l.text === 'stubborn' ? 'still in Latin' : b.lines.length > 1 ? 'in Latin ' + l.text : 'မြန်မာ' })) }; } };";
-        let (result, sent, _) = run(source, &ask("my", &["hello", "CIA", "stubborn", "bye"]));
+            text: l.text === 'OK' ? 'OK' : l.text === 'stubborn' ? 'still in Latin' : b.lines.length > 1 ? 'in Latin ' + l.text : 'မြန်မာ' })) }; } };";
+        let (result, sent, _) = run(source, &ask("my", &["hello", "OK", "stubborn", "bye"]));
         let result = result.unwrap();
-        assert_eq!(result.texts, ["မြန်မာ", "CIA", "still in Latin", "မြန်မာ"]);
+        assert_eq!(result.texts, ["မြန်မာ", "OK", "still in Latin", "မြန်မာ"]);
         assert_eq!(result.kept, [json!({"id": "3", "why": "its translation is not in Myanmar script"})]);
-        // All but CIA came back in Latin: those asked again together, then in halves, then alone.
+        // All but OK came back in Latin: those asked again together, then in halves, then alone.
         assert_eq!(sent.iter().map(|b| ids(b, "lines")).collect::<Vec<_>>(),
             [vec!["1", "2", "3", "4"], vec!["1", "3", "4"], vec!["1"], vec!["3", "4"], vec!["3"], vec!["3"], vec!["3"], vec!["4"]]);
     }
@@ -612,5 +632,20 @@ mod tests {
         });
         let error = result.err().unwrap();
         assert!(error.starts_with("translate() answered too few lines usably: "), "{error}");
+    }
+
+    /// A model that answers each line as it was given: no translation, so the job fails within a
+    /// few calls, into Myanmar or into German, rather than be saved as done for 30 days.
+    #[test]
+    fn a_translator_that_echoes_its_lines_fails() {
+        for to in ["my", "de"] {
+            let texts: Vec<String> = (1..=250).map(|n| format!("{{\\an8}}Line number {n}")).collect();
+            let mut calls = 0;
+            let result = translate(&ask(to, &texts.iter().map(String::as_str).collect::<Vec<_>>()), &PLAN, &mut |batch| {
+                calls += 1;
+                Ok(json!({"lines": batch["lines"]}))
+            }, &mut |_| {});
+            assert!(result.is_err() && calls <= PLAN.failures + 2, "{to}: {calls} calls: {:?}", result.map(|d| d.kept.len()));
+        }
     }
 }

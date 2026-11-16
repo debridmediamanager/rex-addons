@@ -429,3 +429,51 @@ fn web_pages_cannot_ask_for_subtitles() {
     }
     let _ = std::fs::remove_dir_all(&app.data);
 }
+
+/// What a search, a fetch or a translation found with an addon's old settings, its old version,
+/// or once it was removed, is never kept: one running across the change keeps nothing, and a
+/// removed addon's folder stays gone. An update empties the cache, as new settings do.
+#[test]
+fn answers_from_before_a_change_are_not_kept() {
+    let source = "export default {
+        subtitles() { const end = Date.now() + 600; while (Date.now() < end); return [{id: 'a', lang: 'en'}]; },
+        subtitle() { return { text: '1\\n00:00:01,000 --> 00:00:02,000\\nHi\\n' }; },
+        translate(b) { const end = Date.now() + 600; while (Date.now() < end); return { lines: b.lines.map((l) => ({ id: l.id, text: 'de ' + l.text })) }; } };";
+    let (app, _) = serve_one("changes", "slow", source);
+    let folder = app.data.join("addons/slow");
+    let query = "type=movie&imdb=tt0032599";
+    let during = |change: &dyn Fn()| {
+        let searching = { let app = app.clone(); std::thread::spawn(move || app.subtitle_search("slow", query)) };
+        std::thread::sleep(Duration::from_millis(200));
+        change();
+        searching.join().unwrap()
+    };
+    // New settings while it searched: the answer is given, not kept.
+    assert!(during(&|| { app.set_config("slow", &json!({})).unwrap(); }).is_ok());
+    assert!(!folder.join("cache/search").exists());
+    // Kept when nothing changes; an update empties it.
+    app.subtitle_search("slow", query).unwrap();
+    app.subtitle_file("slow", "a", "").unwrap();
+    assert!(folder.join("cache/search").exists() && folder.join("cache/files").exists());
+    app.install(&json!({"id": "slow", "name": "slow", "version": "1.0.1"}), source, None).unwrap();
+    assert!(!folder.join("cache").exists());
+    // A translation across new settings fails, keeping nothing.
+    let body = json!({"to": "de", "lines": [{"id": "1", "text": "Hello there"}]}).to_string();
+    let job = app.translate("slow", &body).unwrap().1["job"].as_str().unwrap().to_string();
+    std::thread::sleep(Duration::from_millis(200));
+    app.set_config("slow", &json!({})).unwrap();
+    let mut answer = Json::Null;
+    for _ in 0..200 {
+        answer = app.translation("slow", &job).unwrap();
+        if answer["state"] == "done" || answer["state"] == "error" {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(answer["state"], "error", "{answer}");
+    assert!(!folder.join("cache/translations").exists());
+    // Removed while it searched: its folder stays gone.
+    let _ = during(&|| { app.remove("slow").unwrap(); });
+    assert!(!folder.exists(), "{:?}", std::fs::read_dir(&folder).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>()));
+    let _ = std::fs::remove_dir_all(&app.data);
+}

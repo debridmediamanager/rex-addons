@@ -52,6 +52,8 @@ const SIGN_IN_LIFETIME: u64 = 3600;
 const CREDENTIALS: &str = "-credentials.json";
 /// Each sign-in started gets the next number: a poll whose sign-in was replaced or cancelled stops.
 static SIGN_INS: AtomicU64 = AtomicU64::new(0);
+/// Each addon's answers (`Addon::answers`) get the next number, never one an addon had before.
+static ANSWERS: AtomicU64 = AtomicU64::new(0);
 /// What an addon does, by what its main.js exports, each group all of its functions or none:
 /// titles to list and play, subtitles to find and fetch, and subtitles to translate.
 const GROUPS: [(&str, &[&str]); 3] = [("content", &["items", "open"]), ("subtitles", &["subtitles", "subtitle"]), ("translate", &["translate"])];
@@ -209,6 +211,9 @@ pub struct Addon {
     /// Why the last sign-in failed, or why the website signed it out.
     pub sign_in_error: Option<String>,
     pub pending: Option<Pending>,
+    /// Which subtitle answers are its current ones: a new number when its settings or version
+    /// change, so one found with the old ones, still running then, is never kept.
+    pub answers: u64,
     /// What it does (`GROUPS`), as installing found: kept in `state.json`, as nothing runs its
     /// main.js on a start. An older host's `state.json` has none: it installed addons of titles only.
     pub provides: Vec<String>,
@@ -414,7 +419,7 @@ impl App {
                 addon.manifest = Arc::new(manifest);
                 addon.source = Arc::new(source.to_string());
                 addon.provides = provides;
-                forget_answers(self, &id);
+                forget_answers(self, addon);
                 addon.opened.clear();
                 addon.opening.clear();
                 addon.last_sync = None;
@@ -1049,7 +1054,7 @@ impl App {
         write_atomic(&dir(self, id).join("config.json"), Json::Object(addon.config.clone()).to_string().as_bytes())
             .map_err(|e| e.to_string())?;
         // Nothing opened or found with the old settings is served again, not even an open() still running.
-        forget_answers(self, id);
+        forget_answers(self, addon);
         addon.opened.clear();
         addon.opening.clear();
         clear_probe_failures(self, addon);
@@ -1906,6 +1911,7 @@ fn load(path: &Path) -> Result<Addon, String> {
         sign_in_error: state["sign_in_error"].as_str().map(str::to_string),
         pending: None,
         provides: serde_json::from_value(state["provides"].clone()).unwrap_or_else(|_| vec!["content".to_string()]),
+        answers: ANSWERS.fetch_add(1, Ordering::Relaxed),
     };
     remember_secrets(&addon);
     // An error saved by an older host may still hold a secret.
@@ -1913,10 +1919,12 @@ fn load(path: &Path) -> Result<Addon, String> {
     Ok(Addon { error, ..addon })
 }
 
-/// The subtitles found, fetched and translated with an addon's old settings or version.
-fn forget_answers(app: &App, id: &str) {
-    let _ = std::fs::remove_dir_all(dir(app, id).join("cache"));
-    app.jobs.forget(id);
+/// The subtitles found, fetched and translated with an addon's old settings or version: gone, and
+/// those still being found never kept. Under the addons lock, as `keep_answer` checks under it.
+fn forget_answers(app: &App, addon: &mut Addon) {
+    let _ = std::fs::remove_dir_all(dir(app, &addon.manifest.id).join("cache"));
+    app.jobs.forget(&addon.manifest.id);
+    addon.answers = ANSWERS.fetch_add(1, Ordering::Relaxed);
 }
 
 fn save_state(app: &App, addon: &Addon) {

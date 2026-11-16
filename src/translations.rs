@@ -12,7 +12,7 @@ use serde_json::{json, Value as Json};
 
 use crate::app::{self, call_ctx, log, masked, warn, App};
 use crate::sandbox;
-use crate::subtitles::{cached, digest, keep, language, mostly_in, script, untagged, Script};
+use crate::subtitles::{cached, digest, language, mostly_in, script, untagged, Script, Shelf};
 
 /// How a translation is cut and retried: lines a batch, lines of context on each side, how often
 /// one line is asked before it's kept as it is, and how many failed calls in a row end the job: a
@@ -35,11 +35,9 @@ pub const MAX_REQUEST: u64 = 2 << 20;
 /// Jobs waiting for one addon, at most, and ended ones answered by their id.
 const MAX_QUEUED: usize = 16;
 const MAX_ENDED: usize = 32;
-/// A finished job answers by its id this long; then its result answers from disk...
+/// A finished job answers by its id this long; then its result answers from disk, for 30 days.
 const JOB_TTL: Duration = Duration::from_secs(3600);
-/// ...for this long, within RESULT_CACHE.
-const RESULT_TTL: Duration = Duration::from_secs(30 * 86400);
-const RESULT_CACHE: u64 = 64 << 20;
+const RESULTS: Shelf = Shelf { kind: "translations", ttl: Duration::from_secs(30 * 86400), most: 64 << 20 };
 
 /// A translation asked for: `lines` are (id, text), each text one cue's, `\n` between its lines.
 pub struct Request {
@@ -308,7 +306,7 @@ impl App {
         let request = request(body).map_err(|e| (400, e))?;
         self.callable(id, "translate")?;
         let job = digest(&json!([request.from, request.to, request.lines]));
-        if let Some(result) = cached(&app::dir(self, id).join("cache/translations"), &job, RESULT_TTL) {
+        if let Some(result) = cached(&app::dir(self, id).join("cache").join(RESULTS.kind), &job, RESULTS.ttl) {
             return Ok((200, finished(&job, &result)));
         }
         let mut queues = self.jobs.0.lock().unwrap();
@@ -354,7 +352,7 @@ impl App {
             }
             _ => drop(queues),
         }
-        cached(&app::dir(self, id).join("cache/translations"), job, RESULT_TTL).map(|result| finished(job, &result)).ok_or_else(gone)
+        cached(&app::dir(self, id).join("cache").join(RESULTS.kind), job, RESULTS.ttl).map(|result| finished(job, &result)).ok_or_else(gone)
     }
 
     /// Runs the addon's queued translations one after another, until none is left.
@@ -370,6 +368,8 @@ impl App {
                 entry.state = "running";
                 (job, entry.request.clone().unwrap())
             };
+            // The answers it starts with: new settings or a new version meanwhile keep it off disk.
+            let answers = self.addons.lock().unwrap().get(id).map_or(0, |a| a.answers);
             let key = (id.to_string(), job.clone());
             let (started, mut calls) = (Instant::now(), 0);
             let progress = |done: usize| {
@@ -394,11 +394,7 @@ impl App {
             let result = result.and_then(|result| {
                 let kept = result["kept"].as_array().map_or(0, Vec::len);
                 log(id, &format!("translated {lines} lines from {from} to {to} in {:.1} s, {calls} calls, {kept} kept as they were", started.elapsed().as_secs_f64()));
-                // Not for an addon removed meanwhile: its folder is gone.
-                match self.addons.lock().unwrap().contains_key(id) && keep(&app::dir(self, id).join("cache/translations"), &job, &result, RESULT_TTL, RESULT_CACHE) {
-                    true => Ok(()),
-                    false => Err("the translation was done, but rex-addons could not keep it on disk".to_string()),
-                }
+                self.keep_answer(id, answers, &RESULTS, &job, &result).map_err(|why| format!("the translation was done but not kept: {why}; ask again"))
             });
             if let Err(error) = &result {
                 warn(id, &format!("translating {lines} lines from {from} to {to} failed after {calls} calls: {error}"));
@@ -427,7 +423,7 @@ impl App {
     /// One batch through the addon's `translate(batch, ctx)`, looked up again for each batch, so
     /// one disabled, removed or waiting for an update ends the job.
     fn call_translate(self: &Arc<Self>, id: &str, batch: &Json) -> Result<Json, String> {
-        let (manifest, source, config, storage) = self.callable(id, "translate").map_err(|(_, error)| error)?;
+        let (manifest, source, config, storage, _) = self.callable(id, "translate").map_err(|(_, error)| error)?;
         let env = self.env(id, &manifest, &config, &source, storage, true);
         sandbox::call(&env, "translate", &[batch.clone(), call_ctx(&manifest, &config)], sandbox::TRANSLATE).map_err(|error| {
             let error = masked(id, &error);

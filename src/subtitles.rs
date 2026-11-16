@@ -21,13 +21,17 @@ use crate::sandbox::{self, Storage};
 pub const FORMATS: [&str; 5] = ["srt", "ass", "ssa", "vtt", "sub"];
 /// The most candidates one search answers; past it the answer says `truncated`.
 const MAX_CANDIDATES: usize = 200;
-/// A search's answer is reused this long, as sites add files slowly and limit how often they're
-/// asked; its folder holds at most SEARCH_CACHE, the oldest going first.
-const SEARCH_TTL: Duration = Duration::from_secs(12 * 3600);
-const SEARCH_CACHE: u64 = 16 << 20;
-/// A file served is reused this long, its folder at most FILE_CACHE.
-const FILE_TTL: Duration = Duration::from_secs(7 * 86400);
-const FILE_CACHE: u64 = 64 << 20;
+/// One of an addon's caches: its folder under `cache/`, how long an answer in it is reused, and
+/// how much it holds, the oldest going first.
+pub struct Shelf {
+    pub kind: &'static str,
+    pub ttl: Duration,
+    pub most: u64,
+}
+
+/// Searches, as sites add files slowly and limit how often they're asked; files served.
+const SEARCHES: Shelf = Shelf { kind: "search", ttl: Duration::from_secs(12 * 3600), most: 16 << 20 };
+const FILES: Shelf = Shelf { kind: "files", ttl: Duration::from_secs(7 * 86400), most: 64 << 20 };
 /// What the host downloads for one subtitle, and what one unpacks to at most: a film's SRT is
 /// about 150 KB (SubDL's for His Girl Friday, 2026-11-16), an ASS with its fonts a few MB.
 const MAX_FILE: u64 = 16 << 20;
@@ -643,7 +647,8 @@ fn asked(query: &Json) -> String {
     parts.join(" ")
 }
 
-type Callable = (Arc<Manifest>, Arc<String>, Map<String, Json>, Arc<Storage>);
+/// An addon's manifest, code, settings, storage, and which answers are current (`Addon::answers`).
+type Callable = (Arc<Manifest>, Arc<String>, Map<String, Json>, Arc<Storage>, u64);
 
 impl App {
     /// The addon `id`, for a call of its `group` (`subtitles`, `translate`), when it may be
@@ -667,16 +672,31 @@ impl App {
         if let Some(label) = a.manifest.missing(&a.config).first() {
             return Err((409, format!("set {label} first")));
         }
-        Ok((a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone()))
+        Ok((a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone(), a.answers))
+    }
+
+    /// An answer kept on the addon's `shelf`, unless the addon was removed, or its settings or
+    /// version changed, since the call that found it began (`answers`). Under the addons lock, as
+    /// a change empties the cache under it: nothing slips in after it, and no removed addon's
+    /// folder comes back.
+    pub(crate) fn keep_answer(&self, id: &str, answers: u64, shelf: &Shelf, key: &str, value: &Json) -> Result<(), String> {
+        let addons = self.addons.lock().unwrap();
+        if !addons.get(id).is_some_and(|a| a.answers == answers) {
+            return Err("the addon's settings or version changed, or it was removed, meanwhile".into());
+        }
+        match keep(&app::dir(self, id).join("cache").join(shelf.kind), key, value, shelf.ttl, shelf.most) {
+            true => Ok(()),
+            false => Err("rex-addons could not write it to disk".into()),
+        }
     }
 
     /// `GET /subtitles/{id}/search`: the addon's `subtitles(query, ctx)` within SUBTITLES' time,
     /// its candidates checked. The same question within SEARCH_TTL answers from the cache.
     pub fn subtitle_search(self: &Arc<Self>, id: &str, query: &str) -> Result<Json, (u16, String)> {
         let query = search_query(query).map_err(|e| (400, e))?;
-        let (manifest, source, config, storage) = self.callable(id, "subtitles")?;
-        let (folder, key) = (app::dir(self, id).join("cache/search"), digest(&query));
-        if let Some(answer) = cached(&folder, &key, SEARCH_TTL) {
+        let (manifest, source, config, storage, answers) = self.callable(id, "subtitles")?;
+        let (folder, key) = (app::dir(self, id).join("cache").join(SEARCHES.kind), digest(&query));
+        if let Some(answer) = cached(&folder, &key, SEARCHES.ttl) {
             return Ok(answer);
         }
         let started = Instant::now();
@@ -694,7 +714,7 @@ impl App {
         let more = if left_out.is_empty() { String::new() } else { format!(", {} left out", left_out.len()) };
         log(id, &format!("subtitles({what}): {} found in {:.1} s{more}", found.len(), started.elapsed().as_secs_f64()));
         let answer = json!({"candidates": found, "truncated": truncated, "left_out": left_out.len()});
-        keep(&folder, &key, &answer, SEARCH_TTL, SEARCH_CACHE);
+        let _ = self.keep_answer(id, answers, &SEARCHES, &key, &answer);
         Ok(answer)
     }
 
@@ -721,9 +741,9 @@ impl App {
         if candidate.is_empty() || candidate.len() > 1024 {
             return Err((400, "give the id of a candidate its search found".into()));
         }
-        let (manifest, source, config, storage) = self.callable(id, "subtitles")?;
-        let (folder, key) = (app::dir(self, id).join("cache/files"), digest(&json!([candidate, season, episode, lang])));
-        let hit = cached(&folder, &key, FILE_TTL).and_then(|v| Some(Subtitle { format: FORMATS.into_iter().find(|f| v["format"] == *f)?, text: v["text"].as_str()?.to_string() }));
+        let (manifest, source, config, storage, answers) = self.callable(id, "subtitles")?;
+        let (folder, key) = (app::dir(self, id).join("cache").join(FILES.kind), digest(&json!([candidate, season, episode, lang])));
+        let hit = cached(&folder, &key, FILES.ttl).and_then(|v| Some(Subtitle { format: FORMATS.into_iter().find(|f| v["format"] == *f)?, text: v["text"].as_str()?.to_string() }));
         if let Some(subtitle) = hit {
             return Ok(subtitle);
         }
@@ -747,7 +767,7 @@ impl App {
         };
         let subtitle = subtitle_of(&bytes, answer["name"].as_str(), wanted, lang.as_deref()).map_err(failed)?;
         log(id, &format!("subtitle({candidate:.80}): {}, {} KB in {:.1} s", subtitle.format, subtitle.text.len().div_ceil(1024), started.elapsed().as_secs_f64()));
-        keep(&folder, &key, &json!({"format": subtitle.format, "text": subtitle.text}), FILE_TTL, FILE_CACHE);
+        let _ = self.keep_answer(id, answers, &FILES, &key, &json!({"format": subtitle.format, "text": subtitle.text}));
         Ok(subtitle)
     }
 }

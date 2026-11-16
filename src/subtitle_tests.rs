@@ -376,10 +376,13 @@ fn a_translation_is_a_job_polled_until_done_one_at_a_time() {
     assert_eq!(done, json!({"job": first["job"], "state": "done", "done": 3, "total": 3, "kept": [],
         "lines": [{"id": "1", "text": "မြန်မာ 1"}, {"id": "2", "text": "မြန်မာ 2"}, {"id": "3", "text": "မြန်မာ 3"}]}));
     assert_eq!(until_done(&second)["lines"], json!([{"id": "4", "text": "မြန်မာ 4"}]));
-    // One call at a time: each began after the one before it ended.
-    let ran: Vec<u64> = crate::app::LOGGED.lock().unwrap().iter().filter_map(|line| line.strip_prefix("[addon trans] ")?.split(' ').nth(1)?.parse().ok()).collect();
-    assert_eq!(ran.len(), 4, "{ran:?}");
-    assert!(ran.windows(2).all(|pair| pair[0] <= pair[1]), "calls overlapped: {ran:?}");
+    // One call at a time: each began after the one before it ended, as logged, in order.
+    let ran: Vec<(String, u64)> = crate::app::LOGGED.lock().unwrap().iter().filter_map(|line| {
+        let (kind, at) = line.strip_prefix("[addon trans] ")?.split_once(' ')?;
+        Some((kind.to_string(), at.parse().ok()?))
+    }).collect();
+    assert_eq!(ran.iter().map(|(kind, _)| kind.as_str()).collect::<Vec<_>>(), ["start", "end", "start", "end"], "calls overlapped: {ran:?}");
+    assert!(ran.windows(2).all(|pair| pair[0].1 <= pair[1].1), "{ran:?}");
 
     // Done: the same lines answer at once (200, not a job), from disk, also once the job is forgotten.
     assert_eq!(post(addr, "/subtitles/trans/translate", json, &ask(&["1", "2", "3"])), (200, done.clone()));
@@ -516,5 +519,21 @@ fn a_candidate_id_cannot_forge_log_lines() {
     assert!(app.subtitle_file("fails", "x\nWARN [host] forged", "").is_err());
     let logged: Vec<String> = crate::app::LOGGED.lock().unwrap().iter().filter(|line| line.contains("forged")).cloned().collect();
     assert!(!logged.is_empty() && logged.iter().all(|line| !line.contains("\nWARN [host] forged") && line.contains(r#""x\nWARN [host] forged""#)), "{logged:?}");
+    let _ = std::fs::remove_dir_all(&app.data);
+}
+
+/// At most MAX_QUEUED (16) translations wait for one addon, the running one counted: one more
+/// is refused with 429, the same lines again still join their job.
+#[test]
+fn translations_waiting_for_an_addon_are_bounded() {
+    let (app, _) = serve_one("queued", "busy", "export default { translate(b) { const end = Date.now() + 1500; while (Date.now() < end); return { lines: b.lines }; } };");
+    let ask = |n: usize| json!({"to": "de", "lines": [{"id": "1", "text": format!("line {n}")}]}).to_string();
+    for n in 0..16 {
+        assert_eq!(app.translate("busy", &ask(n)).unwrap().0, 202, "{n}");
+    }
+    assert_eq!(app.translate("busy", &ask(16)).unwrap_err(), (429, "16 translations wait for this addon already: ask again once one is done".to_string()));
+    assert_eq!(app.translate("busy", &ask(3)).unwrap().0, 202);
+    // Disabled, what waits fails at once.
+    app.set_enabled("busy", false).unwrap();
     let _ = std::fs::remove_dir_all(&app.data);
 }

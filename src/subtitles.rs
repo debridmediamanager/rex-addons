@@ -493,11 +493,27 @@ pub fn script(lang: &str) -> Option<Script> {
     })
 }
 
-/// Whether at least half of the letters in `text` are in the script's blocks; text with no
-/// letters (numbers, ♪) is.
+/// Text without its markup: SubRip's and WebVTT's `<i>` and `<font color="#ffff00">`, ASS's
+/// `{\an8}`. Its letters are no script's.
+pub fn untagged(text: &str) -> String {
+    let (mut out, mut closing) = (String::with_capacity(text.len()), None);
+    for c in text.chars() {
+        match (closing, c) {
+            (None, '<') => closing = Some('>'),
+            (None, '{') => closing = Some('}'),
+            (None, c) => out.push(c),
+            (Some(end), c) if c == end => closing = None,
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Whether at least half of the letters in `text`, its tags left out, are in the script's
+/// blocks; text with no letters (numbers, ♪) is.
 pub fn mostly_in(text: &str, ranges: &[RangeInclusive<char>]) -> bool {
     let (mut letters, mut inside) = (0, 0);
-    for c in text.chars().filter(|c| c.is_alphabetic()) {
+    for c in untagged(text).chars().filter(|c| c.is_alphabetic()) {
         letters += 1;
         inside += usize::from(ranges.iter().any(|range| range.contains(&c)));
     }

@@ -12,7 +12,7 @@ use serde_json::{json, Value as Json};
 
 use crate::app::{self, call_ctx, log, masked, warn, App};
 use crate::sandbox;
-use crate::subtitles::{cached, digest, keep, language, mostly_in, script, Script};
+use crate::subtitles::{cached, digest, keep, language, mostly_in, script, untagged, Script};
 
 /// How a translation is cut and retried: lines a batch, lines of context on each side, how often
 /// one line is asked before it's kept as it is, and how many failed calls in a row end the job: a
@@ -90,13 +90,18 @@ pub struct Translated {
 }
 
 /// The texts an answer gives the batch's lines, by position; None unless its ids are exactly the
-/// batch's, each once with text. Ids not asked about are dropped.
+/// batch's, each once with text. Ids not asked about are dropped; an id as a number is its text.
 fn answered(answer: &Json, group: &[usize], lines: &[(String, String)]) -> Result<Option<HashMap<usize, String>>, String> {
     let list = answer["lines"].as_array().ok_or(r#"translate() must return {lines: [{id, text}]}"#)?;
     let wanted: HashMap<&str, usize> = group.iter().map(|&at| (lines[at].0.as_str(), at)).collect();
     let mut texts = HashMap::new();
     for line in list {
-        let Some(&at) = line["id"].as_str().and_then(|id| wanted.get(id)) else { continue };
+        let id = match &line["id"] {
+            Json::String(id) => id.clone(),
+            Json::Number(id) => id.to_string(),
+            _ => continue,
+        };
+        let Some(&at) = wanted.get(id.as_str()) else { continue };
         let Some(text) = line["text"].as_str().filter(|text| !text.trim().is_empty() || lines[at].1.trim().is_empty()) else { return Ok(None) };
         if texts.insert(at, text.to_string()).is_some() {
             return Ok(None);
@@ -140,41 +145,37 @@ fn halves(group: Vec<usize>, todo: &mut Vec<Vec<usize>>) {
 /// answer's ids are wrong, or whose call failed, is split in halves down to single lines; lines
 /// answered in a script not the target's are asked again on their own. A line still left out, in
 /// the wrong script or failing after `line_tries` is kept, untranslated or as answered, and
-/// listed; but `failures` failed calls in a row, or a failing line before any call worked, end it.
+/// listed. A call counts as failed unless it gave a line with letters worth keeping; `failures` of
+/// them in a row end the job, as does keeping most lines as they were: a translator that answers
+/// every call in the wrong script or with the wrong ids would otherwise be asked thousands of
+/// times, and its job saved as done.
 pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> Result<Json, String>, done: &mut dyn FnMut(usize)) -> Result<Translated, String> {
     let lines = &request.lines;
     let target: Option<Script> = script(&request.to);
     // An answer in the target's script, or one the same as its line (a name, "OK"), or with no letters.
     let fits = |text: &str, line: &str| text == line || target.is_none_or(|(_, ranges)| mostly_in(text, ranges));
     let mut answers = Answers { lines, texts: vec![None; lines.len()], tries: vec![0; lines.len()], kept: Vec::new() };
-    // Failed calls in a row, and whether any call came back at all.
+    // Failed calls in a row, and whether any call gave a line worth keeping.
     let (mut failures, mut worked) = (0, false);
+    let letters = |text: &str| untagged(text).chars().any(char::is_alphabetic);
+    let name = target.map_or("", |(name, _)| name);
     for start in (0..lines.len()).step_by(plan.batch) {
         let end = (start + plan.batch).min(lines.len());
         // Batches to ask, the next one last.
         let mut todo: Vec<Vec<usize>> = vec![(start..end).collect()];
         while let Some(group) = todo.pop() {
-            let (first, last) = (group[0], group[group.len() - 1]);
+            let (first, last, group_len) = (group[0], group[group.len() - 1], group.len());
             let shown = |range: std::ops::Range<usize>| range.map(|at| json!({"id": lines[at].0, "text": lines[at].1})).collect::<Vec<_>>();
             let batch = json!({
                 "from": request.from, "to": request.to, "title": request.title,
                 "lines": group.iter().map(|&at| json!({"id": lines[at].0, "text": lines[at].1})).collect::<Vec<_>>(),
                 "before": shown(first.saturating_sub(plan.context)..first), "after": shown(last + 1..(last + 1 + plan.context).min(lines.len())),
             });
-            let answer = call(&batch).and_then(|answer| answered(&answer, &group, lines));
-            if answer.is_ok() {
-                (failures, worked) = (0, true);
-            }
-            match answer {
+            // Why the call failed, unless it gave a line worth keeping.
+            let mut failed: Option<String> = None;
+            match call(&batch).and_then(|answer| answered(&answer, &group, lines)) {
                 Err(error) => {
-                    // Once lines went through, a single line is bounded by its own tries: two refused
-                    // lines side by side would otherwise use up the job's failures and end it.
-                    if !(worked && group.len() == 1) {
-                        failures += 1;
-                        if failures == plan.failures {
-                            return Err(format!("translate() failed {failures} times in a row, last with: {}", app::first_line(&error)));
-                        }
-                    }
+                    failed = Some(app::first_line(&error));
                     match group.len() {
                         // A line it fails on, where others went through (a model refusing one line).
                         1 if worked => answers.again(first, lines[first].1.clone(), format!("translate() failed on it {} times", plan.line_tries), plan.line_tries, &mut todo),
@@ -182,14 +183,22 @@ pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> 
                         _ => halves(group, &mut todo),
                     }
                 }
-                Ok(None) if group.len() == 1 => answers.again(first, lines[first].1.clone(), format!("translate() left it out {} times", plan.line_tries), plan.line_tries, &mut todo),
-                Ok(None) => halves(group, &mut todo),
+                Ok(None) => {
+                    failed = Some("its answer's ids were not the lines asked for".into());
+                    match group.len() {
+                        1 => answers.again(first, lines[first].1.clone(), format!("translate() left it out {} times", plan.line_tries), plan.line_tries, &mut todo),
+                        _ => halves(group, &mut todo),
+                    }
+                }
                 Ok(Some(mut texts)) => {
                     let wrong: Vec<usize> = group.iter().copied().filter(|at| !fits(&texts[at], &lines[*at].1)).collect();
-                    for &at in group.iter().filter(|at| !wrong.contains(at)) {
+                    let kept: Vec<usize> = group.iter().copied().filter(|at| !wrong.contains(at)).collect();
+                    if !kept.iter().any(|&at| letters(&lines[at].1)) {
+                        failed = Some(format!("its translations were not in {name} script"));
+                    }
+                    for at in kept {
                         answers.texts[at] = texts.remove(&at);
                     }
-                    let name = target.map_or("", |(name, _)| name);
                     match wrong.len() {
                         0 => {}
                         _ if group.len() == 1 => answers.again(first, texts.remove(&first).unwrap_or_default(), format!("its translation is not in {name} script"), plan.line_tries, &mut todo),
@@ -198,6 +207,21 @@ pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> 
                     }
                 }
             }
+            match failed {
+                None => (failures, worked) = (0, true),
+                // Once lines went through, a single line is bounded by its own tries: two refused
+                // lines side by side would otherwise use up the job's failures and end it.
+                Some(_) if worked && group_len == 1 => {}
+                Some(why) => {
+                    failures += 1;
+                    if failures == plan.failures {
+                        return Err(format!("translate() failed {failures} times in a row, last with: {why}"));
+                    }
+                }
+            }
+        }
+        if let Some(first) = answers.kept.first().filter(|_| answers.kept.len() * 2 > end) {
+            return Err(format!("translate() answered too few lines usably: {} of {end} were kept as they were, line {} as {}", answers.kept.len(), first["id"], first["why"]));
         }
         done(end);
     }
@@ -542,5 +566,51 @@ mod tests {
             assert_eq!(kept, refused, "{calls} calls");
             assert_eq!(done.texts[0], "de line 1");
         }
+    }
+
+    /// `n` lines asked for in Myanmar through a stand-in translator: `answer(id, text)` is each
+    /// line's translation. What it came to, and how many calls and lines it was sent.
+    fn burmese(n: usize, answer: impl Fn(&Json, &str) -> Json) -> (Result<Translated, String>, usize, usize) {
+        let texts: Vec<String> = (1..=n).map(|n| format!("<font color=\"#ffff00\">line {n}</font>")).collect();
+        let request = ask("my", &texts.iter().map(String::as_str).collect::<Vec<_>>());
+        let (mut calls, mut sent) = (0, 0);
+        let result = translate(&request, &PLAN, &mut |batch| {
+            calls += 1;
+            let lines = batch["lines"].as_array().unwrap();
+            sent += lines.len();
+            Ok(json!({"lines": lines.iter().map(|l| json!({"id": answer(&l["id"], l["text"].as_str().unwrap()), "text": answer(&Json::Null, l["text"].as_str().unwrap())})).collect::<Vec<_>>()}))
+        }, &mut |_| {});
+        (result, calls, sent)
+    }
+
+    /// Answers that parse but are no use: ids as numbers (taken, as the same ids), Myanmar inside
+    /// the line's own tags (taken: tags are no letters of any script), and a model that can't
+    /// write Myanmar at all (the job ends within a few calls, not after thousands, and nothing
+    /// is kept as done).
+    #[test]
+    fn answers_that_parse_but_are_no_use_end_the_job() {
+        // Ids as numbers; the line's tags kept around Myanmar text.
+        let (result, calls, _) = burmese(250, |id, text| match id {
+            Json::Null => json!(text.replace("line", "\u{1019}\u{103c}\u{1014}\u{103a}\u{1019}\u{102c}")),
+            id => json!(id.as_str().unwrap().parse::<u64>().unwrap()),
+        });
+        let done = result.unwrap();
+        assert!(done.kept.is_empty(), "{:?}", &done.kept[..3.min(done.kept.len())]);
+        assert_eq!(done.texts[0], "<font color=\"#ffff00\">\u{1019}\u{103c}\u{1014}\u{103a}\u{1019}\u{102c} 1</font>");
+        assert_eq!(calls, 3);
+        // In Latin, always: a model that can't write the target script.
+        let (result, calls, sent) = burmese(2000, |id, text| match id {
+            Json::Null => json!(format!("in Latin: {text}")),
+            id => id.clone(),
+        });
+        assert!(result.is_err() && calls <= PLAN.failures + 2, "{calls} calls, {sent} lines sent: {:?}", result.map(|d| d.kept.len()));
+        // Myanmar for one line of five: most lines kept as they were fails the job, saving nothing.
+        let (result, _, _) = burmese(5, |id, text| match id {
+            Json::Null if text.trim_end_matches("</font>").ends_with(['0', '3', '6', '9']) => json!("\u{1019}\u{103c}\u{1014}\u{103a}\u{1019}\u{102c}"),
+            Json::Null => json!(format!("in Latin: {text}")),
+            id => id.clone(),
+        });
+        let error = result.err().unwrap();
+        assert!(error.starts_with("translate() answered too few lines usably: "), "{error}");
     }
 }

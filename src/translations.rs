@@ -18,15 +18,18 @@ use crate::subtitles::{cached, digest, language, mostly_in, script, untagged, Sc
 /// one line is asked before it's kept as it is, and how many failed calls in a row end the job: a
 /// bad key fails every call, and splitting would otherwise ask hundreds of times. More than a
 /// batch's halving down to one line (7 calls for 100) and that line's tries, so a model that
-/// fails only on long batches gets through.
+/// fails only on long batches gets through. Once lines went through, a line kept after its tries
+/// starts that count again, so a batch's own refused lines never reach it; `lost` lines kept in a
+/// row, nothing translated between them, end the job instead: the translator died.
 pub struct Plan {
     pub batch: usize,
     pub context: usize,
     pub line_tries: usize,
     pub failures: usize,
+    pub lost: usize,
 }
 
-pub const PLAN: Plan = Plan { batch: 100, context: 10, line_tries: 3, failures: 10 };
+pub const PLAN: Plan = Plan { batch: 100, context: 10, line_tries: 3, failures: 10, lost: 25 };
 /// What one translation may be: a long film has about 2,000 lines, 100 KB of text.
 const MAX_LINES: usize = 10_000;
 const MAX_TEXT: usize = 1 << 20;
@@ -119,8 +122,8 @@ struct Answers<'a> {
 }
 
 impl Answers<'_> {
-    /// Line `at` asked once more, or kept as `text` once it was asked `most` times.
-    fn again(&mut self, at: usize, text: String, why: String, most: usize, todo: &mut Vec<Vec<usize>>) {
+    /// Line `at` asked once more, or kept as `text` once it was asked `most` times: whether it was.
+    fn again(&mut self, at: usize, text: String, why: String, most: usize, todo: &mut Vec<Vec<usize>>) -> bool {
         self.tries[at] += 1;
         match self.tries[at] == most {
             true => {
@@ -129,6 +132,7 @@ impl Answers<'_> {
             }
             false => todo.push(vec![at]),
         }
+        self.tries[at] == most
     }
 }
 
@@ -161,8 +165,8 @@ pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> 
         false => target.is_none_or(|(_, ranges)| mostly_in(text, ranges)),
     };
     let mut answers = Answers { lines, texts: vec![None; lines.len()], tries: vec![0; lines.len()], kept: Vec::new() };
-    // Failed calls in a row, and whether any call gave a line worth keeping.
-    let (mut failures, mut worked) = (0, false);
+    // Failed calls in a row, whether any call gave a line worth keeping, and lines kept in a row.
+    let (mut failures, mut worked, mut lost) = (0, false, 0);
     let letters = |text: &str| untagged(text).chars().any(char::is_alphabetic);
     let name = target.map_or("", |(name, _)| name);
     for start in (0..lines.len()).step_by(plan.batch) {
@@ -177,14 +181,14 @@ pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> 
                 "lines": group.iter().map(|&at| json!({"id": lines[at].0, "text": lines[at].1})).collect::<Vec<_>>(),
                 "before": shown(first.saturating_sub(plan.context)..first), "after": shown(last + 1..(last + 1 + plan.context).min(lines.len())),
             });
-            // Why the call failed, unless it gave a line worth keeping.
-            let mut failed: Option<String> = None;
+            // Why the call failed, unless it gave a line worth keeping, and whether its line was kept.
+            let (mut failed, mut gave_up): (Option<String>, bool) = (None, false);
             match call(&batch).and_then(|answer| answered(&answer, &group, lines)) {
                 Err(error) => {
                     failed = Some(app::first_line(&error));
                     match group.len() {
                         // A line it fails on, where others went through (a model refusing one line).
-                        1 if worked => answers.again(first, lines[first].1.clone(), format!("translate() failed on it {} times", plan.line_tries), plan.line_tries, &mut todo),
+                        1 if worked => gave_up = answers.again(first, lines[first].1.clone(), format!("translate() failed on it {} times", plan.line_tries), plan.line_tries, &mut todo),
                         1 => todo.push(group),
                         _ => halves(group, &mut todo),
                     }
@@ -192,7 +196,7 @@ pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> 
                 Ok(None) => {
                     failed = Some("its answer's ids were not the lines asked for".into());
                     match group.len() {
-                        1 => answers.again(first, lines[first].1.clone(), format!("translate() left it out {} times", plan.line_tries), plan.line_tries, &mut todo),
+                        1 => gave_up = answers.again(first, lines[first].1.clone(), format!("translate() left it out {} times", plan.line_tries), plan.line_tries, &mut todo),
                         _ => halves(group, &mut todo),
                     }
                 }
@@ -220,16 +224,23 @@ pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> 
                     }
                     match wrong.len() {
                         0 => {}
-                        _ if group.len() == 1 => answers.again(first, texts.remove(&first).unwrap_or_default(), format!("its translation is not in {name} script"), plan.line_tries, &mut todo),
+                        _ if group.len() == 1 => gave_up = answers.again(first, texts.remove(&first).unwrap_or_default(), format!("its translation is not in {name} script"), plan.line_tries, &mut todo),
                         n if n == group.len() => halves(group, &mut todo),
                         _ => todo.push(wrong),
                     }
                 }
             }
             match failed {
-                None => (failures, worked) = (0, true),
-                // Once lines went through, a single line is bounded by its own tries: two refused
-                // lines side by side would otherwise use up the job's failures and end it.
+                None => (failures, worked, lost) = (0, true, 0),
+                // Once lines went through, a single line is bounded by its own tries, and one kept
+                // starts the count of failures again: refused lines together in a batch would
+                // otherwise use it up and end the job. Many kept in a row is a translator that died.
+                Some(why) if worked && gave_up => {
+                    (failures, lost) = (0, lost + 1);
+                    if lost == plan.lost {
+                        return Err(format!("translate() gave no usable answer for {lost} lines in a row, last with: {why}"));
+                    }
+                }
                 Some(_) if worked && group_len == 1 => {}
                 Some(why) => {
                     failures += 1;
@@ -441,7 +452,7 @@ mod tests {
     use crate::sandbox::{Env, Limits, Storage};
 
     const QUICK: Limits = Limits { memory: 16 << 20, cpu: Duration::from_secs(2), wall: Duration::from_secs(10) };
-    const SMALL: Plan = Plan { batch: 4, context: 2, line_tries: 3, failures: 6 };
+    const SMALL: Plan = Plan { batch: 4, context: 2, line_tries: 3, failures: 6, lost: 25 };
 
     fn ask(to: &str, texts: &[&str]) -> Request {
         Request { from: Some("en".into()), to: to.into(), title: Some("His Girl Friday".into()), lines: texts.iter().enumerate().map(|(n, t)| ((n + 1).to_string(), t.to_string())).collect() }
@@ -714,5 +725,29 @@ mod tests {
         assert!(queues.jobs.values().all(|job| job.request.is_none()), "an ended job keeps no lines");
         drop(queues);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Bad lines together in one batch, once lines went through: 7 or 20 refused side by side, or 11
+    /// that stay in Latin when asked for Myanmar, are each kept, never ending the job; a translator
+    /// that works for a batch and then always throws still ends it, after PLAN.lost lines.
+    #[test]
+    fn a_cluster_of_bad_lines_is_kept_but_a_translator_that_died_ends_the_job() {
+        for count in [7, 20] {
+            let refused: Vec<String> = (101..101 + count).map(|n: usize| n.to_string()).collect();
+            let (result, calls) = picky(2000, &refused.iter().map(String::as_str).collect::<Vec<_>>());
+            let done = result.unwrap_or_else(|error| panic!("{count}: {error}"));
+            assert_eq!(done.kept.len(), count, "{calls} calls");
+        }
+        let latin: Vec<String> = (21..32).map(|n: usize| format!("line {n}<")).collect();
+        let (result, _, _) = burmese(250, |id, text| match id {
+            Json::Null if latin.iter().any(|l| text.contains(l.as_str())) => json!(format!("in Latin: {text}")),
+            Json::Null => json!("\u{1019}\u{103c}\u{1014}\u{103a}\u{1019}\u{102c}"),
+            id => id.clone(),
+        });
+        assert_eq!(result.unwrap().kept.len(), 11);
+        let refused: Vec<String> = (101..=2000).map(|n: usize| n.to_string()).collect();
+        let (result, calls) = picky(2000, &refused.iter().map(String::as_str).collect::<Vec<_>>());
+        let error = result.err().unwrap();
+        assert!(error.starts_with(&format!("translate() gave no usable answer for {} lines in a row", PLAN.lost)) && calls < 130, "{calls} calls: {error}");
     }
 }

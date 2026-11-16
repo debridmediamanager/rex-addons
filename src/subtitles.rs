@@ -564,10 +564,10 @@ pub fn cached(folder: &Path, key: &str, ttl: Duration) -> Option<Json> {
 }
 
 /// Keeps `value` as `key`, then trims the folder: what is older than `ttl` goes, then the oldest
-/// until it holds `most` bytes at most.
-pub fn keep(folder: &Path, key: &str, value: &Json, ttl: Duration, most: u64) {
+/// until it holds `most` bytes at most. Whether it was written.
+pub fn keep(folder: &Path, key: &str, value: &Json, ttl: Duration, most: u64) -> bool {
     if std::fs::create_dir_all(folder).is_err() || write_atomic(&folder.join(format!("{key}.json")), value.to_string().as_bytes()).is_err() {
-        return;
+        return false;
     }
     let mut files: Vec<(SystemTime, u64, PathBuf)> = std::fs::read_dir(folder)
         .into_iter()
@@ -587,6 +587,7 @@ pub fn keep(folder: &Path, key: &str, value: &Json, ttl: Duration, most: u64) {
         let _ = std::fs::remove_file(path);
         total -= size;
     }
+    true
 }
 
 /// What a call failed with, as answered: 504 when it ran out of time.

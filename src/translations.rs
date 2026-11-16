@@ -32,8 +32,9 @@ const MAX_LINES: usize = 10_000;
 const MAX_TEXT: usize = 1 << 20;
 /// Its request, as JSON.
 pub const MAX_REQUEST: u64 = 2 << 20;
-/// Jobs waiting for one addon, at most.
+/// Jobs waiting for one addon, at most, and ended ones answered by their id.
 const MAX_QUEUED: usize = 16;
+const MAX_ENDED: usize = 32;
 /// A finished job answers by its id this long; then its result answers from disk...
 const JOB_TTL: Duration = Duration::from_secs(3600);
 /// ...for this long, within RESULT_CACHE.
@@ -248,15 +249,15 @@ pub fn translate(request: &Request, plan: &Plan, call: &mut dyn FnMut(&Json) -> 
     Ok(Translated { texts: answers.texts.into_iter().map(Option::unwrap_or_default).collect(), kept: answers.kept })
 }
 
+/// A job as it is answered. Its lines (up to 2 MB) go when it ends: a done one's result is read
+/// from disk.
 struct Job {
     state: &'static str,
     done: usize,
     total: usize,
-    /// `{lines, kept}` once done.
-    result: Option<Json>,
     error: Option<String>,
     ended: Option<Instant>,
-    request: Arc<Request>,
+    request: Option<Arc<Request>>,
 }
 
 /// The translations asked for, by (addon, job), and each addon's queue: its first job runs.
@@ -267,6 +268,24 @@ pub struct Jobs(Mutex<Queues>);
 struct Queues {
     jobs: HashMap<(String, String), Job>,
     queues: HashMap<String, VecDeque<String>>,
+}
+
+impl Queues {
+    /// Ended jobs over JOB_TTL old go, and an addon's oldest past MAX_ENDED.
+    fn sweep(&mut self) {
+        self.jobs.retain(|_, job| job.ended.is_none_or(|at| at.elapsed() < JOB_TTL));
+        let mut ended: Vec<((String, String), Instant)> = self.jobs.iter().filter_map(|(key, job)| Some((key.clone(), job.ended?))).collect();
+        // By addon, the newest first.
+        ended.sort_by(|(a, at), (b, bt)| a.0.cmp(&b.0).then(bt.cmp(at)));
+        let mut seen: HashMap<String, usize> = HashMap::new();
+        for (key, _) in ended {
+            let count = seen.entry(key.0.clone()).or_default();
+            *count += 1;
+            if *count > MAX_ENDED {
+                self.jobs.remove(&key);
+            }
+        }
+    }
 }
 
 impl Jobs {
@@ -293,7 +312,7 @@ impl App {
             return Ok((200, finished(&job, &result)));
         }
         let mut queues = self.jobs.0.lock().unwrap();
-        queues.jobs.retain(|_, job| job.ended.is_none_or(|at| at.elapsed() < JOB_TTL));
+        queues.sweep();
         let key = (id.to_string(), job.clone());
         if queues.jobs.get(&key).is_some_and(|job| job.state != "error") {
             return Ok((202, json!({"job": job})));
@@ -305,7 +324,7 @@ impl App {
         queue.push_back(job.clone());
         let first = queue.len() == 1;
         let total = request.lines.len();
-        queues.jobs.insert(key, Job { state: "queued", done: 0, total, result: None, error: None, ended: None, request: Arc::new(request) });
+        queues.jobs.insert(key, Job { state: "queued", done: 0, total, error: None, ended: None, request: Some(Arc::new(request)) });
         drop(queues);
         if first {
             let (app, id) = (self.clone(), id.to_string());
@@ -323,12 +342,17 @@ impl App {
         if job.len() != 32 || !job.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(gone());
         }
-        if let Some(j) = self.jobs.0.lock().unwrap().jobs.get(&(id.to_string(), job.to_string())) {
-            return Ok(match (&j.result, &j.error) {
-                (Some(result), _) => finished(job, result),
-                (_, Some(error)) => json!({"job": job, "state": j.state, "done": j.done, "total": j.total, "error": error}),
-                _ => json!({"job": job, "state": j.state, "done": j.done, "total": j.total}),
-            });
+        let mut queues = self.jobs.0.lock().unwrap();
+        queues.sweep();
+        match queues.jobs.get(&(id.to_string(), job.to_string())) {
+            Some(j) if j.state != "done" => {
+                let mut answer = json!({"job": job, "state": j.state, "done": j.done, "total": j.total});
+                if let Some(error) = &j.error {
+                    answer["error"] = json!(error);
+                }
+                return Ok(answer);
+            }
+            _ => drop(queues),
         }
         cached(&app::dir(self, id).join("cache/translations"), job, RESULT_TTL).map(|result| finished(job, &result)).ok_or_else(gone)
     }
@@ -344,7 +368,7 @@ impl App {
                 };
                 let entry = queues.jobs.get_mut(&(id.to_string(), job.clone())).unwrap();
                 entry.state = "running";
-                (job, entry.request.clone())
+                (job, entry.request.clone().unwrap())
             };
             let key = (id.to_string(), job.clone());
             let (started, mut calls) = (Instant::now(), 0);
@@ -366,22 +390,25 @@ impl App {
                 let lines: Vec<Json> = request.lines.iter().zip(translated.texts).map(|((id, _), text)| json!({"id": id, "text": text})).collect();
                 json!({"lines": lines, "kept": translated.kept})
             });
-            match &result {
-                Ok(result) => {
-                    let kept = result["kept"].as_array().map_or(0, Vec::len);
-                    log(id, &format!("translated {lines} lines from {from} to {to} in {:.1} s, {calls} calls, {kept} kept as they were", started.elapsed().as_secs_f64()));
-                    // Not for an addon removed meanwhile: its folder is gone.
-                    if self.addons.lock().unwrap().contains_key(id) {
-                        keep(&app::dir(self, id).join("cache/translations"), &job, result, RESULT_TTL, RESULT_CACHE);
-                    }
+            // A done job's result is answered from disk, the job keeping none of it.
+            let result = result.and_then(|result| {
+                let kept = result["kept"].as_array().map_or(0, Vec::len);
+                log(id, &format!("translated {lines} lines from {from} to {to} in {:.1} s, {calls} calls, {kept} kept as they were", started.elapsed().as_secs_f64()));
+                // Not for an addon removed meanwhile: its folder is gone.
+                match self.addons.lock().unwrap().contains_key(id) && keep(&app::dir(self, id).join("cache/translations"), &job, &result, RESULT_TTL, RESULT_CACHE) {
+                    true => Ok(()),
+                    false => Err("the translation was done, but rex-addons could not keep it on disk".to_string()),
                 }
-                Err(error) => warn(id, &format!("translating {lines} lines from {from} to {to} failed after {calls} calls: {error}")),
+            });
+            if let Err(error) = &result {
+                warn(id, &format!("translating {lines} lines from {from} to {to} failed after {calls} calls: {error}"));
             }
             let mut queues = self.jobs.0.lock().unwrap();
             if let Some(entry) = queues.jobs.get_mut(&key) {
                 entry.ended = Some(Instant::now());
+                entry.request = None;
                 match result {
-                    Ok(result) => (entry.state, entry.done, entry.result) = ("done", lines, Some(result)),
+                    Ok(()) => (entry.state, entry.done) = ("done", lines),
                     Err(error) => (entry.state, entry.error) = ("error", Some(error)),
                 }
             }
@@ -647,5 +674,49 @@ mod tests {
             }, &mut |_| {});
             assert!(result.is_err() && calls <= PLAN.failures + 2, "{to}: {calls} calls: {:?}", result.map(|d| d.kept.len()));
         }
+    }
+
+    /// An ended job answers by its id for an hour, then from disk; ended jobs go on any read, not
+    /// only on a new translation, and an addon keeps at most MAX_ENDED of them.
+    #[test]
+    fn ended_jobs_expire_on_reads_and_are_capped() {
+        let data = std::env::temp_dir().join(format!("rex-addons-jobs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let app = App::new(data.clone(), "http://127.0.0.1:9".into(), "127.0.0.1:9".parse().unwrap(), None, None);
+        let source = "export default { translate(b) { return { lines: b.lines.map((l) => ({ id: l.id, text: 'de ' + l.text })) }; } };";
+        app.install(&json!({"id": "jobs", "name": "Jobs", "version": "1.0.0"}), source, None).unwrap();
+        let body = json!({"to": "de", "lines": [{"id": "1", "text": "Hello there"}]}).to_string();
+        let (status, answer) = app.translate("jobs", &body).unwrap();
+        assert_eq!(status, 202);
+        let job = answer["job"].as_str().unwrap().to_string();
+        for _ in 0..200 {
+            if app.translation("jobs", &job).unwrap()["state"] == "done" {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let done = app.translation("jobs", &job).unwrap();
+        assert_eq!(done["lines"], json!([{"id": "1", "text": "de Hello there"}]));
+        let key = ("jobs".to_string(), job.clone());
+        // An hour on, a read of any job takes it away; its result still answers, from disk.
+        app.jobs.0.lock().unwrap().jobs.get_mut(&key).unwrap().ended = Instant::now().checked_sub(JOB_TTL + Duration::from_secs(1));
+        let _ = app.translation("jobs", "0123456789abcdef0123456789abcdef");
+        assert!(!app.jobs.0.lock().unwrap().jobs.contains_key(&key));
+        assert_eq!(app.translation("jobs", &job).unwrap(), done);
+        // Past MAX_ENDED ended jobs, the oldest go.
+        {
+            let mut queues = app.jobs.0.lock().unwrap();
+            for n in 0..MAX_ENDED + 8 {
+                let ended = Instant::now().checked_sub(Duration::from_secs(n as u64));
+                queues.jobs.insert(("jobs".to_string(), format!("{n:032x}")), Job { state: "done", done: 1, total: 1, error: None, ended, request: None });
+            }
+        }
+        let _ = app.translation("jobs", &job);
+        let queues = app.jobs.0.lock().unwrap();
+        assert_eq!(queues.jobs.len(), MAX_ENDED);
+        assert!(queues.jobs.contains_key(&("jobs".to_string(), format!("{:032x}", 0))) && !queues.jobs.contains_key(&("jobs".to_string(), format!("{:032x}", MAX_ENDED))));
+        assert!(queues.jobs.values().all(|job| job.request.is_none()), "an ended job keeps no lines");
+        drop(queues);
+        let _ = std::fs::remove_dir_all(&data);
     }
 }

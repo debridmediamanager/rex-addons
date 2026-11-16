@@ -711,7 +711,7 @@ impl App {
     /// snapshot or, for a partial answer, upserts and then removals. The items and held titles
     /// rex has afterwards, and whether every title was sent.
     fn run_sync(self: &Arc<Self>, id: &str, force: bool, reason: &str, run: &mut Run) -> Result<(usize, usize, bool), String> {
-        let (manifest, source, config, storage, deleted, last_sync, provides) = {
+        let (manifest, source, config, storage, deleted, last_sync, provides, titled) = {
             let mut addons = self.addons.lock().unwrap();
             let a = addons.get_mut(id).ok_or("removed")?;
             if !a.signed_in() {
@@ -723,7 +723,7 @@ impl App {
             let probes_due = self.prober.bin.is_some() && a.held_ids.iter().any(|h| !probe_waits(a.probe_failures.get(h), interval, now()));
             let due = std::mem::take(&mut a.full_due);
             run.full = force || due || a.last_sync.is_none() || now() >= a.last_full.saturating_add(FULL_EVERY) || probes_due;
-            (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone(), a.deleted.clone(), a.last_sync.and(a.since), a.provides.clone())
+            (a.manifest.clone(), a.source.clone(), a.config.clone(), a.storage.clone(), a.deleted.clone(), a.last_sync.and(a.since), a.provides.clone(), !a.paths.is_empty())
         };
         if let Some(label) = manifest.missing(&config).first() {
             return Err(format!("set {label} first"));
@@ -731,6 +731,19 @@ impl App {
         // No titles to list: its sync only tells rex where to ask it for subtitles, on the
         // schedule and retries a sync has, so rex finds it once rex answers.
         if !provides.iter().any(|g| g == "content") {
+            // Updated from a version with titles: nothing plays them now, so rex forgets them, with
+            // the two-step delete a removal uses, and so does the index. Once: then it has none.
+            if titled {
+                let removed = self.delete_source(id)?;
+                log(id, &format!("has no titles now: rex removed its {removed}"));
+                let mut addons = self.addons.lock().unwrap();
+                let addon = addons.get_mut(id).ok_or("removed")?;
+                addon.paths.clear();
+                addon.held_ids.clear();
+                addon.probes.clear();
+                addon.probe_failures.clear();
+                save_bookkeeping(self, addon);
+            }
             self.register(id, &manifest, &provides)?;
             return Ok((0, 0, true));
         }

@@ -15,7 +15,7 @@ use crate::app::App;
 /// Each request rex was sent: its path and body.
 type Sent = Arc<Mutex<Vec<(String, Json)>>>;
 
-/// A rex that takes every registration and snapshot.
+/// A rex that takes every registration and snapshot, and removes a source in its two steps.
 fn rex() -> (String, Sent) {
     let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
     let url = format!("http://{}", server.server_addr().to_ip().unwrap());
@@ -25,8 +25,14 @@ fn rex() -> (String, Sent) {
         for mut request in server.incoming_requests() {
             let mut body = String::new();
             let _ = request.as_reader().read_to_string(&mut body);
-            recorded.lock().unwrap().push((request.url().to_string(), serde_json::from_str(&body).unwrap_or(Json::Null)));
-            let _ = request.respond(tiny_http::Response::from_string("{}"));
+            let url = request.url().to_string();
+            recorded.lock().unwrap().push((format!("{} {url}", request.method()).replace("GET ", "").replace("PUT ", "").replace("POST ", ""), serde_json::from_str(&body).unwrap_or(Json::Null)));
+            let answer = match (request.method(), url.contains("confirm")) {
+                (tiny_http::Method::Delete, false) => json!({"confirm": format!("{url}?confirm=yes")}),
+                (tiny_http::Method::Delete, true) => json!({"removed": 1}),
+                _ => json!({}),
+            };
+            let _ = request.respond(tiny_http::Response::from_string(answer.to_string()));
         }
     });
     (url, sent)
@@ -476,4 +482,28 @@ fn answers_from_before_a_change_are_not_kept() {
     let _ = during(&|| { app.remove("slow").unwrap(); });
     assert!(!folder.exists(), "{:?}", std::fs::read_dir(&folder).map(|d| d.flatten().map(|e| e.path()).collect::<Vec<_>>()));
     let _ = std::fs::remove_dir_all(&app.data);
+}
+
+/// An addon updated from titles to subtitles only: rex forgets its titles, which nothing could
+/// play any more, with the two-step delete a removal uses, once; then it registers for subtitles.
+#[test]
+fn an_update_to_subtitles_only_takes_its_titles_out_of_rex() {
+    let (rex, sent) = rex();
+    let data = data("to-subtitles");
+    let app = App::new(data.clone(), rex, "127.0.0.1:9".parse().unwrap(), None, None);
+    app.install(&manifest("films"), "export default { items() { return [{id: 'a', path: 'films/a.mp4'}]; }, open() {} };", None).unwrap();
+    assert!(app.start_sync("films", true, "install"));
+    idle(&app, "films");
+    assert!(!app.addons.lock().unwrap()["films"].paths.is_empty());
+    app.install(&json!({"id": "films", "name": "films", "version": "1.0.1"}), "export default { subtitles() { return []; }, subtitle() {} };", None).unwrap();
+    sent.lock().unwrap().clear();
+    for _ in 0..2 {
+        assert!(app.start_sync("films", false, "install"));
+        assert_eq!(idle(&app, "films")["error"], Json::Null);
+    }
+    let urls: Vec<String> = sent.lock().unwrap().iter().map(|(url, _)| url.clone()).collect();
+    assert_eq!(urls, ["DELETE /rex/sources/addon-films", "DELETE /rex/sources/addon-films?confirm=yes", "/rex/sources/addon-films", "/rex/sources/addon-films"]);
+    assert!(app.addons.lock().unwrap()["films"].paths.is_empty());
+    assert_eq!(app.status("films").unwrap()["items"], 0);
+    let _ = std::fs::remove_dir_all(&data);
 }

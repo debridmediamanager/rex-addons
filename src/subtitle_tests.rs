@@ -533,7 +533,7 @@ fn translations_waiting_for_an_addon_are_bounded() {
     }
     assert_eq!(app.translate("busy", &ask(16)).unwrap_err(), (429, "16 translations wait for this addon already: ask again once one is done".to_string()));
     assert_eq!(app.translate("busy", &ask(3)).unwrap().0, 202);
-    // Disabled, what waits fails at once.
-    app.set_enabled("busy", false).unwrap();
+    // Removed, what waits fails at once, and nothing it finishes is kept in a folder it no longer has.
+    app.remove("busy").unwrap();
     let _ = std::fs::remove_dir_all(&app.data);
 }

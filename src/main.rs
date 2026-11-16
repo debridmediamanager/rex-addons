@@ -21,6 +21,7 @@ mod sign_in_tests;
 mod spotify_addon_tests;
 #[cfg(test)]
 mod subtitle_tests;
+mod subtitles;
 #[cfg(test)]
 mod youtube_tests;
 

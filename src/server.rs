@@ -52,13 +52,16 @@ fn handle(app: &Arc<App>, mut request: Request, token: Option<&str>) {
     let peer = request.remote_addr().map(|addr| addr.ip());
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or_default().to_string();
-    if let Some(rest) = path.strip_prefix("/bytes/") {
+    if path.starts_with("/bytes/") || path.starts_with("/subtitles/") {
         // rex reads these; like rex's own feed, only from this device or a private network.
         if !peer.is_some_and(net::is_private) {
-            let _ = request.respond(error(403, "only rex on a private network reads bytes here"));
+            let _ = request.respond(error(403, "only rex on a private network reads bytes and subtitles here"));
             return;
         }
-        return bytes(app, request, rest);
+        return match path.strip_prefix("/bytes/") {
+            Some(rest) => bytes(app, request, rest),
+            None => subtitles(app, request, &url),
+        };
     }
     if !path.starts_with("/api/") && !path.starts_with("/relay/") {
         let _ = request.respond(error(404, "not found"));
@@ -256,6 +259,29 @@ fn bytes(app: &Arc<App>, request: Request, rest: &str) {
             let _ = request.respond(error(405, "GET, HEAD or DELETE"));
         }
     }
+}
+
+/// `/subtitles/{addon}/search?...` and `/subtitles/{addon}/file/{candidate}?...`: what rex asks an
+/// addon for subtitles, answered as JSON, or a file as its text with its format in
+/// `X-Subtitle-Format`. Errors are `{"error"}`.
+fn subtitles(app: &Arc<App>, request: Request, url: &str) {
+    let (path, query) = url.split_once('?').unwrap_or((url, ""));
+    let rest = path.strip_prefix("/subtitles/").unwrap_or_default();
+    let (id, what) = rest.split_once('/').unwrap_or((rest, ""));
+    let response = match (request.method(), what) {
+        (Method::Get, "search") => app.subtitle_search(id, query).map(|answer| json_response(200, answer)),
+        (Method::Get, file) if file.starts_with("file/") => {
+            // The id as the addon gave it: an encoded `/` in it is part of it.
+            let candidate = percent_encoding::percent_decode_str(&file["file/".len()..]).decode_utf8_lossy().into_owned();
+            app.subtitle_file(id, &candidate, query).map(|subtitle| {
+                Response::from_string(subtitle.text)
+                    .with_header(header("Content-Type", "text/plain; charset=utf-8"))
+                    .with_header(header("X-Subtitle-Format", subtitle.format))
+            })
+        }
+        _ => Err((404, "not found".to_string())),
+    };
+    let _ = request.respond(response.unwrap_or_else(|(status, message)| error(status, &message)));
 }
 
 /// Relays a link with the client's Range, through the addon's sandboxed client. With

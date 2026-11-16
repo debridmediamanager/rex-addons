@@ -26,6 +26,9 @@ pub struct Limits {
 
 pub const ITEMS: Limits = Limits { memory: 64 << 20, cpu: Duration::from_secs(30), wall: Duration::from_secs(20 * 60) };
 pub const OPEN: Limits = Limits { memory: 64 << 20, cpu: Duration::from_secs(10), wall: Duration::from_secs(90) };
+/// A subtitle search answers a dialog someone is looking at: one slow website must not hold it,
+/// so the whole call, its fetches included, ends at `wall`.
+pub const SUBTITLES: Limits = Limits { memory: 64 << 20, cpu: Duration::from_secs(5), wall: Duration::from_secs(8) };
 
 /// A fetched body is read up to this; more is an error the addon sees.
 const MAX_BODY: u64 = 16 << 20;

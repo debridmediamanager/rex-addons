@@ -269,7 +269,7 @@ pub struct Repos {
 /// whether that repository still offers it.
 type Installed = (String, Option<String>, Vec<String>, bool);
 
-fn dir(app: &App, id: &str) -> PathBuf {
+pub(crate) fn dir(app: &App, id: &str) -> PathBuf {
     app.data.join("addons").join(id)
 }
 
@@ -412,6 +412,7 @@ impl App {
                 addon.manifest = Arc::new(manifest);
                 addon.source = Arc::new(source.to_string());
                 addon.provides = provides;
+                forget_answers(self, &id);
                 addon.opened.clear();
                 addon.opening.clear();
                 addon.last_sync = None;
@@ -1045,7 +1046,8 @@ impl App {
         remember_secrets(addon);
         write_atomic(&dir(self, id).join("config.json"), Json::Object(addon.config.clone()).to_string().as_bytes())
             .map_err(|e| e.to_string())?;
-        // Nothing opened with the old settings is served again, not even an open() still running.
+        // Nothing opened or found with the old settings is served again, not even an open() still running.
+        forget_answers(self, id);
         addon.opened.clear();
         addon.opening.clear();
         clear_probe_failures(self, addon);
@@ -1406,7 +1408,7 @@ pub fn call_ctx(manifest: &Manifest, config: &Map<String, Json>) -> Json {
     })
 }
 
-fn first_line(text: &str) -> String {
+pub(crate) fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or_default().to_string()
 }
 
@@ -1907,6 +1909,11 @@ fn load(path: &Path) -> Result<Addon, String> {
     // An error saved by an older host may still hold a secret.
     let error = addon.error.as_deref().map(|error| masked(&addon.manifest.id, error));
     Ok(Addon { error, ..addon })
+}
+
+/// The subtitles found, fetched and translated with an addon's old settings or version.
+fn forget_answers(app: &App, id: &str) {
+    let _ = std::fs::remove_dir_all(dir(app, id).join("cache"));
 }
 
 fn save_state(app: &App, addon: &Addon) {

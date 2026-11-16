@@ -284,7 +284,9 @@ fn unzip(bytes: &[u8], name: Option<&str>, episode: Option<(u64, u64)>) -> Resul
     let split = |e: &Entry| e.name.rsplit_once('.').map(|(stem, ext)| (stem.to_string(), ext.to_ascii_lowercase())).unwrap_or_default();
     // A .sub beside an .idx of its name is VobSub: pictures, not text.
     let vobsub = |e: &Entry| split(e).1 == "sub" && entries.iter().any(|other| split(other) == (split(e).0, "idx".to_string()));
-    let subtitles: Vec<&Entry> = entries.iter().filter(|e| FORMATS.contains(&split(e).1.as_str()) && !vobsub(e)).collect();
+    // A Mac's AppleDouble files (`__MACOSX/`, `._<name>`) carry a file's attributes, not its text.
+    let apple = |e: &Entry| e.name.starts_with("__MACOSX/") || base(e).starts_with("._");
+    let subtitles: Vec<&Entry> = entries.iter().filter(|e| FORMATS.contains(&split(e).1.as_str()) && !vobsub(e) && !apple(e)).collect();
     if subtitles.is_empty() {
         return Err(match entries.iter().any(|e| matches!(split(e).1.as_str(), "zip" | "rar" | "7z")) {
             true => "the ZIP holds no subtitle, only another archive, which rex-addons doesn't open".into(),
@@ -1045,6 +1047,18 @@ mod tests {
         });
         for one in fetched {
             assert_eq!(one.unwrap(), b"1\n00:00:01,000 --> 00:00:02,000\nHi\n");
+        }
+    }
+
+    /// An archive packed on a Mac (macOS's own `ditto -c -k --sequesterRsrc`, a file with an
+    /// extended attribute) holds an AppleDouble `__MACOSX/._<name>` beside each file: no subtitle,
+    /// so a film's archive with an episode asked is still its one subtitle.
+    #[test]
+    fn a_macs_appledouble_files_are_no_subtitles() {
+        let zip = fixture("macos-ditto.FABRICATED.zip");
+        for episode in [None, Some((1, 2))] {
+            let subtitle = subtitle_of(&zip, None, episode, None).unwrap();
+            assert_eq!((subtitle.format, subtitle.text.lines().nth(2)), ("srt", Some("(chattering)")), "{episode:?}");
         }
     }
 }

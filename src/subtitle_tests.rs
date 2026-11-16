@@ -311,3 +311,82 @@ fn a_search_ends_at_its_deadline() {
     assert!(!app.data.join("addons/subs/cache/search").exists());
     let _ = std::fs::remove_dir_all(&app.data);
 }
+
+fn post(addr: SocketAddr, path: &str, kind: &str, body: &str) -> (u16, Json) {
+    let response = match ureq::post(&format!("http://{addr}{path}")).set("Content-Type", kind).send_string(body) {
+        Ok(response) | Err(ureq::Error::Status(_, response)) => response,
+        Err(error) => panic!("{path}: {error}"),
+    };
+    (response.status(), serde_json::from_str(&response.into_string().unwrap()).unwrap())
+}
+
+/// A translation through the byte server: a JSON body, checked; a job polled until it's done,
+/// one job of an addon at a time, the same lines asked for meanwhile joining their job, and
+/// asked for again once done, answered from disk at once.
+#[test]
+fn a_translation_is_a_job_polled_until_done_one_at_a_time() {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let addr = server.server_addr().to_ip().unwrap();
+    let app = App::new(data("translate"), "http://127.0.0.1:9".into(), addr, None, None);
+    // Each call takes a moment and says when it ran; its Myanmar is the id after a word.
+    let source = "export default { translate(b) {
+        console.log('start ' + Date.now()); const end = Date.now() + 300; while (Date.now() < end); console.log('end ' + Date.now());
+        return { lines: b.lines.map((l) => ({ id: l.id, text: 'မြန်မာ ' + l.id })) }; } };";
+    app.install(&manifest("trans"), source, None).unwrap();
+    app.install(&manifest("finds"), "export default { subtitles() { return []; }, subtitle() {} };", None).unwrap();
+    let serving = app.clone();
+    std::thread::spawn(move || crate::server::serve(serving, server, None));
+    let ask = |ids: &[&str]| json!({"from": "en", "to": "my", "title": "His Girl Friday", "lines": ids.iter().map(|id| json!({"id": id, "text": format!("line {id}\nsecond row")})).collect::<Vec<_>>()}).to_string();
+    let json = "application/json";
+
+    assert_eq!(post(addr, "/subtitles/trans/translate", "text/plain", &ask(&["1"])).0, 415);
+    assert_eq!(post(addr, "/subtitles/trans/translate", json, &ask(&["1", "1"])), (400, json!({"error": "line 1 is given twice"})));
+    let huge = json!({"to": "my", "lines": [{"id": "1", "text": "x".repeat(3 << 20)}]}).to_string();
+    assert_eq!(post(addr, "/subtitles/trans/translate", json, &huge).0, 413);
+    assert_eq!(post(addr, "/subtitles/finds/translate", json, &ask(&["1"])), (404, json!({"error": "finds translates nothing: its main.js exports no translate()"})));
+
+    let (status, first) = post(addr, "/subtitles/trans/translate", json, &ask(&["1", "2", "3"]));
+    assert_eq!(status, 202, "{first}");
+    let (status, second) = post(addr, "/subtitles/trans/translate", json, &ask(&["4"]));
+    assert_eq!(status, 202, "{second}");
+    assert_ne!(first["job"], second["job"]);
+    assert_eq!(post(addr, "/subtitles/trans/translate", json, &ask(&["1", "2", "3"])), (202, first.clone()));
+    let poll = |job: &Json| -> Json {
+        let (_, body, _) = get(addr, &format!("/subtitles/trans/translate/{}", job["job"].as_str().unwrap()));
+        serde_json::from_str(&body).unwrap()
+    };
+    let waiting = poll(&second);
+    assert_eq!((&waiting["state"], &waiting["done"], &waiting["total"]), (&json!("queued"), &json!(0), &json!(1)), "{waiting}");
+    let until_done = |job: &Json| {
+        for _ in 0..200 {
+            let answer = poll(job);
+            if answer["state"] != "queued" && answer["state"] != "running" {
+                return answer;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!("{job} never ended");
+    };
+    let done = until_done(&first);
+    assert_eq!(done, json!({"job": first["job"], "state": "done", "done": 3, "total": 3, "kept": [],
+        "lines": [{"id": "1", "text": "မြန်မာ 1"}, {"id": "2", "text": "မြန်မာ 2"}, {"id": "3", "text": "မြန်မာ 3"}]}));
+    assert_eq!(until_done(&second)["lines"], json!([{"id": "4", "text": "မြန်မာ 4"}]));
+    // One call at a time: each began after the one before it ended.
+    let ran: Vec<u64> = crate::app::LOGGED.lock().unwrap().iter().filter_map(|line| line.strip_prefix("[addon trans] ")?.split(' ').nth(1)?.parse().ok()).collect();
+    assert_eq!(ran.len(), 4, "{ran:?}");
+    assert!(ran.windows(2).all(|pair| pair[0] <= pair[1]), "calls overlapped: {ran:?}");
+
+    // Done: the same lines answer at once, from disk, also once the job is forgotten.
+    let started = Instant::now();
+    assert_eq!(post(addr, "/subtitles/trans/translate", json, &ask(&["1", "2", "3"])), (200, done.clone()));
+    assert!(started.elapsed() < Duration::from_millis(250));
+    app.jobs.forget("trans");
+    assert_eq!(poll(&first), done);
+    for job in ["0123456789abcdef0123456789abcdef", "..%2F..%2Fstate"] {
+        let (status, body, _) = get(addr, &format!("/subtitles/trans/translate/{job}"));
+        assert_eq!((status, error_of(&body)), (404, "no such translation: it ended over an hour ago, or never began".to_string()));
+    }
+    app.set_enabled("trans", false).unwrap();
+    assert_eq!(post(addr, "/subtitles/trans/translate", json, &ask(&["5"])), (409, json!({"error": "the addon is disabled"})));
+    let _ = std::fs::remove_dir_all(&app.data);
+}

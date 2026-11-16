@@ -253,6 +253,7 @@ pub struct App {
     pub prober: Arc<Prober>,
     pub addons: Mutex<BTreeMap<String, Addon>>,
     pub repos: Mutex<Repos>,
+    pub jobs: crate::translations::Jobs,
 }
 
 /// The repositories added, and every `--default-repo` ever added, so one a person removed
@@ -293,6 +294,7 @@ impl App {
             listen,
             addons: Mutex::default(),
             repos: Mutex::new(repos),
+            jobs: Default::default(),
         });
         let entries = std::fs::read_dir(app.data.join("addons")).into_iter().flatten().flatten();
         for entry in entries {
@@ -1914,6 +1916,7 @@ fn load(path: &Path) -> Result<Addon, String> {
 /// The subtitles found, fetched and translated with an addon's old settings or version.
 fn forget_answers(app: &App, id: &str) {
     let _ = std::fs::remove_dir_all(dir(app, id).join("cache"));
+    app.jobs.forget(id);
 }
 
 fn save_state(app: &App, addon: &Addon) {

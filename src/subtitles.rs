@@ -285,7 +285,7 @@ fn unzip(bytes: &[u8], name: Option<&str>, episode: Option<(u64, u64)>) -> Resul
         });
     }
     // The first of the largest.
-    fn largest<'a>(list: Vec<&'a Entry>) -> Option<&'a Entry> {
+    fn largest(list: Vec<&Entry>) -> Option<&Entry> {
         list.into_iter().rev().max_by_key(|e| e.size)
     }
     let chosen = match (name, episode) {
@@ -377,7 +377,7 @@ const WINDOWS_1252: [u16; 128] = [
 /// a script of its own that isn't mostly in it is refused rather than served as gibberish.
 pub fn decode(bytes: &[u8], lang: Option<&str>) -> Result<String, String> {
     let utf16 = |bytes: &[u8], big: bool| -> String {
-        let units = bytes.chunks_exact(2).map(|pair| if big { u16::from_be_bytes([pair[0], pair[1]]) } else { u16::from_le_bytes([pair[0], pair[1]]) });
+        let units = bytes.as_chunks::<2>().0.iter().map(|&pair| if big { u16::from_be_bytes(pair) } else { u16::from_le_bytes(pair) });
         char::decode_utf16(units).map(|c| c.unwrap_or('\u{fffd}')).collect()
     };
     if let Some(rest) = bytes.strip_prefix(b"\xef\xbb\xbf") {
@@ -448,6 +448,7 @@ const HAN: Script = ("Han", &['\u{3400}'..='\u{4DBF}', '\u{4E00}'..='\u{9FFF}', 
 
 /// The script a language is written in, when it has one of its own: none for Latin ones, nor for
 /// one written in several (Serbian) unless its code names one (`sr-Cyrl`).
+#[allow(clippy::single_range_in_vec_init)]
 pub fn script(lang: &str) -> Option<Script> {
     let mut parts = lang.split('-');
     let primary = parts.next()?;

@@ -261,14 +261,16 @@ fn bytes(app: &Arc<App>, request: Request, rest: &str) {
     }
 }
 
-/// `/subtitles/{addon}/search?...` and `/subtitles/{addon}/file/{candidate}?...`: what rex asks an
-/// addon for subtitles, answered as JSON, or a file as its text with its format in
-/// `X-Subtitle-Format`. Errors are `{"error"}`.
-fn subtitles(app: &Arc<App>, request: Request, url: &str) {
+/// `/subtitles/{addon}/search?...`, `/subtitles/{addon}/file/{candidate}?...`, `POST
+/// /subtitles/{addon}/translate` and `/subtitles/{addon}/translate/{job}`: what rex asks an addon
+/// for subtitles, answered as JSON, or a file as its text with its format in `X-Subtitle-Format`.
+/// Errors are `{"error"}`.
+fn subtitles(app: &Arc<App>, mut request: Request, url: &str) {
     let (path, query) = url.split_once('?').unwrap_or((url, ""));
     let rest = path.strip_prefix("/subtitles/").unwrap_or_default();
     let (id, what) = rest.split_once('/').unwrap_or((rest, ""));
-    let response = match (request.method(), what) {
+    let method = request.method().clone();
+    let response = match (method, what) {
         (Method::Get, "search") => app.subtitle_search(id, query).map(|answer| json_response(200, answer)),
         (Method::Get, file) if file.starts_with("file/") => {
             // The id as the addon gave it: an encoded `/` in it is part of it.
@@ -279,9 +281,26 @@ fn subtitles(app: &Arc<App>, request: Request, url: &str) {
                     .with_header(header("X-Subtitle-Format", subtitle.format))
             })
         }
+        (Method::Post, "translate") => json_body(&mut request).and_then(|body| app.translate(id, &body)).map(|(status, answer)| json_response(status, answer)),
+        (Method::Get, job) if job.starts_with("translate/") => app.translation(id, &job["translate/".len()..]).map(|answer| json_response(200, answer)),
         _ => Err((404, "not found".to_string())),
     };
     let _ = request.respond(response.unwrap_or_else(|(status, message)| error(status, &message)));
+}
+
+/// A translation's body. JSON only: a web page can't send that to another site without asking it
+/// first, so a page open in the person's browser can't spend their translation account.
+fn json_body(request: &mut Request) -> Result<String, (u16, String)> {
+    let json = request.headers().iter().any(|h| h.field.equiv("Content-Type") && h.value.as_str().to_ascii_lowercase().starts_with("application/json"));
+    if !json {
+        return Err((415, "send the body as Content-Type: application/json".into()));
+    }
+    let mut body = String::new();
+    request.as_reader().take(crate::translations::MAX_REQUEST + 1).read_to_string(&mut body).map_err(|_| (400, "the body is not UTF-8".to_string()))?;
+    if body.len() as u64 > crate::translations::MAX_REQUEST {
+        return Err((413, format!("a translation is at most {} MB of JSON", crate::translations::MAX_REQUEST >> 20)));
+    }
+    Ok(body)
 }
 
 /// Relays a link with the client's Range, through the addon's sandboxed client. With

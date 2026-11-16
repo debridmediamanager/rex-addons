@@ -29,6 +29,8 @@ pub const OPEN: Limits = Limits { memory: 64 << 20, cpu: Duration::from_secs(10)
 /// A subtitle search answers a dialog someone is looking at: one slow website must not hold it,
 /// so the whole call, its fetches included, ends at `wall`.
 pub const SUBTITLES: Limits = Limits { memory: 64 << 20, cpu: Duration::from_secs(5), wall: Duration::from_secs(8) };
+/// Each `translate()` call, one batch of lines: `open()`'s, as an LLM can take a minute over one.
+pub const TRANSLATE: Limits = Limits { memory: 64 << 20, cpu: Duration::from_secs(10), wall: Duration::from_secs(90) };
 
 /// A fetched body is read up to this; more is an error the addon sees.
 const MAX_BODY: u64 = 16 << 20;

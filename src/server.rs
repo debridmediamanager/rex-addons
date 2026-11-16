@@ -48,6 +48,24 @@ fn host_is_ours(request: &Request, listen: std::net::SocketAddr) -> bool {
     [format!("127.0.0.1:{port}"), format!("localhost:{port}"), format!("[::1]:{port}"), listen.to_string()].contains(&host)
 }
 
+/// A `Host` that is an address or `localhost`, or none: DNS rebinding needs a name of its own.
+/// rex reaches the subtitle paths at the address it registered with, on this device or the network.
+fn host_is_an_address(request: &Request) -> bool {
+    let Some(host) = request.headers().iter().find(|h| h.field.equiv("Host")) else { return true };
+    let host = host.value.as_str();
+    let name = match host.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    };
+    name.parse::<std::net::IpAddr>().is_ok() || name.eq_ignore_ascii_case("localhost")
+}
+
+/// A request a web page made (an `<img>`, a fetch): browsers say so in `Origin` or
+/// `Sec-Fetch-Site`, which rex never sends; `none` is a person typing the address.
+fn from_a_page(request: &Request) -> bool {
+    request.headers().iter().any(|h| h.field.equiv("Origin") || (h.field.equiv("Sec-Fetch-Site") && !h.value.as_str().eq_ignore_ascii_case("none")))
+}
+
 fn handle(app: &Arc<App>, mut request: Request, token: Option<&str>) {
     let peer = request.remote_addr().map(|addr| addr.ip());
     let url = request.url().to_string();
@@ -60,6 +78,10 @@ fn handle(app: &Arc<App>, mut request: Request, token: Option<&str>) {
         }
         return match path.strip_prefix("/bytes/") {
             Some(rest) => bytes(app, request, rest),
+            // A subtitle path spends the person's quota at a website, or their translation account.
+            None if !host_is_an_address(&request) || from_a_page(&request) => {
+                let _ = request.respond(error(403, "only rex reads subtitles here, by an address, never a web page"));
+            }
             None => subtitles(app, request, &url),
         };
     }
@@ -288,8 +310,9 @@ fn subtitles(app: &Arc<App>, mut request: Request, url: &str) {
     let _ = request.respond(response.unwrap_or_else(|(status, message)| error(status, &message)));
 }
 
-/// A translation's body. JSON only: a web page can't send that to another site without asking it
-/// first, so a page open in the person's browser can't spend their translation account.
+/// A translation's body, JSON only: a web page can't send that to another site without asking it
+/// first. With the Host and page checks before it, a page in the person's browser can't spend
+/// their translation account, through DNS rebinding or not.
 fn json_body(request: &mut Request) -> Result<String, (u16, String)> {
     let json = request.headers().iter().any(|h| h.field.equiv("Content-Type") && h.value.as_str().to_ascii_lowercase().starts_with("application/json"));
     if !json {

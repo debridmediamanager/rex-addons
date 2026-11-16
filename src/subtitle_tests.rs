@@ -387,3 +387,45 @@ fn a_translation_is_a_job_polled_until_done_one_at_a_time() {
     assert_eq!(post(addr, "/subtitles/trans/translate", json, &ask(&["5"])), (409, json!({"error": "the addon is disabled"})));
     let _ = std::fs::remove_dir_all(&app.data);
 }
+
+/// rex-addons on loopback with `source` installed as `id`, nothing else.
+fn serve_one(name: &str, id: &str, source: &str) -> (Arc<App>, SocketAddr) {
+    let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+    let addr = server.server_addr().to_ip().unwrap();
+    let app = App::new(data(name), "http://127.0.0.1:9".into(), addr, None, None);
+    app.install(&manifest(id), source, None).unwrap();
+    let serving = app.clone();
+    std::thread::spawn(move || crate::server::serve(serving, server, None));
+    (app, addr)
+}
+
+/// A web page never reaches the subtitle paths: not through DNS rebinding (a Host that is a
+/// name, not an address), nor straight from the page (`<img>`, fetch), which browsers mark with
+/// `Sec-Fetch-Site` or `Origin`. rex, on this device or the network, names an address.
+#[test]
+fn web_pages_cannot_ask_for_subtitles() {
+    let (app, addr) = serve_one("pages", "finds", "export default { subtitles() { return [{id: 'a', lang: 'en'}]; }, subtitle() { return { text: '' }; } };");
+    let path = format!("http://{addr}/subtitles/finds/search?type=movie&imdb=tt0032599");
+    let asked = |headers: &[(&str, &str)]| {
+        let request = headers.iter().fold(ureq::get(&path), |request, (name, value)| request.set(name, value));
+        match request.call() {
+            Ok(response) | Err(ureq::Error::Status(_, response)) => response.status(),
+            Err(error) => panic!("{error}"),
+        }
+    };
+    let port = addr.port();
+    for host in [format!("127.0.0.1:{port}"), format!("localhost:{port}"), "192.168.1.20:32410".into(), "[fd00::5]:32410".into()] {
+        assert_eq!(asked(&[("Host", &host)]), 200, "{host}");
+    }
+    assert_eq!(asked(&[("Sec-Fetch-Site", "none")]), 200, "a person typing the address");
+    for headers in [
+        vec![("Host", format!("evil.example:{port}"))],
+        vec![("Host", "nas.local:32410".to_string())],
+        vec![("Sec-Fetch-Site", "cross-site".to_string())],
+        vec![("Origin", "https://evil.example".to_string())],
+    ] {
+        let headers: Vec<(&str, &str)> = headers.iter().map(|(n, v)| (*n, v.as_str())).collect();
+        assert_eq!(asked(&headers), 403, "{headers:?}");
+    }
+    let _ = std::fs::remove_dir_all(&app.data);
+}

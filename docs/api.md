@@ -274,7 +274,11 @@ that probe.
 
 What rex asks an addon that `provides` `subtitles` or `translate`
 ([subtitle addons](writing-addons.md#subtitle-addons)), at `http://<listen>/subtitles/<id>/...`. These
-answer this device and private networks only, as the byte paths do. Errors are `{"error": "..."}`:
+answer this device and private networks only, as the byte paths do, and never a web page: a
+`Host` that is a name rather than an address or `localhost` (DNS rebinding), and a request that
+carries `Origin` or a `Sec-Fetch-Site` other than `none` (a page's `<img>` or fetch), are `403`,
+as they could spend the person's quota at a website or their translation account. Errors are
+`{"error": "..."}`:
 `404` for an addon it doesn't know or one without that group (`Example subtitles translates nothing:
 its main.js exports no translate()`), `409` for one disabled, not signed in, with a required setting
 empty (`set API key first`) or waiting for an update, `400` for a question asked wrongly, `502` when
@@ -337,6 +341,7 @@ runs answer that job. Each addon runs one job at a time, the others waiting, at 
 
 `state` is `queued`, `running`, `done` or `error`; `done` counts the lines finished, a batch at a
 time. `lines` come in the order sent, by the same ids. `kept` lists lines that kept their own text
-(left out, or thrown on, 3 times) or the addon's in the wrong script (3 times), with why. A job answers for an
-hour after it ended; a done one, from disk, for 30 days. Nothing needs the client to stay
-connected: ask again whenever. `404` for a job it doesn't know.
+(left out, or thrown on, 3 times) or the addon's in the wrong script (3 times), with why; one
+that would keep more than half is an error instead, and kept nowhere. A job answers for an hour
+after it ended, at most 32 an addon; a done one, from disk, for 30 days. Nothing needs the client
+to stay connected: ask again whenever. `404` for a job it doesn't know.

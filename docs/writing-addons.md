@@ -738,14 +738,15 @@ Add `name`, a file name in an archive, when you know which one is right, and `se
 You return what the website gives; rex-addons does the rest, up to 16 MB of it:
 
 - **Archives.** A ZIP (stored or deflated) gives the file you named, else the one whose name says
-  the episode asked for (`S01E02`, `1x02`), else its one subtitle or its largest. A season's archive
+  the episode asked for (`S01E02`, `1x02`), else its one subtitle or its largest; a Mac's
+  `__MACOSX/` and `._` files are skipped. A season's archive
   without the episode asked for is refused rather than serve another episode's. So are RAR and 7z,
   encrypted files, paths out of the archive, an archive holding only other archives, and over
   16 MB unpacked. A gzip
   file is unpacked.
 - **Text.** UTF-8 (with a BOM or without), UTF-16, else an older Windows code page by the language
-  rex asked for: windows-1251 for Cyrillic languages, 1250 for Central European ones, 1252 for the
-  rest. One that comes out in the wrong script that way (a Greek or Arabic file in its own old
+  rex asked for (`ru`, `rus` and `ru-RU` alike): windows-1251 for Cyrillic languages, 1250 for
+  Central European ones, 1254 for Turkish and Azerbaijani, 1252 for the rest. One that comes out in the wrong script that way (a Greek or Arabic file in its own old
   encoding) is refused.
 - **Format.** SubRip, WebVTT, ASS, SSA or MicroDVD, from the text itself; anything else is refused.
 
@@ -772,15 +773,21 @@ rex-addons sends 100 lines a batch and checks every answer:
 - Ids not asked about are dropped. An answer that leaves one out, gives one twice or leaves one
   empty is not used at all: the batch is split in halves and each asked again, down to single
   lines, so a merged line never moves text to the wrong time.
+- Ids may come back as numbers (`1` for `"1"`). Keep a line's tags (`<i>`, `{\an8}`): they
+  count as no script's letters.
 - For a language with a script of its own (Myanmar, Thai, Arabic, Cyrillic, Hangul, Japanese,
   Chinese and more), a line whose letters are mostly not in that script is asked again on its own.
-  One that is its line unchanged (a name, `OK`) passes.
+- A line given back as it was passes only when its letters are all the target's (a name, into a
+  language written in Latin letters) or fewer than 3 (`OK`). A batch given back mostly as it was
+  is no translation, and is split like a failed one.
 - A call that throws is split the same way.
 - A line still left out, in the wrong script, or thrown on, after 3 tries is kept, untranslated or
   as you answered it, and listed in the job's `kept`.
-- 10 calls in a row that throw, or a line thrown on before any call worked, fail the whole
-  translation with your last message, so throw a clear one (`the API key was refused`). For a
-  `429`, `await sleep(...)` and ask again within the call's 90 s.
+- A call that gives no line worth keeping (it threw, or answered wrong ids, the wrong script or
+  the lines as given) counts as failed; once lines went through, one asked on its own doesn't.
+  10 failed in a row end the whole translation with your last message, so throw a clear one
+  (`the API key was refused`). For a `429`, `await sleep(...)` and ask again within the call's 90 s.
+- A translation that keeps more than half of its lines as they were fails too, and is not kept.
 
 One translation runs at a time for each addon, the next ones waiting. A finished one is kept for
 30 days, so the same lines are translated once.
@@ -1010,7 +1017,8 @@ only the schema).
 | `subtitles() took longer than 8 s`, `fetch: no time left, a call may take 8 s in all` | A search has 8 s in all. Ask the website for less, or one page |
 | `the ZIP holds no subtitle for S01E05` | A season's archive without that episode's file, by its name. Return `name` when you know which file it is |
 | `not UTF-8 or UTF-16, and not Greek text in windows-1252, ...` | The file is in an old encoding rex-addons doesn't read for that language. Look for a UTF-8 one |
-| `translate() failed 10 times in a row, last with: ...` | Your `translate()` threw, or didn't return `{lines: [...]}`, ten times running |
+| `translate() failed 10 times in a row, last with: ...` | Ten calls running gave no line worth keeping: your `translate()` threw, didn't return `{lines: [...]}`, or answered wrong ids, the wrong script or the lines as given |
+| `translate() answered too few lines usably: ...` | More than half of the lines were kept as they were ([translate()](#translatebatch-ctx)) |
 | `manifest: ...` | The manifest breaks a rule: the message says which ([manifest.json](#manifestjson)) |
 | `this addon needs rex-addons 0.5 or newer` | Its `host` is newer than this rex-addons |
 | `this addon needs an update: update <name> in its repository` | Its `sign_in` has a `kind` this rex-addons doesn't have, such as 0.8's `"spotify"` ([an older sign-in kind](#an-older-sign-in-kind)) |
